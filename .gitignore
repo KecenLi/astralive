@@ -30,6 +30,7 @@ coverage/
 data/cache/
 data/logs/
 data/sqlite/
+data/api-hold/
 *.db
 *.sqlite
 *.sqlite3

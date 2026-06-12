@@ -77,6 +77,66 @@ function Add-ProcessPathEntry {
     }
 }
 
+function Get-ProjectRoot {
+    return Split-Path -Parent $PSScriptRoot
+}
+
+function Get-ApiHoldPath {
+    param([string]$Provider = "vertex-ai")
+
+    return Join-Path (Join-Path (Get-ProjectRoot) "data\api-hold") "$Provider.json"
+}
+
+function Test-QuotaExhaustedText {
+    param([string]$Text)
+
+    return $Text -match "RESOURCE_EXHAUSTED" -or
+        $Text -match "Resource exhausted" -or
+        $Text -match "HTTP 429" -or
+        $Text -match '"code"\s*:\s*429'
+}
+
+function Set-ApiHold {
+    param(
+        [string]$Provider = "vertex-ai",
+        [string]$Reason = "API quota or rate limit was exhausted.",
+        [string]$Detail = "",
+        [string]$Command = ""
+    )
+
+    $HoldPath = Get-ApiHoldPath -Provider $Provider
+    New-Item -ItemType Directory -Path (Split-Path -Parent $HoldPath) -Force | Out-Null
+    [ordered]@{
+        provider = $Provider
+        reason = $Reason
+        detail = $Detail
+        command = $Command
+        created_at = (Get-Date).ToUniversalTime().ToString("o")
+        recovery = "Delete this local file after quota/rate limits recover, then rerun the verifier."
+    } | ConvertTo-Json -Depth 4 | Set-Content -Path $HoldPath -Encoding UTF8
+}
+
+function Assert-ApiHoldClear {
+    param([string]$Provider = "vertex-ai")
+
+    $HoldPath = Get-ApiHoldPath -Provider $Provider
+    if (-not (Test-Path $HoldPath)) {
+        return
+    }
+
+    $Reason = "API verification is paused because a previous run hit quota or rate limits."
+    try {
+        $Hold = Get-Content -Path $HoldPath -Raw | ConvertFrom-Json
+        if ($Hold.reason) {
+            $Reason = $Hold.reason
+        }
+    } catch {
+        # Keep the default reason if the local marker is not parseable.
+    }
+
+    throw "$Reason`nHold marker: $HoldPath`nDelete this local marker only after quota/rate limits recover."
+}
+
 function Import-DotEnvFile {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -173,6 +233,59 @@ function Invoke-CmdExecutable {
     }
     if ($Process.ExitCode -ne 0) {
         throw "$Executable failed with exit code $($Process.ExitCode)."
+    }
+}
+
+function Invoke-ApiCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Executable,
+        [string[]]$Arguments = @(),
+        [string]$Provider = "vertex-ai",
+        [string]$CommandName = "API verifier"
+    )
+
+    Assert-ApiHoldClear -Provider $Provider
+    Add-ProcessPathEntry -Path (Join-Path $env:ProgramFiles "nodejs")
+
+    $StdOut = Join-Path $env:TEMP "astralive_api_stdout_$([guid]::NewGuid().ToString('N')).log"
+    $StdErr = Join-Path $env:TEMP "astralive_api_stderr_$([guid]::NewGuid().ToString('N')).log"
+    try {
+        $Extension = [System.IO.Path]::GetExtension($Executable).ToLowerInvariant()
+        if ($Extension -in @(".cmd", ".bat")) {
+            $CommandLine = (ConvertTo-CmdArgument $Executable)
+            if ($Arguments.Count -gt 0) {
+                $CommandLine = "$CommandLine $((@($Arguments) | ForEach-Object { ConvertTo-CmdArgument $_ }) -join ' ')"
+            }
+            $Process = Start-Process -FilePath "cmd.exe" -ArgumentList @("/d", "/c", $CommandLine) -NoNewWindow -Wait -PassThru -RedirectStandardOutput $StdOut -RedirectStandardError $StdErr
+        } else {
+            $ArgumentLine = (@($Arguments) | ForEach-Object { ConvertTo-CmdArgument $_ }) -join " "
+            $Process = Start-Process -FilePath $Executable -ArgumentList $ArgumentLine -NoNewWindow -Wait -PassThru -RedirectStandardOutput $StdOut -RedirectStandardError $StdErr
+        }
+
+        $Output = if (Test-Path $StdOut) { Get-Content -Path $StdOut -Raw } else { "" }
+        $ErrorOutput = if (Test-Path $StdErr) { Get-Content -Path $StdErr -Raw } else { "" }
+        $Combined = "$Output`n$ErrorOutput"
+        if ($Output) {
+            Write-Host $Output.TrimEnd()
+        }
+        if ($ErrorOutput) {
+            Write-Error $ErrorOutput.TrimEnd() -ErrorAction Continue
+        }
+
+        if ($Process.ExitCode -ne 0) {
+            if (Test-QuotaExhaustedText -Text $Combined) {
+                Set-ApiHold -Provider $Provider -Reason "$Provider quota or rate limit was exhausted." -Detail $Combined -Command $CommandName
+            }
+            throw "$Executable failed with exit code $($Process.ExitCode)."
+        }
+
+        if (Test-QuotaExhaustedText -Text $Combined) {
+            Set-ApiHold -Provider $Provider -Reason "$Provider quota or rate limit was exhausted." -Detail $Combined -Command $CommandName
+            throw "$CommandName returned quota exhaustion output."
+        }
+    } finally {
+        Remove-Item -Path $StdOut, $StdErr -Force -ErrorAction SilentlyContinue
     }
 }
 

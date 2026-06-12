@@ -12,6 +12,7 @@ $ErrorActionPreference = "Stop"
 $env:PYTHONIOENCODING = "utf-8"
 $Root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "common.ps1")
+Assert-ApiHoldClear -Provider "vertex-ai"
 
 function Get-FreeTcpPort {
     $Listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
@@ -132,9 +133,9 @@ try {
         if (-not $SkipDependencySync) {
             Invoke-CmdExecutable -Executable $Uv -Arguments @("sync")
         }
-        Invoke-CmdExecutable -Executable $Uv -Arguments @("run", "python", $GenerateAudioScript)
+        Invoke-ApiCommand -Executable $Uv -Arguments @("run", "python", $GenerateAudioScript) -Provider "vertex-ai" -CommandName "Browser fake microphone audio generation"
     } elseif ($Python) {
-        Invoke-CmdExecutable -Executable $Python -Arguments @($GenerateAudioScript)
+        Invoke-ApiCommand -Executable $Python -Arguments @($GenerateAudioScript) -Provider "vertex-ai" -CommandName "Browser fake microphone audio generation"
     } else {
         throw "Python 3.11+ or uv is required to generate fake microphone audio."
     }
@@ -407,7 +408,7 @@ try {
         throw "Node.js is required for browser realtime microphone verification."
     }
 
-    Invoke-CmdExecutable -Executable $Node -Arguments @($CdpScript)
+    Invoke-ApiCommand -Executable $Node -Arguments @($CdpScript) -Provider "vertex-ai" -CommandName "Browser realtime microphone verification"
 } finally {
     if ($ChromeProcess -and -not $ChromeProcess.HasExited) {
         Stop-Process -Id $ChromeProcess.Id -Force -ErrorAction SilentlyContinue

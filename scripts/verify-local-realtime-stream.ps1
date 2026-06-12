@@ -9,6 +9,7 @@ $ErrorActionPreference = "Stop"
 $env:PYTHONIOENCODING = "utf-8"
 $Root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "common.ps1")
+Assert-ApiHoldClear -Provider "vertex-ai"
 
 $VerifyScript = @'
 import asyncio
@@ -190,9 +191,9 @@ try {
         if (-not $SkipDependencySync) {
             Invoke-CmdExecutable -Executable $Uv -Arguments @("sync")
         }
-        Invoke-CmdExecutable -Executable $Uv -Arguments @("run", "python", $TempScript)
+        Invoke-ApiCommand -Executable $Uv -Arguments @("run", "python", $TempScript) -Provider "vertex-ai" -CommandName "Local realtime stream verification"
     } elseif ($Python) {
-        Invoke-CmdExecutable -Executable $Python -Arguments @($TempScript)
+        Invoke-ApiCommand -Executable $Python -Arguments @($TempScript) -Provider "vertex-ai" -CommandName "Local realtime stream verification"
     } else {
         throw "Python 3.11+ or uv is required to verify the local realtime stream."
     }
