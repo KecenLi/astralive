@@ -12,6 +12,7 @@ import { assistantAudioPlayer } from "./features/media/pcmPlayer";
 import { shouldStopRealtimeAudioOnError } from "./features/realtime/serverErrorActions";
 import { API_BASE_URL } from "./lib/env";
 import {
+  AudioCapabilities,
   AssistantAudioPayload,
   AudioChunkPayload,
   AvatarStatePayload,
@@ -42,9 +43,15 @@ function speak(text: string) {
 
 function handleServerEvent(event: EventEnvelope<unknown>, effects: ServerEventEffects = {}) {
   const store = useAppStore.getState();
-  if (event.type === "server.session.state") {
-    const payload = event.payload as { status?: string };
+  if (event.type === "server.session.ready") {
+    const payload = event.payload as { status?: string; audio?: AudioCapabilities };
     if (payload.status) store.setStatus(payload.status);
+    if (payload.audio) store.setAudioCapabilities(payload.audio);
+  }
+  if (event.type === "server.session.state") {
+    const payload = event.payload as { status?: string; audio?: AudioCapabilities };
+    if (payload.status) store.setStatus(payload.status);
+    if (payload.audio) store.setAudioCapabilities(payload.audio);
   }
   if (event.type === "assistant.text.delta") {
     store.appendAssistantDelta((event.payload as { delta?: string }).delta ?? "");
@@ -124,11 +131,11 @@ export default function App() {
         const response = await fetch(`${API_BASE_URL}/api/session`, { method: "POST" });
         const session = await response.json();
         actions.setSession(session.session_id, session.wake_word ?? "阿斯塔");
+        cleanup = wsClient.onEvent((event) => handleServerEvent(event, { stopRealtimeAudio: stopClientAudio }));
         const socket = wsClient.connect(session.session_id);
         socket.onopen = () => useAppStore.getState().setConnection("connected");
         socket.onerror = () => useAppStore.getState().setConnection("error");
         socket.onclose = () => useAppStore.getState().setConnection("idle");
-        cleanup = wsClient.onEvent((event) => handleServerEvent(event, { stopRealtimeAudio: stopClientAudio }));
       } catch {
         actions.setConnection("error");
       }

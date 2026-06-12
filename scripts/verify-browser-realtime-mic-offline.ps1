@@ -333,6 +333,7 @@ const { setTimeout: sleep } = require("node:timers/promises");
 const DEBUG_PORT = Number(__DEBUG_PORT_JSON__);
 const WEB_URL = __WEB_URL_JSON__;
 const VERIFY_IDLE_TIMEOUT = Boolean(__VERIFY_IDLE_TIMEOUT_JSON__);
+const EXPECTED_IDLE_TIMEOUT_LABEL = __EXPECTED_IDLE_TIMEOUT_LABEL_JSON__;
 const TARGET_TIMEOUT_MS = 20000;
 const VERIFY_TIMEOUT_MS = 45000;
 
@@ -514,6 +515,23 @@ async function main() {
       return value?.found && !value.disabled ? value : null;
     }, TARGET_TIMEOUT_MS, "enabled realtime microphone button");
 
+    const debugAudio = await waitFor(async () => {
+      const result = await cdp.send("Runtime.evaluate", {
+        expression: `(() => {
+          const metrics = {};
+          for (const row of document.querySelectorAll(".debug-panel .metric-list div")) {
+            const key = row.querySelector("dt")?.textContent?.trim();
+            const value = row.querySelector("dd")?.textContent?.trim();
+            if (key) metrics[key] = value || "";
+          }
+          return metrics;
+        })()`,
+        returnByValue: true,
+      });
+      const value = result.result?.value || {};
+      return value.Realtime === "mock" && value["Idle timeout"] === EXPECTED_IDLE_TIMEOUT_LABEL ? value : null;
+    }, TARGET_TIMEOUT_MS, "debug audio capability metrics");
+
     if (VERIFY_IDLE_TIMEOUT) {
       await cdp.send("Runtime.evaluate", {
         expression: `(() => {
@@ -592,6 +610,7 @@ async function main() {
       }
 
       console.log(`web_url=${WEB_URL}`);
+      console.log(`debug_audio=${JSON.stringify(debugAudio)}`);
       console.log(`sent_audio_chunks=${sentAudioChunks}`);
       console.log(`sent_final_chunks=${sentFinalChunks}`);
       console.log(`received_error_code=${receivedErrorCode}`);
@@ -627,6 +646,7 @@ async function main() {
     }
 
     console.log(`web_url=${WEB_URL}`);
+    console.log(`debug_audio=${JSON.stringify(debugAudio)}`);
     console.log(`sent_audio_chunks=${sentAudioChunks}`);
     console.log(`sent_final_chunks=${sentFinalChunks}`);
     console.log(`asr_text=${asrText.slice(0, 160)}`);
@@ -647,6 +667,7 @@ main().catch((error) => {
     $NodeVerifier = $NodeVerifier.Replace("__DEBUG_PORT_JSON__", ($RemoteDebuggingPort | ConvertTo-Json -Compress))
     $NodeVerifier = $NodeVerifier.Replace("__WEB_URL_JSON__", ($WebUrl | ConvertTo-Json -Compress))
     $NodeVerifier = $NodeVerifier.Replace("__VERIFY_IDLE_TIMEOUT_JSON__", ($VerifyIdleTimeout.IsPresent | ConvertTo-Json -Compress))
+    $NodeVerifier = $NodeVerifier.Replace("__EXPECTED_IDLE_TIMEOUT_LABEL_JSON__", ($(if ($VerifyIdleTimeout) { "1s" } else { "8s" }) | ConvertTo-Json -Compress))
     Set-Content -Path $CdpScript -Value $NodeVerifier -Encoding UTF8
 
     $ChromeProcess = Start-Process -FilePath $Chrome -ArgumentList $ChromeArgs -PassThru

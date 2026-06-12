@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-import { AvatarStatePayload, CostMeter, createId } from "../lib/events";
+import { AudioCapabilities, AvatarStatePayload, CostMeter, createId } from "../lib/events";
 
 export interface ConversationMessage {
   id: string;
@@ -21,9 +21,11 @@ export interface AppState {
   lastFrameInfo: string;
   avatar: AvatarStatePayload;
   cost: CostMeter;
+  audioCapabilities: AudioCapabilities | null;
   setSession: (sessionId: string, wakeWord: string) => void;
   setConnection: (connection: AppState["connection"]) => void;
   setStatus: (status: string) => void;
+  setAudioCapabilities: (audioCapabilities: AudioCapabilities) => void;
   markWake: () => void;
   setVisualSummary: (summary: string) => void;
   setLastFrameInfo: (info: string) => void;
@@ -69,9 +71,11 @@ export const useAppStore = create<AppState>((set) => ({
     lip_sync: false,
   },
   cost: initialCost,
+  audioCapabilities: null,
   setSession: (sessionId, wakeWord) => set({ sessionId, wakeWord }),
   setConnection: (connection) => set({ connection }),
   setStatus: (status) => set({ status }),
+  setAudioCapabilities: (audioCapabilities) => set({ audioCapabilities }),
   markWake: () => set((state) => ({ wakeSerial: state.wakeSerial + 1, status: "listening" })),
   setVisualSummary: (visualSummary) => set({ visualSummary }),
   setLastFrameInfo: (lastFrameInfo) => set({ lastFrameInfo }),

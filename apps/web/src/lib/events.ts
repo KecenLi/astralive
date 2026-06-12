@@ -41,6 +41,18 @@ export interface CostMeter {
   last_latency_ms: number | null;
 }
 
+export interface AudioCapabilities {
+  asr_provider: string;
+  tts_provider: string;
+  realtime_provider: string;
+  input_sample_rate: number;
+  output_sample_rate: number;
+  channels: number;
+  server_tts: boolean;
+  server_realtime_audio: boolean;
+  realtime_input_idle_timeout_seconds?: number;
+}
+
 export interface FramePayload {
   frame_id: string;
   mime: "image/jpeg";
