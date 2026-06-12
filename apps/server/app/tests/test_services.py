@@ -3,7 +3,13 @@ import time
 
 import pytest
 
-from app.api.websocket import AudioRuntimeState, _handle_event, _handle_realtime_audio_chunk, _next_realtime_stream_event
+from app.api.websocket import (
+    AudioRuntimeState,
+    _handle_event,
+    _handle_realtime_audio_chunk,
+    _next_realtime_stream_event,
+    _realtime_tts_fallback_text,
+)
 from app.config import Settings
 from app.contracts.events import EventEnvelope
 from app.contracts.media import FramePayload
@@ -453,6 +459,12 @@ class AsrOnlyRealtimeStream(OrderSensitiveRealtimeStream):
         yield RealtimeStreamEvent(input_text="只返回转写", turn_complete=True)
 
 
+class OutputTextOnlyRealtimeStream(OrderSensitiveRealtimeStream):
+    async def receive(self):
+        await self.finished.wait()
+        yield RealtimeStreamEvent(input_text="用户语音", output_text="只有文本的 Live 回复", turn_complete=True)
+
+
 class StubWebSocket:
     def __init__(self) -> None:
         self.events: list[dict] = []
@@ -585,6 +597,77 @@ async def test_realtime_asr_only_result_falls_back_to_dialogue_tts() -> None:
     assert "assistant.text.final" in event_types
     assert "assistant.audio.chunk" in event_types
     assert audio_done_events[-1]["payload"]["source"] == "tts"
+
+
+async def test_realtime_text_without_audio_falls_back_to_tts() -> None:
+    stream = OutputTextOnlyRealtimeStream()
+    websocket = StubWebSocket()
+    runtime = AudioRuntimeState()
+    session = SessionState(session_id="test_session")
+    settings = Settings(realtime_provider="mock", llm_provider="mock", tts_provider="vertex_ai")
+    send_lock = asyncio.Lock()
+    audio = StubStreamingAudioService(stream)
+    dialogue = DialogueService(ProviderRegistry(settings).llm())
+    avatar = AvatarService()
+    first_payload = AudioChunkPayload(
+        chunk_id="chunk_1",
+        mime="audio/pcm;rate=16000",
+        sample_rate=16000,
+        channels=1,
+        encoding="pcm_s16le",
+        data_base64="",
+        is_final=False,
+    )
+
+    await _handle_realtime_audio_chunk(
+        websocket,  # type: ignore[arg-type]
+        session,
+        audio,  # type: ignore[arg-type]
+        dialogue,
+        avatar,
+        settings,
+        runtime,
+        first_payload,
+        b"\x00\x00" * 160,
+        0.0,
+        send_lock,
+        None,
+    )
+    task = await _handle_realtime_audio_chunk(
+        websocket,  # type: ignore[arg-type]
+        session,
+        audio,  # type: ignore[arg-type]
+        dialogue,
+        avatar,
+        settings,
+        runtime,
+        first_payload.model_copy(update={"chunk_id": "chunk_final", "is_final": True}),
+        b"",
+        0.0,
+        send_lock,
+        None,
+    )
+    if task:
+        await asyncio.wait_for(task, timeout=1)
+
+    audio_done_events = [event for event in websocket.events if event["type"] == "assistant.audio.done"]
+    text_final_events = [event for event in websocket.events if event["type"] == "assistant.text.final"]
+    assert audio.synthesize_calls == [("只有文本的 Live 回复", "neutral")]
+    assert session.last_user_text == "用户语音"
+    assert text_final_events[-1]["payload"]["audio_expected"] is True
+    assert audio_done_events[-1]["payload"]["source"] == "tts"
+    assert audio_done_events[-1]["payload"]["chunks"] == 1
+    assert session.cost_meter.tts_calls == 1
+
+
+def test_realtime_tts_fallback_text_is_bounded() -> None:
+    text = "  第一段\n\n" + ("长文本" * 200)
+    result = _realtime_tts_fallback_text(text)
+
+    assert "\n" not in result
+    assert result.startswith("第一段")
+    assert result.endswith("...")
+    assert len(result) <= 363
 
 
 async def test_user_text_closes_active_realtime_audio_stream() -> None:

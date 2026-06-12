@@ -24,6 +24,7 @@ from app.services.wake_service import WakeService
 logger = logging.getLogger(__name__)
 router = APIRouter()
 sessions: dict[str, SessionState] = {}
+REALTIME_TTS_FALLBACK_MAX_CHARS = 360
 
 
 class AudioRuntimeState:
@@ -682,25 +683,40 @@ async def _run_realtime_stream_receiver(
                 send_lock,
             )
             return
+        fallback_audio_attempted = False
         if output_text:
             await _send(
                 websocket,
                 make_event(
                     "assistant.text.final",
                     session.session_id,
-                    {"text": output_text, "audio_expected": sent_audio_chunks > 0},
+                    {
+                        "text": output_text,
+                        "audio_expected": sent_audio_chunks > 0 or settings.tts_provider != "mock",
+                    },
                 ),
                 send_lock,
             )
-        await _send(
-            websocket,
-            make_event(
-                "assistant.audio.done",
-                session.session_id,
-                {"source": "realtime", "chunks": sent_audio_chunks},
-            ),
-            send_lock,
-        )
+            if sent_audio_chunks == 0 and settings.tts_provider != "mock":
+                fallback_audio_attempted = True
+                await _send_fallback_tts_audio(
+                    websocket,
+                    session,
+                    audio,
+                    output_text,
+                    "neutral",
+                    send_lock,
+                )
+        if sent_audio_chunks > 0 or not fallback_audio_attempted:
+            await _send(
+                websocket,
+                make_event(
+                    "assistant.audio.done",
+                    session.session_id,
+                    {"source": "realtime", "chunks": sent_audio_chunks},
+                ),
+                send_lock,
+            )
 
         session.cost_meter.asr_calls += 1
         if saw_model_activity or output_text:
@@ -772,7 +788,9 @@ async def _run_realtime_audio_response(
                 send_lock,
             )
 
-        audio_expected = any(chunk.audio_base64 for chunk in result.audio_chunks)
+        audio_expected = any(chunk.audio_base64 for chunk in result.audio_chunks) or (
+            bool(result.output_text) and settings.tts_provider != "mock"
+        )
         if result.output_text:
             session.status = "speaking"
             async for chunk in _stream_text(result.output_text):
@@ -791,8 +809,23 @@ async def _run_realtime_audio_response(
                 send_lock,
             )
 
-        sent_chunks = await _send_tts_audio(websocket, session, result.audio_chunks, "realtime", send_lock)
-        if sent_chunks:
+        sent_chunks = 0
+        used_fallback_tts = False
+        if any(chunk.audio_base64 for chunk in result.audio_chunks):
+            sent_chunks = await _send_tts_audio(websocket, session, result.audio_chunks, "realtime", send_lock)
+        elif result.output_text and settings.tts_provider != "mock":
+            used_fallback_tts = True
+            sent_chunks = await _send_fallback_tts_audio(
+                websocket,
+                session,
+                audio,
+                result.output_text,
+                result.emotion,
+                send_lock,
+            )
+        else:
+            await _send_tts_audio(websocket, session, [], "realtime", send_lock)
+        if sent_chunks and not used_fallback_tts:
             session.cost_meter.tts_calls += 1
         await _send(
             websocket,
@@ -824,6 +857,41 @@ async def _run_realtime_audio_response(
         session.status = "listening"
         await _send_error(websocket, session.session_id, "realtime_failed", str(exc), send_lock)
         await _send_cost(websocket, session, send_lock)
+
+
+async def _send_fallback_tts_audio(
+    websocket: WebSocket,
+    session: SessionState,
+    audio: AudioService,
+    text: str,
+    emotion: str,
+    send_lock: asyncio.Lock,
+) -> int:
+    tts_text = _realtime_tts_fallback_text(text)
+    try:
+        tts_result = await audio.synthesize(tts_text, emotion)
+        session.cost_meter.tts_calls += 1
+        return await _send_tts_audio(websocket, session, [tts_result], "tts", send_lock, fallback_text=tts_text)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("realtime tts fallback failed")
+        await _send_error(websocket, session.session_id, "tts_failed", str(exc), send_lock)
+        await _send(
+            websocket,
+            make_event(
+                "assistant.audio.done",
+                session.session_id,
+                {"source": "tts", "chunks": 0, "fallback_text": tts_text, "error": str(exc)},
+            ),
+            send_lock,
+        )
+        return 0
+
+
+def _realtime_tts_fallback_text(text: str) -> str:
+    normalized = " ".join(text.split())
+    if len(normalized) <= REALTIME_TTS_FALLBACK_MAX_CHARS:
+        return normalized
+    return normalized[:REALTIME_TTS_FALLBACK_MAX_CHARS].rstrip() + "..."
 
 
 async def _send_tts_audio(
