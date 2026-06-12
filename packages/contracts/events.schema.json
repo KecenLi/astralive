@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://astralive.local/contracts/events.schema.json",
+  "title": "AstraLive event envelope",
+  "type": "object",
+  "required": ["id", "type", "session_id", "ts", "payload"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 4
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "client.session.start",
+        "client.session.end",
+        "client.wake.detected",
+        "client.wake.sleep",
+        "client.user.text",
+        "client.user.speech.partial",
+        "client.user.speech.final",
+        "client.media.frame",
+        "client.media.scene_changed",
+        "client.media.audio_chunk",
+        "client.control.interrupt",
+        "client.control.cancel_response",
+        "client.control.confirm",
+        "client.control.reject",
+        "client.debug.ping",
+        "server.session.ready",
+        "server.session.state",
+        "assistant.text.delta",
+        "assistant.text.final",
+        "assistant.audio.chunk",
+        "assistant.audio.done",
+        "assistant.avatar.state",
+        "assistant.avatar.expression",
+        "assistant.avatar.motion",
+        "assistant.avatar.lipsync",
+        "vision.summary",
+        "vision.need_focus",
+        "vision.error",
+        "cost.update",
+        "debug.log",
+        "error"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "ts": {
+      "type": "integer"
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": false
+}
+

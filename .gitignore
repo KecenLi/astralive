@@ -1,0 +1,37 @@
+# Local secrets and internal planning files
+.env
+.env.*
+!.env.example
+token
+codex_multi_agent_ai_visual_assistant_windows.md
+README.md
+docs/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Node
+node_modules/
+dist/
+.vite/
+coverage/
+*.tsbuildinfo
+
+# App data
+data/cache/
+data/logs/
+data/sqlite/
+*.db
+*.sqlite
+*.sqlite3
+
+# Editors and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

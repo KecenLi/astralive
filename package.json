@@ -1,0 +1,16 @@
+{
+  "name": "astralive",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev:web": "pnpm --filter @astralive/web dev",
+    "build:web": "pnpm --filter @astralive/web build",
+    "test:web": "pnpm --filter @astralive/web test",
+    "lint:web": "pnpm --filter @astralive/web lint"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.12",
+    "typescript": "^5.5.4"
+  }
+}
+
