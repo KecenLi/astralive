@@ -2,6 +2,9 @@
 .env
 .env.*
 !.env.example
+gemini_key.txt
+api_key.txt
+*.key
 token
 codex_multi_agent_ai_visual_assistant_windows.md
 README.md

@@ -4,6 +4,8 @@ $Root = Split-Path -Parent $PSScriptRoot
 $Blocked = @(
     "README.md",
     "token",
+    "gemini_key.txt",
+    "api_key.txt",
     "codex_multi_agent_ai_visual_assistant_windows.md"
 )
 
@@ -19,7 +21,12 @@ try {
         $Tracked = & $GitExe ls-files
     }
     foreach ($Path in $Tracked) {
-        if ($Blocked -contains $Path -or $Path.StartsWith("docs/") -or $Path.StartsWith("apps/web/public/live2d/")) {
+        if (
+            $Blocked -contains $Path -or
+            $Path.EndsWith(".key") -or
+            $Path.StartsWith("docs/") -or
+            $Path.StartsWith("apps/web/public/live2d/")
+        ) {
             throw "Blocked tracked path: $Path"
         }
     }
