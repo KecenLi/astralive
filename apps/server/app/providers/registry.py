@@ -16,11 +16,27 @@ class ProviderRegistry:
         return MockASRProvider()
 
     def vision(self):
+        if self.settings.vision_provider == "gemini":
+            return OpenAICompatibleVisionProvider(
+                self.settings,
+                provider_name="gemini",
+                base_url=self.settings.gemini_base_url,
+                api_key=self.settings.gemini_api_key,
+                model=self.settings.gemini_vision_model,
+            )
         if self.settings.vision_provider == "openai_compatible":
             return OpenAICompatibleVisionProvider(self.settings)
         return MockVisionProvider()
 
     def llm(self):
+        if self.settings.llm_provider == "gemini":
+            return OpenAICompatibleLLMProvider(
+                self.settings,
+                provider_name="gemini",
+                base_url=self.settings.gemini_base_url,
+                api_key=self.settings.gemini_api_key,
+                model=self.settings.gemini_llm_model,
+            )
         if self.settings.llm_provider == "ollama":
             return OllamaLLMProvider(self.settings)
         if self.settings.llm_provider == "openai_compatible":

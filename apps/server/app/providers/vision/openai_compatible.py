@@ -8,16 +8,28 @@ from app.providers.vision.base import VisionProvider
 
 
 class OpenAICompatibleVisionProvider(VisionProvider):
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        provider_name: str = "openai_compatible",
+        base_url: str | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
+    ) -> None:
         self.settings = settings
+        self.provider_name = provider_name
+        self.base_url = base_url if base_url is not None else settings.openai_compatible_base_url
+        self.api_key = api_key if api_key is not None else settings.openai_compatible_api_key
+        self.model = model if model is not None else settings.openai_compatible_vision_model
 
     async def analyze(self, data: VisionInput) -> VisionResult:
-        if not self.settings.openai_compatible_api_key:
-            raise RuntimeError("OPENAI_COMPATIBLE_API_KEY is not configured.")
-        if not self.settings.openai_compatible_base_url:
-            raise RuntimeError("OPENAI_COMPATIBLE_BASE_URL is not configured.")
-        if not self.settings.openai_compatible_vision_model:
-            raise RuntimeError("OPENAI_COMPATIBLE_VISION_MODEL is not configured.")
+        if not self.api_key:
+            raise RuntimeError(f"{self.provider_name} API key is not configured.")
+        if not self.base_url:
+            raise RuntimeError(f"{self.provider_name} base URL is not configured.")
+        if not self.model:
+            raise RuntimeError(f"{self.provider_name} vision model is not configured.")
 
         return await asyncio.to_thread(self._analyze_sync, data)
 
@@ -29,7 +41,7 @@ class OpenAICompatibleVisionProvider(VisionProvider):
             f"用户问题：{data.prompt}"
         )
         payload = {
-            "model": self.settings.openai_compatible_vision_model,
+            "model": self.model,
             "messages": [
                 {
                     "role": "user",
@@ -56,8 +68,8 @@ class OpenAICompatibleVisionProvider(VisionProvider):
             summary=summary,
             confidence=0.72 if data.mode == "focus" else 0.66,
             raw={
-                "provider": "openai_compatible",
-                "model": self.settings.openai_compatible_vision_model,
+                "provider": self.provider_name,
+                "model": self.model,
                 "mode": data.mode,
             },
         )
@@ -65,10 +77,10 @@ class OpenAICompatibleVisionProvider(VisionProvider):
     def _post_json(self, path: str, payload: dict) -> dict:
         body = json.dumps(payload).encode("utf-8")
         req = request.Request(
-            f"{self.settings.openai_compatible_base_url.rstrip('/')}{path}",
+            f"{self.base_url.rstrip('/')}{path}",
             data=body,
             headers={
-                "Authorization": f"Bearer {self.settings.openai_compatible_api_key}",
+                "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
             },
             method="POST",

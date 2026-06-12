@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     openai_compatible_vision_model: str = ""
     openai_compatible_tts_model: str = ""
 
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    gemini_api_key: str = ""
+    gemini_llm_model: str = "gemini-3.5-flash"
+    gemini_vision_model: str = "gemini-3.5-flash"
+    gemini_realtime_model: str = ""
+
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_llm_model: str = "qwen2.5:0.5b"
 
