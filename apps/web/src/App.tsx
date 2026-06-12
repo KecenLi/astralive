@@ -9,6 +9,7 @@ import { CostPanel } from "./components/CostPanel/CostPanel";
 import { DebugPanel } from "./components/DebugPanel/DebugPanel";
 import { MicPanel } from "./components/MicPanel/MicPanel";
 import { assistantAudioPlayer } from "./features/media/pcmPlayer";
+import { shouldStopRealtimeAudioOnError } from "./features/realtime/serverErrorActions";
 import { API_BASE_URL } from "./lib/env";
 import {
   AssistantAudioPayload,
@@ -21,6 +22,10 @@ import {
 } from "./lib/events";
 import { wsClient } from "./lib/wsClient";
 
+interface ServerEventEffects {
+  stopRealtimeAudio?: () => void;
+}
+
 function speak(text: string) {
   if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") return;
   window.speechSynthesis.cancel();
@@ -30,7 +35,7 @@ function speak(text: string) {
   window.speechSynthesis.speak(utterance);
 }
 
-function handleServerEvent(event: EventEnvelope<unknown>) {
+function handleServerEvent(event: EventEnvelope<unknown>, effects: ServerEventEffects = {}) {
   const store = useAppStore.getState();
   if (event.type === "server.session.state") {
     const payload = event.payload as { status?: string };
@@ -81,6 +86,9 @@ function handleServerEvent(event: EventEnvelope<unknown>) {
   }
   if (event.type === "error") {
     store.addMessage("system", JSON.stringify(event.payload));
+    if (shouldStopRealtimeAudioOnError(event.payload)) {
+      effects.stopRealtimeAudio?.();
+    }
   }
 }
 
@@ -93,6 +101,14 @@ export default function App() {
     () => `${store.cost.mode.toUpperCase()} / runtime providers`,
     [store.cost.mode],
   );
+
+  const stopClientAudio = useCallback(() => {
+    window.speechSynthesis.cancel();
+    assistantAudioPlayer.reset();
+    audioTurnActiveRef.current = false;
+    useAppStore.getState().setUserSpeechDraft("");
+    setAudioStopSignal((value) => value + 1);
+  }, []);
 
   useEffect(() => {
     let cleanup: () => void = () => {};
@@ -107,7 +123,7 @@ export default function App() {
         socket.onopen = () => useAppStore.getState().setConnection("connected");
         socket.onerror = () => useAppStore.getState().setConnection("error");
         socket.onclose = () => useAppStore.getState().setConnection("idle");
-        cleanup = wsClient.onEvent(handleServerEvent);
+        cleanup = wsClient.onEvent((event) => handleServerEvent(event, { stopRealtimeAudio: stopClientAudio }));
       } catch {
         actions.setConnection("error");
       }
@@ -117,15 +133,7 @@ export default function App() {
       cleanup();
       wsClient.close();
     };
-  }, []);
-
-  const stopClientAudio = useCallback(() => {
-    window.speechSynthesis.cancel();
-    assistantAudioPlayer.reset();
-    audioTurnActiveRef.current = false;
-    useAppStore.getState().setUserSpeechDraft("");
-    setAudioStopSignal((value) => value + 1);
-  }, []);
+  }, [stopClientAudio]);
 
   const wake = useCallback(() => {
     const actions = useAppStore.getState();
