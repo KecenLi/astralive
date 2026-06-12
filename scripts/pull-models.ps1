@@ -3,11 +3,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "common.ps1")
 
-if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
+$Ollama = Resolve-Ollama
+if (-not $Ollama) {
     throw "Ollama is not installed. Install Ollama for Windows, then rerun this script."
 }
 
-ollama pull $Model
+& $Ollama pull $Model
 Write-Host "Pulled $Model. Set LLM_PROVIDER=ollama and OLLAMA_LLM_MODEL=$Model in .env to use it."
-

@@ -1,6 +1,9 @@
 import { PauseCircle } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 
 import { useAppStore } from "../../app/store";
+import { Live2DAvatarController } from "../../features/avatar/avatarController";
+import { LIVE2D_MODEL_URL } from "../../lib/env";
 
 const expressionLabel: Record<string, string> = {
   neutral: "平静",
@@ -17,10 +20,57 @@ export function AvatarStage({ onInterrupt }: { onInterrupt: () => void }) {
   const avatar = useAppStore((state) => state.avatar);
   const status = useAppStore((state) => state.status);
   const isSpeaking = avatar.mode === "speaking";
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const controllerRef = useRef<Live2DAvatarController | null>(null);
+  const [isLive2DReady, setIsLive2DReady] = useState(false);
+
+  useEffect(() => {
+    if (!LIVE2D_MODEL_URL || !canvasRef.current) return;
+
+    let disposed = false;
+    const controller = new Live2DAvatarController();
+    controllerRef.current = controller;
+
+    async function mountLive2D() {
+      try {
+        await controller.mount(canvasRef.current as HTMLCanvasElement, LIVE2D_MODEL_URL);
+        if (!disposed) setIsLive2DReady(true);
+      } catch (error) {
+        console.warn("Live2D model failed to load; using fallback avatar.", error);
+        if (!disposed) setIsLive2DReady(false);
+      }
+    }
+
+    void mountLive2D();
+
+    return () => {
+      disposed = true;
+      controller.dispose();
+      controllerRef.current = null;
+      setIsLive2DReady(false);
+    };
+  }, []);
+
+  useEffect(() => {
+    controllerRef.current?.setState({
+      mode: avatar.mode,
+      expression: avatar.expression,
+      subtitle: avatar.subtitle,
+      lipSync: isSpeaking,
+    });
+  }, [avatar.expression, avatar.mode, avatar.subtitle, isSpeaking]);
 
   return (
     <section className="avatar-stage" aria-label="Avatar">
-      <div className={`avatar-orbit avatar-${avatar.mode}`}>
+      <div className={`live2d-layer ${isLive2DReady ? "is-ready" : ""}`} aria-hidden={!isLive2DReady}>
+        <canvas ref={canvasRef} />
+      </div>
+
+      <div
+        className={`avatar-orbit avatar-${avatar.mode} ${
+          isLive2DReady ? "avatar-orbit-fallback-hidden" : ""
+        }`}
+      >
         <div className={`avatar-face expression-${avatar.expression}`}>
           <div className="avatar-brow avatar-brow-left" />
           <div className="avatar-brow avatar-brow-right" />
@@ -45,4 +95,3 @@ export function AvatarStage({ onInterrupt }: { onInterrupt: () => void }) {
     </section>
   );
 }
-

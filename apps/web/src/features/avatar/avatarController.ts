@@ -49,7 +49,8 @@ export class Live2DAvatarController implements AvatarController {
     stage?.addChild(this.model);
   }
 
-  setState() {
+  setState(state: Parameters<AvatarController["setState"]>[0]) {
+    void state;
     return;
   }
 

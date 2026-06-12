@@ -1,4 +1,4 @@
-from app.config import get_settings
+from app.config import Settings
 from app.contracts.media import FramePayload
 from app.core.session_state import SessionState
 from app.providers.registry import ProviderRegistry
@@ -7,7 +7,7 @@ from app.services.vision_service import VisionService
 
 
 async def test_mock_vision_updates_cost() -> None:
-    settings = get_settings()
+    settings = Settings(vision_provider="mock", llm_provider="mock")
     session = SessionState(wake_word=settings.wake_word)
     registry = ProviderRegistry(settings)
     service = VisionService(registry.vision(), settings)
@@ -30,11 +30,10 @@ async def test_mock_vision_updates_cost() -> None:
 
 
 async def test_mock_dialogue_uses_visual_summary() -> None:
-    settings = get_settings()
+    settings = Settings(vision_provider="mock", llm_provider="mock")
     session = SessionState(wake_word=settings.wake_word, last_visual_summary="桌上有一个水杯。")
     registry = ProviderRegistry(settings)
     service = DialogueService(registry.llm())
     result = await service.reply(session, "你看到了什么？")
     assert "桌上有一个水杯" in result.text
     assert session.cost_meter.llm_calls == 1
-

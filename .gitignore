@@ -6,6 +6,7 @@ token
 codex_multi_agent_ai_visual_assistant_windows.md
 README.md
 docs/
+.installers/
 
 # Python
 __pycache__/

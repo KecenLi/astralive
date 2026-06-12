@@ -5,31 +5,21 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
-
-function Invoke-Pnpm {
-    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
-
-    if (Get-Command pnpm -ErrorAction SilentlyContinue) {
-        pnpm @Arguments
-        return
-    }
-
-    $Corepack = Join-Path $env:ProgramFiles "nodejs\corepack.cmd"
-    if (Test-Path $Corepack) {
-        & $Corepack pnpm @Arguments
-        return
-    }
-
-    throw "pnpm is not available. Install Node.js LTS and run: corepack enable"
-}
+. (Join-Path $PSScriptRoot "common.ps1")
+Import-DotEnvFile -Path (Join-Path $Root ".env")
 
 function Start-Server {
     Push-Location (Join-Path $Root "apps\server")
     try {
-        if (Get-Command uv -ErrorAction SilentlyContinue) {
-            uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
-        } elseif (Get-Command python -ErrorAction SilentlyContinue) {
-            python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+        $Uv = Resolve-Uv
+        $Python = Resolve-Python
+        $ServerHost = if ($env:SERVER_HOST) { $env:SERVER_HOST } else { "127.0.0.1" }
+        $ServerPort = if ($env:SERVER_PORT) { $env:SERVER_PORT } else { "8000" }
+
+        if ($Uv) {
+            & $Uv run uvicorn app.main:app --host $ServerHost --port $ServerPort --reload
+        } elseif ($Python) {
+            & $Python -m uvicorn app.main:app --host $ServerHost --port $ServerPort --reload
         } else {
             throw "Python 3.11+ or uv is required to start the server."
         }
@@ -41,7 +31,7 @@ function Start-Server {
 function Start-Web {
     Push-Location $Root
     try {
-        Invoke-Pnpm --filter "@astralive/web" dev
+        Invoke-Pnpm @("--filter", "@astralive/web", "dev")
     } finally {
         Pop-Location
     }
