@@ -39,12 +39,26 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
   const wakeWord = useAppStore((state) => state.wakeWord);
   const audioCapabilities = useAppStore((state) => state.audioCapabilities);
   const realtimeAvailable = Boolean(audioCapabilities?.server_realtime_audio);
-  const realtimeReady = Boolean(sessionId) && connection === "connected" && realtimeAvailable;
+  const realtimeFormatCompatible = Boolean(
+    audioCapabilities &&
+      audioCapabilities.input_sample_rate === LIVE_INPUT_SAMPLE_RATE &&
+      audioCapabilities.channels === 1,
+  );
+  const realtimeUnavailableReason = !sessionId
+    ? "会话未就绪"
+    : connection !== "connected"
+      ? "WebSocket 未连接"
+      : !realtimeAvailable
+        ? "实时语音未启用"
+        : !realtimeFormatCompatible
+          ? "实时格式不匹配"
+          : "";
+  const realtimeReady = realtimeUnavailableReason === "";
   const liveButtonTitle = liveStreaming
     ? "结束实时语音"
-    : realtimeAvailable
+    : realtimeReady
       ? "开始实时语音"
-      : "实时语音未启用";
+      : realtimeUnavailableReason;
 
   function stopMic() {
     recorderRef.current?.stop();
@@ -131,7 +145,7 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
     }
     if (startingRef.current) return;
     if (!realtimeReady) {
-      setMicState(connection === "connected" ? "实时语音未启用" : "WebSocket 未连接");
+      setMicState(realtimeUnavailableReason || "实时语音未启用");
       return;
     }
     if (muted) {
@@ -279,9 +293,9 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
   useEffect(() => {
     if (liveStreaming && !realtimeReady) {
       stopLiveAudio(false);
-      setMicState(connection === "connected" ? "实时语音未启用" : "WebSocket 未连接");
+      setMicState(realtimeUnavailableReason || "实时语音未启用");
     }
-  }, [connection, liveStreaming, realtimeReady, stopLiveAudio]);
+  }, [liveStreaming, realtimeReady, realtimeUnavailableReason, stopLiveAudio]);
 
   return (
     <section className="panel mic-panel">
@@ -336,7 +350,15 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
         </div>
         <div>
           <dt>实时</dt>
-          <dd>{liveStreaming ? "streaming" : realtimeAvailable ? "off" : "unavailable"}</dd>
+          <dd>
+            {liveStreaming
+              ? "streaming"
+              : realtimeAvailable
+                ? realtimeFormatCompatible
+                  ? "off"
+                  : "incompatible"
+                : "unavailable"}
+          </dd>
         </div>
       </dl>
     </section>
