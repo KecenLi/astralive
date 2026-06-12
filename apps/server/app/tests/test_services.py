@@ -709,3 +709,55 @@ async def test_wake_closes_active_realtime_audio_stream() -> None:
     assert runtime.turn_bytes == 0
     assert session.status == "listening"
     assert "server.session.state" in event_types
+
+
+async def test_realtime_input_idle_timeout_closes_unfinished_stream() -> None:
+    stream = OrderSensitiveRealtimeStream()
+    websocket = StubWebSocket()
+    runtime = AudioRuntimeState()
+    session = SessionState(session_id="test_session")
+    settings = Settings(
+        realtime_provider="mock",
+        llm_provider="mock",
+        realtime_input_idle_timeout_seconds=0.001,
+    )
+    send_lock = asyncio.Lock()
+    audio = StubStreamingAudioService(stream)
+    dialogue = DialogueService(ProviderRegistry(settings).llm())
+    avatar = AvatarService()
+    first_payload = AudioChunkPayload(
+        chunk_id="chunk_1",
+        mime="audio/pcm;rate=16000",
+        sample_rate=16000,
+        channels=1,
+        encoding="pcm_s16le",
+        data_base64="",
+        is_final=False,
+    )
+
+    await _handle_realtime_audio_chunk(
+        websocket,  # type: ignore[arg-type]
+        session,
+        audio,  # type: ignore[arg-type]
+        dialogue,
+        avatar,
+        settings,
+        runtime,
+        first_payload,
+        b"\x00\x00" * 160,
+        0.0,
+        send_lock,
+        None,
+    )
+
+    idle_task = runtime.input_idle_task
+    assert idle_task is not None
+    await asyncio.wait_for(idle_task, timeout=1)
+
+    error_events = [event for event in websocket.events if event["type"] == "error"]
+    assert stream.closed is True
+    assert runtime.stream is None
+    assert runtime.input_idle_task is None
+    assert runtime.turn_bytes == 0
+    assert session.response_in_progress is False
+    assert error_events[-1]["payload"]["code"] == "realtime_input_idle_timeout"

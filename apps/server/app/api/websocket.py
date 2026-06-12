@@ -31,6 +31,7 @@ class AudioRuntimeState:
         self.buffer = bytearray()
         self.stream: RealtimeAudioStream | None = None
         self.receive_task: asyncio.Task[None] | None = None
+        self.input_idle_task: asyncio.Task[None] | None = None
         self.turn_started_at: float = 0.0
         self.turn_bytes: int = 0
         self.input_finished: bool = False
@@ -399,6 +400,8 @@ async def _handle_realtime_audio_chunk(
     if audio_bytes:
         try:
             await audio_runtime.stream.send_audio(audio_bytes, payload.mime)
+            if not payload.is_final:
+                _arm_realtime_input_idle_timeout(websocket, session, settings, audio_runtime, send_lock)
         except Exception as exc:  # noqa: BLE001
             logger.exception("failed to send realtime audio chunk")
             await _close_audio_runtime(audio_runtime)
@@ -407,6 +410,7 @@ async def _handle_realtime_audio_chunk(
             return None
 
     if payload.is_final:
+        _cancel_realtime_input_idle_timeout(audio_runtime)
         try:
             await audio_runtime.stream.finish_audio()
             audio_runtime.input_finished = True
@@ -934,23 +938,84 @@ def _session_payload(session: SessionState, settings: Settings) -> dict:
         "channels": settings.audio_channels,
         "server_tts": settings.tts_provider != "mock",
         "server_realtime_audio": settings.realtime_provider != "none",
+        "realtime_input_idle_timeout_seconds": settings.realtime_input_idle_timeout_seconds,
     }
     return payload
 
 
+def _arm_realtime_input_idle_timeout(
+    websocket: WebSocket,
+    session: SessionState,
+    settings: Settings,
+    audio_runtime: AudioRuntimeState,
+    send_lock: asyncio.Lock,
+) -> None:
+    _cancel_realtime_input_idle_timeout(audio_runtime)
+    if settings.realtime_input_idle_timeout_seconds <= 0:
+        return
+    audio_runtime.input_idle_task = asyncio.create_task(
+        _run_realtime_input_idle_timeout(websocket, session, settings, audio_runtime, send_lock)
+    )
+    audio_runtime.input_idle_task.add_done_callback(_log_task_exception)
+
+
+def _cancel_realtime_input_idle_timeout(audio_runtime: AudioRuntimeState) -> None:
+    task = audio_runtime.input_idle_task
+    audio_runtime.input_idle_task = None
+    if task and task is not asyncio.current_task() and not task.done():
+        task.cancel()
+
+
+async def _run_realtime_input_idle_timeout(
+    websocket: WebSocket,
+    session: SessionState,
+    settings: Settings,
+    audio_runtime: AudioRuntimeState,
+    send_lock: asyncio.Lock,
+) -> None:
+    await asyncio.sleep(settings.realtime_input_idle_timeout_seconds)
+    if audio_runtime.stream is None or audio_runtime.input_finished:
+        return
+
+    await _close_audio_runtime(audio_runtime)
+    session.response_in_progress = False
+    session.status = "listening"
+    await _send_error(
+        websocket,
+        session.session_id,
+        "realtime_input_idle_timeout",
+        f"No realtime audio chunk or final received for {settings.realtime_input_idle_timeout_seconds:g} seconds.",
+        send_lock,
+    )
+    await _send(
+        websocket,
+        make_event("server.session.state", session.session_id, _session_payload(session, settings)),
+        send_lock,
+    )
+    await _send_cost(websocket, session, send_lock)
+
+
 async def _close_audio_runtime(audio_runtime: AudioRuntimeState) -> None:
     current_task = asyncio.current_task()
+    input_idle_task = audio_runtime.input_idle_task
     receive_task = audio_runtime.receive_task
     stream = audio_runtime.stream
 
     audio_runtime.buffer.clear()
     audio_runtime.stream = None
     audio_runtime.receive_task = None
+    audio_runtime.input_idle_task = None
     audio_runtime.turn_started_at = 0.0
     audio_runtime.turn_bytes = 0
     audio_runtime.input_finished = False
     audio_runtime.input_finished_at = 0.0
 
+    if input_idle_task and input_idle_task is not current_task and not input_idle_task.done():
+        input_idle_task.cancel()
+        try:
+            await input_idle_task
+        except asyncio.CancelledError:
+            pass
     if receive_task and receive_task is not current_task and not receive_task.done():
         receive_task.cancel()
         try:

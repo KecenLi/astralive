@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     audio_chunk_max_bytes: int = 262144
     audio_turn_max_bytes: int = 2097152
     audio_transcription_language: str = "zh-CN"
+    realtime_input_idle_timeout_seconds: float = 8.0
     realtime_turn_timeout_seconds: float = 30.0
 
     wake_word: str = "阿斯塔"
