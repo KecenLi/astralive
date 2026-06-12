@@ -17,9 +17,13 @@ function Start-Server {
         $ServerPort = if ($env:SERVER_PORT) { $env:SERVER_PORT } else { "8000" }
 
         if ($Uv) {
-            & $Uv run uvicorn app.main:app --host $ServerHost --port $ServerPort --reload
+            Invoke-CmdExecutable -Executable $Uv -Arguments @(
+                "run", "uvicorn", "app.main:app", "--host", $ServerHost, "--port", $ServerPort, "--reload"
+            )
         } elseif ($Python) {
-            & $Python -m uvicorn app.main:app --host $ServerHost --port $ServerPort --reload
+            Invoke-CmdExecutable -Executable $Python -Arguments @(
+                "-m", "uvicorn", "app.main:app", "--host", $ServerHost, "--port", $ServerPort, "--reload"
+            )
         } else {
             throw "Python 3.11+ or uv is required to start the server."
         }

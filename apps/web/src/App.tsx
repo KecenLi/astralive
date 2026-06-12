@@ -60,9 +60,13 @@ function handleServerEvent(event: EventEnvelope<unknown>) {
   if (event.type === "assistant.avatar.state") {
     store.setAvatar(event.payload as unknown as AvatarStatePayload);
   }
+  if (event.type === "asr.transcript.partial") {
+    const text = (event.payload as { text?: string }).text?.trim();
+    if (text) store.setUserSpeechDraft(text);
+  }
   if (event.type === "asr.transcript.final") {
     const text = (event.payload as { text?: string }).text?.trim();
-    if (text) store.addMessage("user", text);
+    store.finalizeUserSpeech(text ?? "");
   }
   if (event.type === "vision.summary") {
     const payload = event.payload as { summary?: string; frame_id?: string; confidence?: number };
@@ -119,6 +123,7 @@ export default function App() {
     window.speechSynthesis.cancel();
     assistantAudioPlayer.reset();
     audioTurnActiveRef.current = false;
+    useAppStore.getState().setUserSpeechDraft("");
     setAudioStopSignal((value) => value + 1);
   }, []);
 
@@ -158,6 +163,7 @@ export default function App() {
     window.speechSynthesis.cancel();
     assistantAudioPlayer.reset();
     audioTurnActiveRef.current = false;
+    actions.setUserSpeechDraft("");
     actions.addMessage("user", text);
     wsClient.send(createEvent("client.user.text", actions.sessionId, { text }));
   }, []);
@@ -168,6 +174,7 @@ export default function App() {
     if (!payload.is_final && !audioTurnActiveRef.current) {
       window.speechSynthesis.cancel();
       assistantAudioPlayer.reset();
+      actions.setUserSpeechDraft("");
       audioTurnActiveRef.current = true;
     }
     if (payload.is_final) {

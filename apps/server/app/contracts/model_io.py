@@ -85,3 +85,12 @@ class RealtimeTurnResult(BaseModel):
     audio_chunks: list[TTSResult] = Field(default_factory=list)
     emotion: str = "neutral"
     raw: dict = Field(default_factory=dict)
+
+
+class RealtimeStreamEvent(BaseModel):
+    input_text: str = ""
+    output_text: str = ""
+    audio_chunks: list[TTSResult] = Field(default_factory=list)
+    turn_complete: bool = False
+    interrupted: bool = False
+    raw: dict = Field(default_factory=dict)

@@ -1,12 +1,19 @@
+import asyncio
+import time
+
+import pytest
+
+from app.api.websocket import AudioRuntimeState, _next_realtime_stream_event
 from app.config import Settings
 from app.contracts.media import FramePayload
-from app.contracts.model_io import ChatMessage, DialogueInput, TTSInput, VisionInput
+from app.contracts.model_io import ChatMessage, DialogueInput, RealtimeStreamEvent, TTSInput, VisionInput
 from app.core.session_state import SessionState
 from app.providers.asr.google_genai import GoogleGenAIASRProvider
 from app.providers.registry import ProviderRegistry
 from app.providers.llm.openai_compatible import OpenAICompatibleLLMProvider
 from app.providers.llm.vertex_ai import VertexAILLMProvider
 from app.providers.realtime.google_genai_live import GoogleGenAILiveProvider
+from app.providers.realtime.mock import MockRealtimeProvider
 from app.providers.tts.google_genai import GoogleGenAITTSProvider
 from app.providers.vision.openai_compatible import OpenAICompatibleVisionProvider
 from app.providers.vision.vertex_ai import VertexAIVisionProvider
@@ -210,6 +217,8 @@ class StubLiveSession:
     def __init__(self, mime: str = "audio/pcm;rate=24000") -> None:
         self.audio_bytes = b""
         self.mime = mime
+        self.audio_stream_ended = False
+        self.closed = False
 
     async def send_client_content(self, **kwargs) -> None:
         self.client_content = kwargs
@@ -218,6 +227,8 @@ class StubLiveSession:
         audio = kwargs.get("audio")
         if audio:
             self.audio_bytes += audio.data
+        if kwargs.get("audio_stream_end"):
+            self.audio_stream_ended = True
 
     async def receive(self):
         yield {
@@ -237,6 +248,9 @@ class StubLiveSession:
                 "turnComplete": True,
             }
         }
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 class StubLiveConnect:
@@ -294,3 +308,66 @@ async def test_google_genai_live_treats_l16_as_pcm() -> None:
 
     assert result.audio_chunks[0].sample_rate == 24000
     assert result.audio_chunks[0].encoding == "pcm_s16le"
+
+
+async def test_google_genai_live_audio_stream_sends_chunks_and_receives_events() -> None:
+    settings = Settings(realtime_provider="vertex_ai")
+    client = StubLiveClient()
+    provider = GoogleGenAILiveProvider(settings, mode="vertex_ai", client=client)
+
+    stream = await provider.open_audio_stream({"system_instruction": "test"})
+    await stream.send_audio(b"\x01\x02", "audio/pcm;rate=16000")
+    await stream.send_audio(b"\x03\x04", "audio/pcm;rate=16000")
+    await stream.finish_audio()
+    events = [event async for event in stream.receive()]
+    await stream.close()
+
+    assert client.aio.live.connect_kwargs["model"] == settings.vertex_ai_realtime_model
+    assert client.aio.live.session.audio_bytes == b"\x01\x02\x03\x04"
+    assert client.aio.live.session.audio_stream_ended is True
+    assert client.aio.live.session.closed is True
+    assert len(events) == 1
+    assert events[0].input_text == "你好"
+    assert events[0].output_text == "收到"
+    assert events[0].turn_complete is True
+    assert events[0].audio_chunks[0].sample_rate == 24000
+
+
+async def test_mock_realtime_provider_supports_audio_streaming() -> None:
+    provider = MockRealtimeProvider()
+    stream = await provider.open_audio_stream()
+    await stream.send_audio(b"\x01\x02", "audio/pcm;rate=16000")
+    await stream.finish_audio()
+    events = [event async for event in stream.receive()]
+
+    assert provider.supports_audio_streaming is True
+    assert events[0].turn_complete is True
+    assert events[0].input_text
+    assert events[0].output_text
+
+
+async def test_realtime_stream_wait_does_not_timeout_before_final_audio() -> None:
+    async def events():
+        await asyncio.sleep(0.02)
+        yield RealtimeStreamEvent(input_text="ok")
+
+    runtime = AudioRuntimeState()
+    settings = Settings(realtime_turn_timeout_seconds=0.001)
+
+    event = await _next_realtime_stream_event(events().__aiter__(), runtime, settings)
+
+    assert event.input_text == "ok"
+
+
+async def test_realtime_stream_wait_times_out_after_final_audio() -> None:
+    async def events():
+        await asyncio.sleep(60)
+        yield RealtimeStreamEvent(input_text="late")
+
+    runtime = AudioRuntimeState()
+    runtime.input_finished = True
+    runtime.input_finished_at = time.perf_counter() - 1
+    settings = Settings(realtime_turn_timeout_seconds=0.001)
+
+    with pytest.raises(TimeoutError):
+        await _next_realtime_stream_event(events().__aiter__(), runtime, settings)

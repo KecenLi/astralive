@@ -64,6 +64,19 @@ function Resolve-Gcloud {
     return Resolve-CommandPath -Name "gcloud.cmd" -Candidates $Candidates
 }
 
+function Add-ProcessPathEntry {
+    param([string]$Path)
+
+    if (-not $Path -or -not (Test-Path $Path)) {
+        return
+    }
+
+    $Entries = @($env:Path -split [System.IO.Path]::PathSeparator)
+    if ($Entries -notcontains $Path) {
+        $env:Path = "$Path$([System.IO.Path]::PathSeparator)$env:Path"
+    }
+}
+
 function Import-DotEnvFile {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -145,33 +158,48 @@ function Invoke-CmdExecutable {
         [string[]]$Arguments = @()
     )
 
-    $CommandLine = (ConvertTo-CmdArgument $Executable)
-    if ($Arguments.Count -gt 0) {
-        $CommandLine = "$CommandLine $((@($Arguments) | ForEach-Object { ConvertTo-CmdArgument $_ }) -join ' ')"
-    }
+    Add-ProcessPathEntry -Path (Join-Path $env:ProgramFiles "nodejs")
 
-    & cmd.exe /d /c $CommandLine
-    if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
-        throw "$Executable failed with exit code $LASTEXITCODE."
+    $Extension = [System.IO.Path]::GetExtension($Executable).ToLowerInvariant()
+    if ($Extension -in @(".cmd", ".bat")) {
+        $CommandLine = (ConvertTo-CmdArgument $Executable)
+        if ($Arguments.Count -gt 0) {
+            $CommandLine = "$CommandLine $((@($Arguments) | ForEach-Object { ConvertTo-CmdArgument $_ }) -join ' ')"
+        }
+        $Process = Start-Process -FilePath "cmd.exe" -ArgumentList @("/d", "/c", $CommandLine) -NoNewWindow -Wait -PassThru
+    } else {
+        $ArgumentLine = (@($Arguments) | ForEach-Object { ConvertTo-CmdArgument $_ }) -join " "
+        $Process = Start-Process -FilePath $Executable -ArgumentList $ArgumentLine -NoNewWindow -Wait -PassThru
+    }
+    if ($Process.ExitCode -ne 0) {
+        throw "$Executable failed with exit code $($Process.ExitCode)."
     }
 }
 
 function Invoke-Pnpm {
     param([string[]]$Arguments = @())
 
-    $Pnpm = Resolve-CommandPath -Name "pnpm.cmd" -Candidates @(
-        (Join-Path $env:ProgramFiles "nodejs\pnpm.cmd")
-    )
-    if ($Pnpm) {
-        Invoke-CmdExecutable -Executable $Pnpm -Arguments $Arguments
-        return
-    }
+    $PreviousShell = [Environment]::GetEnvironmentVariable("SHELL", "Process")
+    Remove-Item Env:SHELL -ErrorAction SilentlyContinue
+    try {
+        $Pnpm = Resolve-CommandPath -Name "pnpm.cmd" -Candidates @(
+            (Join-Path $env:ProgramFiles "nodejs\pnpm.cmd")
+        )
+        if ($Pnpm) {
+            Invoke-CmdExecutable -Executable $Pnpm -Arguments $Arguments
+            return
+        }
 
-    $Corepack = Join-Path $env:ProgramFiles "nodejs\corepack.cmd"
-    if (Test-Path $Corepack) {
-        Invoke-CmdExecutable -Executable $Corepack -Arguments (@("pnpm") + $Arguments)
-        return
-    }
+        $Corepack = Join-Path $env:ProgramFiles "nodejs\corepack.cmd"
+        if (Test-Path $Corepack) {
+            Invoke-CmdExecutable -Executable $Corepack -Arguments (@("pnpm") + $Arguments)
+            return
+        }
 
-    throw "pnpm is not available. Install Node.js LTS and run: corepack enable"
+        throw "pnpm is not available. Install Node.js LTS and run: corepack enable"
+    } finally {
+        if ($null -ne $PreviousShell) {
+            [Environment]::SetEnvironmentVariable("SHELL", $PreviousShell, "Process")
+        }
+    }
 }

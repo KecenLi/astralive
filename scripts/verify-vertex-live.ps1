@@ -59,20 +59,11 @@ try {
     $Python = Resolve-Python
     if ($Uv) {
         if (-not $SkipDependencySync) {
-            & $Uv sync
-            if ($LASTEXITCODE -ne 0) {
-                throw "uv sync failed with exit code $LASTEXITCODE."
-            }
+            Invoke-CmdExecutable -Executable $Uv -Arguments @("sync")
         }
-        & $Uv run python $TempScript
-        if ($LASTEXITCODE -ne 0) {
-            throw "Gemini Live verification failed with exit code $LASTEXITCODE."
-        }
+        Invoke-CmdExecutable -Executable $Uv -Arguments @("run", "python", $TempScript)
     } elseif ($Python) {
-        & $Python $TempScript
-        if ($LASTEXITCODE -ne 0) {
-            throw "Gemini Live verification failed with exit code $LASTEXITCODE."
-        }
+        Invoke-CmdExecutable -Executable $Python -Arguments @($TempScript)
     } else {
         throw "Python 3.11+ or uv is required to verify Gemini Live."
     }

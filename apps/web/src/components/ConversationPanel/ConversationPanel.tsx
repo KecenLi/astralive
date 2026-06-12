@@ -4,6 +4,7 @@ import { useAppStore } from "../../app/store";
 
 export function ConversationPanel() {
   const messages = useAppStore((state) => state.messages);
+  const userDraft = useAppStore((state) => state.currentUserDraft);
   const draft = useAppStore((state) => state.currentAssistantDraft);
   const visualSummary = useAppStore((state) => state.visualSummary);
 
@@ -24,6 +25,12 @@ export function ConversationPanel() {
             <p>{message.text}</p>
           </article>
         ))}
+        {userDraft && (
+          <article className="message message-user">
+            <span>user</span>
+            <p>{userDraft}</p>
+          </article>
+        )}
         {draft && (
           <article className="message message-assistant">
             <span>assistant</span>
@@ -34,4 +41,3 @@ export function ConversationPanel() {
     </section>
   );
 }
-

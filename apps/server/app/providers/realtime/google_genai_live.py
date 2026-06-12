@@ -1,12 +1,14 @@
 import asyncio
 import base64
+from collections.abc import AsyncIterator
+from contextlib import suppress
 import time
 from typing import Any, Literal
 
 from app.config import Settings
-from app.contracts.model_io import RealtimeTurnResult, TTSResult
+from app.contracts.model_io import RealtimeStreamEvent, RealtimeTurnResult, TTSResult
 from app.providers.google_genai_client import GoogleGenAIClientFactory
-from app.providers.realtime.base import RealtimeProvider
+from app.providers.realtime.base import RealtimeAudioStream, RealtimeProvider
 
 
 ProviderMode = Literal["gemini", "vertex_ai"]
@@ -22,6 +24,10 @@ class GoogleGenAILiveProvider(RealtimeProvider):
         )
         self.voice = settings.vertex_ai_tts_voice if mode == "vertex_ai" else settings.gemini_tts_voice
         self._client = client
+
+    @property
+    def supports_audio_streaming(self) -> bool:
+        return True
 
     async def respond_to_text(self, text: str, metadata: dict | None = None) -> RealtimeTurnResult:
         if not self.model:
@@ -51,6 +57,19 @@ class GoogleGenAILiveProvider(RealtimeProvider):
             await session.send_realtime_input(audio=types.Blob(data=audio_bytes, mime_type=mime))
             await session.send_realtime_input(audio_stream_end=True)
             return await self._receive_turn(session)
+
+    async def open_audio_stream(self, metadata: dict | None = None) -> RealtimeAudioStream:
+        if not self.model:
+            raise RuntimeError(f"{self.provider_name} realtime model is not configured.")
+        stream = GoogleGenAILiveAudioStream(
+            client=self._get_client(),
+            model=self.model,
+            config=self._config(metadata or {}),
+            settings=self.settings,
+            provider_name=self.provider_name,
+        )
+        await stream.start()
+        return stream
 
     def _make_client(self):
         factory = GoogleGenAIClientFactory(self.settings)
@@ -105,7 +124,68 @@ class GoogleGenAILiveProvider(RealtimeProvider):
         return result
 
 
-def _merge_live_message(result: RealtimeTurnResult, message: Any, settings: Settings) -> None:
+class GoogleGenAILiveAudioStream(RealtimeAudioStream):
+    def __init__(
+        self,
+        client: Any,
+        model: str,
+        config: Any,
+        settings: Settings,
+        provider_name: str,
+    ) -> None:
+        self.client = client
+        self.model = model
+        self.config = config
+        self.settings = settings
+        self.provider_name = provider_name
+        self._connect_context: Any | None = None
+        self._session: Any | None = None
+
+    async def start(self) -> None:
+        self._connect_context = self.client.aio.live.connect(model=self.model, config=self.config)
+        self._session = await self._connect_context.__aenter__()
+
+    async def send_audio(self, audio_bytes: bytes, mime: str) -> None:
+        if not self._session:
+            raise RuntimeError("Gemini Live stream is not open.")
+        if not audio_bytes:
+            return
+        from google.genai import types
+
+        await self._session.send_realtime_input(audio=types.Blob(data=audio_bytes, mime_type=mime))
+
+    async def finish_audio(self) -> None:
+        if not self._session:
+            return
+        await self._session.send_realtime_input(audio_stream_end=True)
+
+    async def receive(self) -> AsyncIterator[RealtimeStreamEvent]:
+        if not self._session:
+            raise RuntimeError("Gemini Live stream is not open.")
+        async for message in self._session.receive():
+            event = _stream_event_from_live_message(message, self.settings)
+            yield event
+            if event.turn_complete or event.interrupted:
+                break
+
+    async def close(self) -> None:
+        session = self._session
+        context = self._connect_context
+        self._session = None
+        self._connect_context = None
+        if session:
+            with suppress(Exception):
+                await session.close()
+        if context:
+            with suppress(Exception):
+                await context.__aexit__(None, None, None)
+
+
+def _merge_live_message(
+    result: RealtimeTurnResult | RealtimeStreamEvent,
+    message: Any,
+    settings: Settings,
+) -> None:
     server_content = _get_field(message, "server_content") or _get_field(message, "serverContent")
     if server_content:
         input_transcription = _get_field(server_content, "input_transcription") or _get_field(
@@ -135,6 +215,17 @@ def _merge_live_message(result: RealtimeTurnResult, message: Any, settings: Sett
     usage = _get_field(message, "usage_metadata") or _get_field(message, "usageMetadata")
     if usage:
         result.raw["usage_seen"] = True
+
+
+def _stream_event_from_live_message(message: Any, settings: Settings) -> RealtimeStreamEvent:
+    event = RealtimeStreamEvent()
+    _merge_live_message(event, message, settings)
+    server_content = _get_field(message, "server_content") or _get_field(message, "serverContent")
+    event.turn_complete = bool(
+        _get_field(server_content, "turn_complete") or _get_field(server_content, "turnComplete")
+    )
+    event.interrupted = bool(_get_field(server_content, "interrupted"))
+    return event
 
 
 def _audio_chunk_from_inline_data(inline_data: Any, settings: Settings) -> TTSResult:

@@ -14,6 +14,7 @@ export interface AppState {
   status: string;
   wakeWord: string;
   wakeSerial: number;
+  currentUserDraft: string;
   currentAssistantDraft: string;
   messages: ConversationMessage[];
   visualSummary: string;
@@ -29,6 +30,8 @@ export interface AppState {
   setAvatar: (payload: AvatarStatePayload) => void;
   setCost: (cost: CostMeter) => void;
   addMessage: (speaker: ConversationMessage["speaker"], text: string) => void;
+  setUserSpeechDraft: (text: string) => void;
+  finalizeUserSpeech: (text: string) => void;
   appendAssistantDelta: (delta: string) => void;
   finalizeAssistant: (text: string) => void;
 }
@@ -53,6 +56,7 @@ export const useAppStore = create<AppState>((set) => ({
   status: "sleeping",
   wakeWord: "阿斯塔",
   wakeSerial: 0,
+  currentUserDraft: "",
   currentAssistantDraft: "",
   messages: [],
   visualSummary: "",
@@ -76,6 +80,14 @@ export const useAppStore = create<AppState>((set) => ({
   addMessage: (speaker, text) =>
     set((state) => ({
       messages: [...state.messages, { id: createId("msg"), speaker, text }],
+    })),
+  setUserSpeechDraft: (currentUserDraft) => set({ currentUserDraft }),
+  finalizeUserSpeech: (text) =>
+    set((state) => ({
+      currentUserDraft: "",
+      messages: text
+        ? [...state.messages, { id: createId("msg"), speaker: "user", text }]
+        : state.messages,
     })),
   appendAssistantDelta: (delta) =>
     set((state) => ({ currentAssistantDraft: state.currentAssistantDraft + delta })),

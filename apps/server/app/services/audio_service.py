@@ -3,7 +3,7 @@ import base64
 from app.config import Settings
 from app.contracts.model_io import ASRResult, AudioChunkPayload, RealtimeTurnResult, TTSInput, TTSResult
 from app.providers.asr.base import ASRProvider
-from app.providers.realtime.base import RealtimeProvider
+from app.providers.realtime.base import RealtimeAudioStream, RealtimeProvider
 from app.providers.tts.base import TTSProvider
 
 
@@ -40,6 +40,11 @@ class AudioService:
             raise RuntimeError("Realtime provider is not configured.")
         return await self.realtime_provider.respond_to_text(text, metadata)
 
+    async def open_realtime_audio_stream(self, metadata: dict | None = None) -> RealtimeAudioStream:
+        if not self.realtime_provider:
+            raise RuntimeError("Realtime provider is not configured.")
+        return await self.realtime_provider.open_audio_stream(metadata)
+
     def decode_audio_chunk(self, payload: AudioChunkPayload) -> bytes:
         if not payload.data_base64:
             return b""
@@ -53,3 +58,7 @@ class AudioService:
     @property
     def has_realtime(self) -> bool:
         return self.realtime_provider is not None
+
+    @property
+    def can_stream_realtime(self) -> bool:
+        return bool(self.realtime_provider and self.realtime_provider.supports_audio_streaming)
