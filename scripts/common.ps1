@@ -40,6 +40,7 @@ function Resolve-Python {
 function Resolve-Uv {
     $Candidates = @()
     $Candidates += Get-UserPythonRoots | ForEach-Object { Join-Path $_ "Scripts\uv.exe" }
+    $Candidates += Join-Path $env:USERPROFILE ".local\bin\uv.exe"
     $Candidates += Join-Path $env:USERPROFILE ".cargo\bin\uv.exe"
     return Resolve-CommandPath -Name "uv" -Candidates $Candidates
 }
