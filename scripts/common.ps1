@@ -52,6 +52,17 @@ function Resolve-Ollama {
     return Resolve-CommandPath -Name "ollama" -Candidates $Candidates
 }
 
+function Resolve-Gcloud {
+    $Candidates = @(
+        (Join-Path $env:LOCALAPPDATA "Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd"),
+        (Join-Path $env:ProgramFiles "Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd")
+    )
+    if (${env:ProgramFiles(x86)}) {
+        $Candidates += Join-Path ${env:ProgramFiles(x86)} "Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd"
+    }
+    return Resolve-CommandPath -Name "gcloud.cmd" -Candidates $Candidates
+}
+
 function Import-DotEnvFile {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -72,6 +83,48 @@ function Import-DotEnvFile {
             [Environment]::SetEnvironmentVariable($Name, $Value, "Process")
         }
     }
+}
+
+function Set-DotEnvValues {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Values,
+        [string]$ExamplePath = ""
+    )
+
+    if (-not (Test-Path $Path)) {
+        if ($ExamplePath -and (Test-Path $ExamplePath)) {
+            Copy-Item $ExamplePath $Path
+        } else {
+            New-Item -ItemType File -Path $Path -Force | Out-Null
+        }
+    }
+
+    $Lines = @(Get-Content -Path $Path)
+    $Seen = @{}
+
+    for ($Index = 0; $Index -lt $Lines.Count; $Index++) {
+        $Line = $Lines[$Index]
+        if ($Line -notmatch "^\s*([^#][^=]*)=(.*)$") {
+            continue
+        }
+
+        $Name = $Matches[1].Trim()
+        if ($Values.ContainsKey($Name)) {
+            $Lines[$Index] = "$Name=$($Values[$Name])"
+            $Seen[$Name] = $true
+        }
+    }
+
+    foreach ($Name in $Values.Keys) {
+        if (-not $Seen.ContainsKey($Name)) {
+            $Lines += "$Name=$($Values[$Name])"
+        }
+    }
+
+    Set-Content -Path $Path -Value $Lines -Encoding UTF8
 }
 
 function ConvertTo-CmdArgument {

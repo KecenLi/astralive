@@ -20,43 +20,6 @@ $EnvPath = Join-Path $Root ".env"
 $EnvExamplePath = Join-Path $Root ".env.example"
 $GeminiBaseUrl = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
-function Set-DotEnvValues {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path,
-        [Parameter(Mandatory = $true)]
-        [hashtable]$Values
-    )
-
-    if (-not (Test-Path $Path)) {
-        Copy-Item $EnvExamplePath $Path
-    }
-
-    $Lines = @(Get-Content -Path $Path)
-    $Seen = @{}
-
-    for ($Index = 0; $Index -lt $Lines.Count; $Index++) {
-        $Line = $Lines[$Index]
-        if ($Line -notmatch "^\s*([^#][^=]*)=(.*)$") {
-            continue
-        }
-
-        $Name = $Matches[1].Trim()
-        if ($Values.ContainsKey($Name)) {
-            $Lines[$Index] = "$Name=$($Values[$Name])"
-            $Seen[$Name] = $true
-        }
-    }
-
-    foreach ($Name in $Values.Keys) {
-        if (-not $Seen.ContainsKey($Name)) {
-            $Lines += "$Name=$($Values[$Name])"
-        }
-    }
-
-    Set-Content -Path $Path -Value $Lines -Encoding UTF8
-}
-
 if (-not (Test-Path $KeyFile)) {
     throw "Gemini key file was not found: $KeyFile"
 }
@@ -74,7 +37,7 @@ if (Test-Path $EnvPath) {
     Copy-Item $EnvPath $BackupPath -Force
 }
 
-Set-DotEnvValues -Path $EnvPath -Values @{
+Set-DotEnvValues -Path $EnvPath -ExamplePath $EnvExamplePath -Values @{
     "LLM_PROVIDER" = "gemini"
     "VISION_PROVIDER" = $VisionProvider
     "GEMINI_BASE_URL" = $GeminiBaseUrl

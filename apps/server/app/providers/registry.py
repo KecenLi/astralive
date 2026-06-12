@@ -3,9 +3,11 @@ from app.providers.asr.mock import MockASRProvider
 from app.providers.llm.mock import MockLLMProvider
 from app.providers.llm.openai_compatible import OpenAICompatibleLLMProvider
 from app.providers.llm.ollama import OllamaLLMProvider
+from app.providers.llm.vertex_ai import VertexAILLMProvider
 from app.providers.tts.mock import MockTTSProvider
 from app.providers.vision.mock import MockVisionProvider
 from app.providers.vision.openai_compatible import OpenAICompatibleVisionProvider
+from app.providers.vision.vertex_ai import VertexAIVisionProvider
 
 
 class ProviderRegistry:
@@ -16,6 +18,8 @@ class ProviderRegistry:
         return MockASRProvider()
 
     def vision(self):
+        if self.settings.vision_provider == "vertex_ai":
+            return VertexAIVisionProvider(self.settings)
         if self.settings.vision_provider == "gemini":
             return OpenAICompatibleVisionProvider(
                 self.settings,
@@ -29,6 +33,8 @@ class ProviderRegistry:
         return MockVisionProvider()
 
     def llm(self):
+        if self.settings.llm_provider == "vertex_ai":
+            return VertexAILLMProvider(self.settings)
         if self.settings.llm_provider == "gemini":
             return OpenAICompatibleLLMProvider(
                 self.settings,

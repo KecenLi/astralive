@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     gemini_vision_model: str = "gemini-3.5-flash"
     gemini_realtime_model: str = ""
 
+    vertex_ai_project: str = ""
+    vertex_ai_location: str = "global"
+    vertex_ai_api_endpoint: str = "https://aiplatform.googleapis.com"
+    vertex_ai_llm_model: str = "gemini-2.5-flash"
+    vertex_ai_vision_model: str = "gemini-2.5-flash"
+
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_llm_model: str = "qwen2.5:0.5b"
 
