@@ -3,6 +3,7 @@ param(
     [int]$WebPort = 15173,
     [switch]$SkipDependencySync,
     [switch]$Headed,
+    [switch]$VerifyIdleTimeout,
     [switch]$KeepArtifacts
 )
 
@@ -276,6 +277,7 @@ try {
         "LLM_PROVIDER" = "mock"
         "TTS_PROVIDER" = "mock"
         "REALTIME_PROVIDER" = "mock"
+        "REALTIME_INPUT_IDLE_TIMEOUT_SECONDS" = $(if ($VerifyIdleTimeout) { "1" } else { "8" })
         "DATA_DIR" = (Join-Path $WorkDir "data")
     }
     $ServerProcess = Start-ProcessWithEnv `
@@ -330,6 +332,7 @@ const { setTimeout: sleep } = require("node:timers/promises");
 
 const DEBUG_PORT = Number(__DEBUG_PORT_JSON__);
 const WEB_URL = __WEB_URL_JSON__;
+const VERIFY_IDLE_TIMEOUT = Boolean(__VERIFY_IDLE_TIMEOUT_JSON__);
 const TARGET_TIMEOUT_MS = 20000;
 const VERIFY_TIMEOUT_MS = 45000;
 
@@ -448,6 +451,8 @@ async function main() {
   let sentFinalChunks = 0;
   let asrText = "";
   let assistantText = "";
+  let receivedErrorCode = "";
+  const runtimeExceptions = [];
 
   const count = (table, type) => {
     table[type] = (table[type] || 0) + 1;
@@ -468,7 +473,10 @@ async function main() {
     if (!event) return;
     count(receivedTypes, event.type);
     if (event.type === "error") {
-      throw new Error(`Server error event: ${JSON.stringify(event.payload)}`);
+      receivedErrorCode = String(event.payload?.code || "");
+      if (!VERIFY_IDLE_TIMEOUT) {
+        throw new Error(`Server error event: ${JSON.stringify(event.payload)}`);
+      }
     }
     if (event.type === "asr.transcript.final") asrText = String(event.payload?.text || "");
     if (event.type === "assistant.text.final") assistantText = String(event.payload?.text || "");
@@ -478,6 +486,10 @@ async function main() {
     await cdp.send("Runtime.enable");
     await cdp.send("Network.enable");
     await cdp.send("Page.enable");
+
+    cdp.on("Runtime.exceptionThrown", ({ exceptionDetails }) => {
+      runtimeExceptions.push(exceptionDetails?.text || exceptionDetails?.exception?.description || "runtime exception");
+    });
 
     await waitFor(async () => {
       const result = await cdp.send("Runtime.evaluate", {
@@ -502,12 +514,94 @@ async function main() {
       return value?.found && !value.disabled ? value : null;
     }, TARGET_TIMEOUT_MS, "enabled realtime microphone button");
 
+    if (VERIFY_IDLE_TIMEOUT) {
+      await cdp.send("Runtime.evaluate", {
+        expression: `(() => {
+          if (window.__astraliveDropRealtimeAudioAfterStart) return true;
+          const originalSend = WebSocket.prototype.send;
+          let nonFinalAudioChunks = 0;
+          window.__astraliveDroppedAudioAttempts = 0;
+          window.__astraliveDroppedFinalAttempts = 0;
+          WebSocket.prototype.send = function(data) {
+            try {
+              const event = JSON.parse(data);
+              if (event && event.type === "client.media.audio_chunk") {
+                if (event.payload?.is_final) {
+                  window.__astraliveDroppedFinalAttempts += 1;
+                  return undefined;
+                }
+                nonFinalAudioChunks += 1;
+                if (nonFinalAudioChunks > 4) {
+                  window.__astraliveDroppedAudioAttempts += 1;
+                  return undefined;
+                }
+              }
+            } catch {
+              // Non-JSON websocket frames are not part of this verifier.
+            }
+            return originalSend.call(this, data);
+          };
+          window.__astraliveDropRealtimeAudioAfterStart = true;
+          return true;
+        })()`,
+        awaitPromise: true,
+      });
+    }
+
     await cdp.send("Runtime.evaluate", {
       expression: `document.querySelector(".mic-panel .toolbar button:nth-of-type(4)").click()`,
       awaitPromise: true,
     });
 
     await waitFor(() => sentAudioChunks >= 3, 20000, "browser PCM audio chunks");
+    if (VERIFY_IDLE_TIMEOUT) {
+      await waitFor(
+        () => receivedErrorCode === "realtime_input_idle_timeout",
+        VERIFY_TIMEOUT_MS,
+        "offline realtime input idle timeout"
+      );
+      const readIdleProbe = async () => {
+        const result = await cdp.send("Runtime.evaluate", {
+          expression: `({
+            droppedAudioAttempts: window.__astraliveDroppedAudioAttempts ?? 0,
+            droppedFinalAttempts: window.__astraliveDroppedFinalAttempts ?? 0,
+          })`,
+          returnByValue: true,
+        });
+        return result.result?.value;
+      };
+      let idleProbe;
+      try {
+        idleProbe = await waitFor(async () => {
+          const first = await readIdleProbe();
+          await sleep(1200);
+          const second = await readIdleProbe();
+          if (!first || !second) return null;
+          return second.droppedAudioAttempts === first.droppedAudioAttempts ? second : null;
+        }, 10000, "frontend stopped sending realtime audio attempts after idle timeout", 100);
+      } catch (error) {
+        const value = await readIdleProbe();
+        console.error(`sent_audio_chunks=${sentAudioChunks}`);
+        console.error(`sent_final_chunks=${sentFinalChunks}`);
+        console.error(`received_error_code=${receivedErrorCode}`);
+        console.error(`idle_probe=${JSON.stringify(value)}`);
+        console.error(`runtime_exceptions=${JSON.stringify(runtimeExceptions)}`);
+        console.error(`sent_types=${JSON.stringify(sentTypes)}`);
+        console.error(`received_types=${JSON.stringify(receivedTypes)}`);
+        throw error;
+      }
+
+      console.log(`web_url=${WEB_URL}`);
+      console.log(`sent_audio_chunks=${sentAudioChunks}`);
+      console.log(`sent_final_chunks=${sentFinalChunks}`);
+      console.log(`received_error_code=${receivedErrorCode}`);
+      console.log(`dropped_audio_attempts=${idleProbe.droppedAudioAttempts}`);
+      console.log(`dropped_final_attempts=${idleProbe.droppedFinalAttempts}`);
+      console.log(`sent_types=${JSON.stringify(sentTypes)}`);
+      console.log(`received_types=${JSON.stringify(receivedTypes)}`);
+      return;
+    }
+
     await sleep(3500);
 
     await cdp.send("Runtime.evaluate", {
@@ -552,6 +646,7 @@ main().catch((error) => {
 
     $NodeVerifier = $NodeVerifier.Replace("__DEBUG_PORT_JSON__", ($RemoteDebuggingPort | ConvertTo-Json -Compress))
     $NodeVerifier = $NodeVerifier.Replace("__WEB_URL_JSON__", ($WebUrl | ConvertTo-Json -Compress))
+    $NodeVerifier = $NodeVerifier.Replace("__VERIFY_IDLE_TIMEOUT_JSON__", ($VerifyIdleTimeout.IsPresent | ConvertTo-Json -Compress))
     Set-Content -Path $CdpScript -Value $NodeVerifier -Encoding UTF8
 
     $ChromeProcess = Start-Process -FilePath $Chrome -ArgumentList $ChromeArgs -PassThru

@@ -26,9 +26,14 @@ interface ServerEventEffects {
   stopRealtimeAudio?: () => void;
 }
 
+function cancelSpeech() {
+  if (!("speechSynthesis" in window)) return;
+  window.speechSynthesis.cancel();
+}
+
 function speak(text: string) {
   if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") return;
-  window.speechSynthesis.cancel();
+  cancelSpeech();
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.lang = "zh-CN";
   utterance.rate = 1;
@@ -51,7 +56,7 @@ function handleServerEvent(event: EventEnvelope<unknown>, effects: ServerEventEf
     if (!payload.audio_expected) speak(text);
   }
   if (event.type === "assistant.audio.chunk") {
-    window.speechSynthesis.cancel();
+    cancelSpeech();
     void assistantAudioPlayer.play(event.payload as AssistantAudioPayload).catch((error) => {
       store.addMessage("system", error instanceof Error ? error.message : String(error));
     });
@@ -103,7 +108,7 @@ export default function App() {
   );
 
   const stopClientAudio = useCallback(() => {
-    window.speechSynthesis.cancel();
+    cancelSpeech();
     assistantAudioPlayer.reset();
     audioTurnActiveRef.current = false;
     useAppStore.getState().setUserSpeechDraft("");
@@ -138,7 +143,7 @@ export default function App() {
   const wake = useCallback(() => {
     const actions = useAppStore.getState();
     if (!actions.sessionId) return;
-    window.speechSynthesis.cancel();
+    cancelSpeech();
     assistantAudioPlayer.reset();
     const sent = wsClient.send(
       createEvent("client.wake.detected", actions.sessionId, { wake_word: actions.wakeWord }),
@@ -168,7 +173,7 @@ export default function App() {
   const sendUserText = useCallback((text: string) => {
     const actions = useAppStore.getState();
     if (!actions.sessionId) return;
-    window.speechSynthesis.cancel();
+    cancelSpeech();
     assistantAudioPlayer.reset();
     audioTurnActiveRef.current = false;
     actions.setUserSpeechDraft("");
@@ -180,7 +185,7 @@ export default function App() {
     const actions = useAppStore.getState();
     if (!actions.sessionId) return false;
     if (!payload.is_final && !audioTurnActiveRef.current) {
-      window.speechSynthesis.cancel();
+      cancelSpeech();
       assistantAudioPlayer.reset();
       actions.setUserSpeechDraft("");
       audioTurnActiveRef.current = true;
