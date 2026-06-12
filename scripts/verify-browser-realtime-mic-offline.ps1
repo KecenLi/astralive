@@ -4,6 +4,7 @@ param(
     [switch]$SkipDependencySync,
     [switch]$Headed,
     [switch]$VerifyIdleTimeout,
+    [switch]$VerifyRealtimeDisabled,
     [switch]$KeepArtifacts
 )
 
@@ -276,7 +277,7 @@ try {
         "VISION_PROVIDER" = "mock"
         "LLM_PROVIDER" = "mock"
         "TTS_PROVIDER" = "mock"
-        "REALTIME_PROVIDER" = "mock"
+        "REALTIME_PROVIDER" = $(if ($VerifyRealtimeDisabled) { "none" } else { "mock" })
         "REALTIME_INPUT_IDLE_TIMEOUT_SECONDS" = $(if ($VerifyIdleTimeout) { "1" } else { "8" })
         "DATA_DIR" = (Join-Path $WorkDir "data")
     }
@@ -333,6 +334,8 @@ const { setTimeout: sleep } = require("node:timers/promises");
 const DEBUG_PORT = Number(__DEBUG_PORT_JSON__);
 const WEB_URL = __WEB_URL_JSON__;
 const VERIFY_IDLE_TIMEOUT = Boolean(__VERIFY_IDLE_TIMEOUT_JSON__);
+const VERIFY_REALTIME_DISABLED = Boolean(__VERIFY_REALTIME_DISABLED_JSON__);
+const EXPECTED_REALTIME_PROVIDER = __EXPECTED_REALTIME_PROVIDER_JSON__;
 const EXPECTED_IDLE_TIMEOUT_LABEL = __EXPECTED_IDLE_TIMEOUT_LABEL_JSON__;
 const TARGET_TIMEOUT_MS = 20000;
 const VERIFY_TIMEOUT_MS = 45000;
@@ -506,14 +509,15 @@ async function main() {
       return { found: true, disabled: button.disabled, title: button.title };
     })()`;
 
-    await waitFor(async () => {
+    const buttonState = await waitFor(async () => {
       const result = await cdp.send("Runtime.evaluate", {
         expression: buttonExpression,
         returnByValue: true,
       });
       const value = result.result?.value;
+      if (VERIFY_REALTIME_DISABLED) return value?.found && value.disabled ? value : null;
       return value?.found && !value.disabled ? value : null;
-    }, TARGET_TIMEOUT_MS, "enabled realtime microphone button");
+    }, TARGET_TIMEOUT_MS, VERIFY_REALTIME_DISABLED ? "disabled realtime microphone button" : "enabled realtime microphone button");
 
     const debugAudio = await waitFor(async () => {
       const result = await cdp.send("Runtime.evaluate", {
@@ -529,8 +533,16 @@ async function main() {
         returnByValue: true,
       });
       const value = result.result?.value || {};
-      return value.Realtime === "mock" && value["Idle timeout"] === EXPECTED_IDLE_TIMEOUT_LABEL ? value : null;
+      return value.Realtime === EXPECTED_REALTIME_PROVIDER && value["Idle timeout"] === EXPECTED_IDLE_TIMEOUT_LABEL ? value : null;
     }, TARGET_TIMEOUT_MS, "debug audio capability metrics");
+
+    if (VERIFY_REALTIME_DISABLED) {
+      console.log(`web_url=${WEB_URL}`);
+      console.log(`debug_audio=${JSON.stringify(debugAudio)}`);
+      console.log(`mic_button_disabled=${buttonState.disabled}`);
+      console.log(`mic_button_title=${buttonState.title}`);
+      return;
+    }
 
     if (VERIFY_IDLE_TIMEOUT) {
       await cdp.send("Runtime.evaluate", {
@@ -667,6 +679,8 @@ main().catch((error) => {
     $NodeVerifier = $NodeVerifier.Replace("__DEBUG_PORT_JSON__", ($RemoteDebuggingPort | ConvertTo-Json -Compress))
     $NodeVerifier = $NodeVerifier.Replace("__WEB_URL_JSON__", ($WebUrl | ConvertTo-Json -Compress))
     $NodeVerifier = $NodeVerifier.Replace("__VERIFY_IDLE_TIMEOUT_JSON__", ($VerifyIdleTimeout.IsPresent | ConvertTo-Json -Compress))
+    $NodeVerifier = $NodeVerifier.Replace("__VERIFY_REALTIME_DISABLED_JSON__", ($VerifyRealtimeDisabled.IsPresent | ConvertTo-Json -Compress))
+    $NodeVerifier = $NodeVerifier.Replace("__EXPECTED_REALTIME_PROVIDER_JSON__", ($(if ($VerifyRealtimeDisabled) { "none" } else { "mock" }) | ConvertTo-Json -Compress))
     $NodeVerifier = $NodeVerifier.Replace("__EXPECTED_IDLE_TIMEOUT_LABEL_JSON__", ($(if ($VerifyIdleTimeout) { "1s" } else { "8s" }) | ConvertTo-Json -Compress))
     Set-Content -Path $CdpScript -Value $NodeVerifier -Encoding UTF8
 

@@ -37,7 +37,14 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
   const sessionId = useAppStore((state) => state.sessionId);
   const connection = useAppStore((state) => state.connection);
   const wakeWord = useAppStore((state) => state.wakeWord);
-  const realtimeReady = Boolean(sessionId) && connection === "connected";
+  const audioCapabilities = useAppStore((state) => state.audioCapabilities);
+  const realtimeAvailable = Boolean(audioCapabilities?.server_realtime_audio);
+  const realtimeReady = Boolean(sessionId) && connection === "connected" && realtimeAvailable;
+  const liveButtonTitle = liveStreaming
+    ? "结束实时语音"
+    : realtimeAvailable
+      ? "开始实时语音"
+      : "实时语音未启用";
 
   function stopMic() {
     recorderRef.current?.stop();
@@ -124,7 +131,7 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
     }
     if (startingRef.current) return;
     if (!realtimeReady) {
-      setMicState("WebSocket 未连接");
+      setMicState(connection === "connected" ? "实时语音未启用" : "WebSocket 未连接");
       return;
     }
     if (muted) {
@@ -272,9 +279,9 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
   useEffect(() => {
     if (liveStreaming && !realtimeReady) {
       stopLiveAudio(false);
-      setMicState("WebSocket 未连接");
+      setMicState(connection === "connected" ? "实时语音未启用" : "WebSocket 未连接");
     }
-  }, [liveStreaming, realtimeReady, stopLiveAudio]);
+  }, [connection, liveStreaming, realtimeReady, stopLiveAudio]);
 
   return (
     <section className="panel mic-panel">
@@ -298,7 +305,7 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
         <button
           className={`icon-button${liveStreaming ? " active" : ""}`}
           type="button"
-          title={liveStreaming ? "结束实时语音" : "开始实时语音"}
+          title={liveButtonTitle}
           disabled={!liveStreaming && !realtimeReady}
           onClick={() => void startLiveAudio()}
         >
@@ -329,7 +336,7 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
         </div>
         <div>
           <dt>实时</dt>
-          <dd>{liveStreaming ? "streaming" : "off"}</dd>
+          <dd>{liveStreaming ? "streaming" : realtimeAvailable ? "off" : "unavailable"}</dd>
         </div>
       </dl>
     </section>
