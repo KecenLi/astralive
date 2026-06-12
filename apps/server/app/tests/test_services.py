@@ -3,8 +3,9 @@ import time
 
 import pytest
 
-from app.api.websocket import AudioRuntimeState, _handle_realtime_audio_chunk, _next_realtime_stream_event
+from app.api.websocket import AudioRuntimeState, _handle_event, _handle_realtime_audio_chunk, _next_realtime_stream_event
 from app.config import Settings
+from app.contracts.events import EventEnvelope
 from app.contracts.media import FramePayload
 from app.contracts.model_io import (
     AudioChunkPayload,
@@ -28,6 +29,7 @@ from app.providers.vision.openai_compatible import OpenAICompatibleVisionProvide
 from app.providers.vision.vertex_ai import VertexAIVisionProvider
 from app.services.dialogue_service import DialogueService
 from app.services.vision_service import VisionService
+from app.services.wake_service import WakeService
 
 
 async def test_mock_vision_updates_cost() -> None:
@@ -583,3 +585,127 @@ async def test_realtime_asr_only_result_falls_back_to_dialogue_tts() -> None:
     assert "assistant.text.final" in event_types
     assert "assistant.audio.chunk" in event_types
     assert audio_done_events[-1]["payload"]["source"] == "tts"
+
+
+async def test_user_text_closes_active_realtime_audio_stream() -> None:
+    stream = OrderSensitiveRealtimeStream()
+    websocket = StubWebSocket()
+    runtime = AudioRuntimeState()
+    session = SessionState(session_id="test_session")
+    settings = Settings(realtime_provider="mock", llm_provider="mock", tts_provider="mock")
+    send_lock = asyncio.Lock()
+    audio = StubStreamingAudioService(stream)
+    dialogue = DialogueService(ProviderRegistry(settings).llm())
+    avatar = AvatarService()
+    first_payload = AudioChunkPayload(
+        chunk_id="chunk_1",
+        mime="audio/pcm;rate=16000",
+        sample_rate=16000,
+        channels=1,
+        encoding="pcm_s16le",
+        data_base64="",
+        is_final=False,
+    )
+
+    await _handle_realtime_audio_chunk(
+        websocket,  # type: ignore[arg-type]
+        session,
+        audio,  # type: ignore[arg-type]
+        dialogue,
+        avatar,
+        settings,
+        runtime,
+        first_payload,
+        b"\x00\x00" * 160,
+        0.0,
+        send_lock,
+        None,
+    )
+    assert runtime.stream is stream
+    assert not stream.closed
+
+    task = await _handle_event(
+        websocket,  # type: ignore[arg-type]
+        EventEnvelope(type="client.user.text", session_id=session.session_id, payload={"text": "文本打断"}),
+        session,
+        object(),  # type: ignore[arg-type]
+        dialogue,
+        audio,  # type: ignore[arg-type]
+        avatar,
+        WakeService(),
+        settings,
+        runtime,
+        0.0,
+        send_lock,
+        None,
+    )
+    if task:
+        await asyncio.wait_for(task, timeout=1)
+
+    event_types = [event["type"] for event in websocket.events]
+    assert stream.closed is True
+    assert runtime.stream is None
+    assert runtime.turn_bytes == 0
+    assert "assistant.text.final" in event_types
+
+
+async def test_wake_closes_active_realtime_audio_stream() -> None:
+    stream = OrderSensitiveRealtimeStream()
+    websocket = StubWebSocket()
+    runtime = AudioRuntimeState()
+    session = SessionState(session_id="test_session")
+    settings = Settings(realtime_provider="mock", llm_provider="mock")
+    send_lock = asyncio.Lock()
+    audio = StubStreamingAudioService(stream)
+    dialogue = DialogueService(ProviderRegistry(settings).llm())
+    avatar = AvatarService()
+    first_payload = AudioChunkPayload(
+        chunk_id="chunk_1",
+        mime="audio/pcm;rate=16000",
+        sample_rate=16000,
+        channels=1,
+        encoding="pcm_s16le",
+        data_base64="",
+        is_final=False,
+    )
+
+    await _handle_realtime_audio_chunk(
+        websocket,  # type: ignore[arg-type]
+        session,
+        audio,  # type: ignore[arg-type]
+        dialogue,
+        avatar,
+        settings,
+        runtime,
+        first_payload,
+        b"\x00\x00" * 160,
+        0.0,
+        send_lock,
+        None,
+    )
+    assert runtime.stream is stream
+    assert not stream.closed
+
+    task = await _handle_event(
+        websocket,  # type: ignore[arg-type]
+        EventEnvelope(type="client.wake.detected", session_id=session.session_id, payload={"wake_word": "阿斯塔"}),
+        session,
+        object(),  # type: ignore[arg-type]
+        dialogue,
+        audio,  # type: ignore[arg-type]
+        avatar,
+        WakeService(),
+        settings,
+        runtime,
+        0.0,
+        send_lock,
+        None,
+    )
+
+    event_types = [event["type"] for event in websocket.events]
+    assert task is None
+    assert stream.closed is True
+    assert runtime.stream is None
+    assert runtime.turn_bytes == 0
+    assert session.status == "listening"
+    assert "server.session.state" in event_types

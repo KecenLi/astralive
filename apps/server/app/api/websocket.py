@@ -130,6 +130,7 @@ async def _handle_event(
 
     if event.type == "client.wake.detected":
         _cancel_task(response_task)
+        await _close_audio_runtime(audio_runtime)
         wake.wake(session)
         await _send(
             websocket,
@@ -307,6 +308,7 @@ async def _handle_event(
         )
 
     if event.type in {"client.user.text", "client.user.speech.final"}:
+        await _close_audio_runtime(audio_runtime)
         user_text = str(event.payload.get("text", "")).strip()
         return await _handle_user_text(
             websocket,
