@@ -221,6 +221,7 @@ async def _handle_event(
                 websocket,
                 session,
                 audio,
+                dialogue,
                 avatar,
                 settings,
                 audio_runtime,
@@ -328,6 +329,7 @@ async def _handle_realtime_audio_chunk(
     websocket: WebSocket,
     session: SessionState,
     audio: AudioService,
+    dialogue: DialogueService,
     avatar: AvatarService,
     settings: Settings,
     audio_runtime: AudioRuntimeState,
@@ -412,6 +414,8 @@ async def _handle_realtime_audio_chunk(
                     _run_realtime_stream_receiver(
                         websocket,
                         session,
+                        dialogue,
+                        audio,
                         avatar,
                         settings,
                         audio_runtime,
@@ -571,6 +575,8 @@ async def _run_dialogue_response(
 async def _run_realtime_stream_receiver(
     websocket: WebSocket,
     session: SessionState,
+    dialogue: DialogueService,
+    audio: AudioService,
     avatar: AvatarService,
     settings: Settings,
     audio_runtime: AudioRuntimeState,
@@ -656,6 +662,20 @@ async def _run_realtime_stream_receiver(
                 ),
                 send_lock,
             )
+        if input_text and not output_text and sent_audio_chunks == 0:
+            session.cost_meter.asr_calls += 1
+            await _run_dialogue_response(
+                websocket,
+                session,
+                dialogue,
+                audio,
+                avatar,
+                settings,
+                input_text,
+                started,
+                send_lock,
+            )
+            return
         if output_text:
             await _send(
                 websocket,

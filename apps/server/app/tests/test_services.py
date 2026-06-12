@@ -429,9 +429,26 @@ class StubStreamingAudioService:
         self.stream = stream
         self.has_realtime = True
         self.can_stream_realtime = True
+        self.synthesize_calls: list[tuple[str, str]] = []
 
     async def open_realtime_audio_stream(self, metadata: dict | None = None):
         return self.stream
+
+    async def synthesize(self, text: str, emotion: str) -> TTSResult:
+        self.synthesize_calls.append((text, emotion))
+        return TTSResult(
+            audio_base64="AAAA",
+            mime="audio/pcm;rate=24000",
+            sample_rate=24000,
+            channels=1,
+            encoding="pcm_s16le",
+        )
+
+
+class AsrOnlyRealtimeStream(OrderSensitiveRealtimeStream):
+    async def receive(self):
+        await self.finished.wait()
+        yield RealtimeStreamEvent(input_text="只返回转写", turn_complete=True)
 
 
 class StubWebSocket:
@@ -451,6 +468,7 @@ async def test_realtime_audio_receiver_starts_after_final_audio_chunk() -> None:
     settings = Settings(realtime_provider="mock")
     send_lock = asyncio.Lock()
     audio = StubStreamingAudioService(stream)
+    dialogue = DialogueService(ProviderRegistry(settings).llm())
     avatar = AvatarService()
 
     first_payload = AudioChunkPayload(
@@ -466,6 +484,7 @@ async def test_realtime_audio_receiver_starts_after_final_audio_chunk() -> None:
         websocket,  # type: ignore[arg-type]
         session,
         audio,  # type: ignore[arg-type]
+        dialogue,
         avatar,
         settings,
         runtime,
@@ -486,6 +505,7 @@ async def test_realtime_audio_receiver_starts_after_final_audio_chunk() -> None:
         websocket,  # type: ignore[arg-type]
         session,
         audio,  # type: ignore[arg-type]
+        dialogue,
         avatar,
         settings,
         runtime,
@@ -502,3 +522,64 @@ async def test_realtime_audio_receiver_starts_after_final_audio_chunk() -> None:
     event_types = [event["type"] for event in websocket.events]
     assert "asr.transcript.final" in event_types
     assert "assistant.audio.done" in event_types
+
+
+async def test_realtime_asr_only_result_falls_back_to_dialogue_tts() -> None:
+    stream = AsrOnlyRealtimeStream()
+    websocket = StubWebSocket()
+    runtime = AudioRuntimeState()
+    session = SessionState(session_id="test_session")
+    settings = Settings(realtime_provider="mock", llm_provider="mock", tts_provider="vertex_ai")
+    send_lock = asyncio.Lock()
+    audio = StubStreamingAudioService(stream)
+    dialogue = DialogueService(ProviderRegistry(settings).llm())
+    avatar = AvatarService()
+    first_payload = AudioChunkPayload(
+        chunk_id="chunk_1",
+        mime="audio/pcm;rate=16000",
+        sample_rate=16000,
+        channels=1,
+        encoding="pcm_s16le",
+        data_base64="",
+        is_final=False,
+    )
+
+    await _handle_realtime_audio_chunk(
+        websocket,  # type: ignore[arg-type]
+        session,
+        audio,  # type: ignore[arg-type]
+        dialogue,
+        avatar,
+        settings,
+        runtime,
+        first_payload,
+        b"\x00\x00" * 160,
+        0.0,
+        send_lock,
+        None,
+    )
+    task = await _handle_realtime_audio_chunk(
+        websocket,  # type: ignore[arg-type]
+        session,
+        audio,  # type: ignore[arg-type]
+        dialogue,
+        avatar,
+        settings,
+        runtime,
+        first_payload.model_copy(update={"chunk_id": "chunk_final", "is_final": True}),
+        b"",
+        0.0,
+        send_lock,
+        None,
+    )
+    if task:
+        await asyncio.wait_for(task, timeout=1)
+
+    event_types = [event["type"] for event in websocket.events]
+    audio_done_events = [event for event in websocket.events if event["type"] == "assistant.audio.done"]
+    assert session.last_user_text == "只返回转写"
+    assert audio.synthesize_calls
+    assert "asr.transcript.final" in event_types
+    assert "assistant.text.final" in event_types
+    assert "assistant.audio.chunk" in event_types
+    assert audio_done_events[-1]["payload"]["source"] == "tts"

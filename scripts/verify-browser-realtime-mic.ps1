@@ -356,13 +356,21 @@ async function main() {
       awaitPromise: true,
     });
 
-    await waitFor(() =>
-      sentFinalChunks >= 1 &&
-      receivedTypes["asr.transcript.final"] >= 1 &&
-      receivedTypes["assistant.audio.done"] >= 1,
-      VERIFY_TIMEOUT_MS,
-      "browser realtime microphone Live response"
-    );
+    try {
+      await waitFor(() =>
+        sentFinalChunks >= 1 &&
+        receivedTypes["asr.transcript.final"] >= 1 &&
+        receivedTypes["assistant.audio.done"] >= 1,
+        VERIFY_TIMEOUT_MS,
+        "browser realtime microphone Live response"
+      );
+    } catch (error) {
+      console.error(`sent_audio_chunks=${sentAudioChunks}`);
+      console.error(`sent_final_chunks=${sentFinalChunks}`);
+      console.error(`sent_types=${JSON.stringify(sentTypes)}`);
+      console.error(`received_types=${JSON.stringify(receivedTypes)}`);
+      throw error;
+    }
 
     console.log(`web_url=${WEB_URL}`);
     console.log(`sent_audio_chunks=${sentAudioChunks}`);
