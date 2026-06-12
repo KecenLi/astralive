@@ -7,6 +7,7 @@ import {
   LIVE_INPUT_SAMPLE_RATE,
   PcmRecorder,
 } from "../../features/media/pcmRecorder";
+import { LiveAudioGate, LiveAudioGateDecision } from "../../features/media/voiceActivity";
 import { getSpeechRecognition, SpeechRecognition } from "../../features/wakeword/speechRecognition";
 import { AudioChunkPayload, createId } from "../../lib/events";
 
@@ -27,6 +28,8 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
   const streamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const recorderRef = useRef<PcmRecorder | null>(null);
+  const audioGateRef = useRef<LiveAudioGate | null>(null);
+  const audioSentRef = useRef(false);
   const startingRef = useRef(false);
   const rafRef = useRef(0);
   const wakeAtRef = useRef(0);
@@ -39,6 +42,8 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
   function stopMic() {
     recorderRef.current?.stop();
     recorderRef.current = null;
+    audioGateRef.current = null;
+    audioSentRef.current = false;
     setLiveStreaming(false);
     cancelAnimationFrame(rafRef.current);
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -95,12 +100,16 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
       const hadRecorder = Boolean(recorderRef.current);
       recorderRef.current?.stop();
       recorderRef.current = null;
+      audioGateRef.current?.reset();
+      audioGateRef.current = null;
       startingRef.current = false;
       setLiveStreaming(false);
-      if (sendFinal && hadRecorder) {
+      const shouldSendFinal = sendFinal && hadRecorder && audioSentRef.current;
+      if (shouldSendFinal) {
         const sent = sendAudioChunk(new ArrayBuffer(0), true);
         if (!sent) setMicState("WebSocket 未连接");
       }
+      audioSentRef.current = false;
       if (hadRecorder) {
         setMicState("ready");
       }
@@ -129,15 +138,47 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
       return;
     }
 
+    audioGateRef.current = new LiveAudioGate({ sampleRate: LIVE_INPUT_SAMPLE_RATE });
+    audioSentRef.current = false;
     const recorder = new PcmRecorder({
       outputSampleRate: LIVE_INPUT_SAMPLE_RATE,
       onChunk: (chunk) => {
-        const sent = sendAudioChunk(chunk, false);
+        const gate = audioGateRef.current;
+        const decision: LiveAudioGateDecision = gate
+          ? gate.accept(chunk)
+          : { chunks: [chunk], rms: 0, state: "speaking", shouldStop: false, sendFinal: false };
+
+        let sent = true;
+        for (const gatedChunk of decision.chunks) {
+          sent = sendAudioChunk(gatedChunk, false);
+          if (!sent) break;
+          audioSentRef.current = true;
+        }
+
         if (!sent) {
-          recorder.stop();
-          if (recorderRef.current === recorder) recorderRef.current = null;
-          setLiveStreaming(false);
+          stopLiveAudio(false);
           setMicState("WebSocket 未连接");
+          return;
+        }
+
+        if (decision.state === "waiting") {
+          setMicState("等待语音");
+        } else if (decision.state === "speaking") {
+          setMicState("live streaming");
+        } else if (decision.state === "silence") {
+          setMicState("检测静音");
+        }
+
+        if (decision.shouldStop) {
+          if (decision.state === "initial_timeout") {
+            stopLiveAudio(false);
+            setMicState("未检测到语音");
+          } else if (decision.state === "max_turn") {
+            stopLiveAudio(decision.sendFinal);
+            setMicState("单轮已达上限");
+          } else {
+            stopLiveAudio(decision.sendFinal);
+          }
         }
       },
       onError: (error) => setMicState(error.message),
