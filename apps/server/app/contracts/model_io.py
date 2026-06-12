@@ -48,18 +48,40 @@ class ASRResult(BaseModel):
     text: str
     confidence: float = 0.0
     is_final: bool = True
+    raw: dict = Field(default_factory=dict)
 
 
 class TTSInput(BaseModel):
     text: str
     voice: str = "default"
     emotion: str = "neutral"
-    format: str = "mp3"
+    format: str = "pcm"
 
 
 class TTSResult(BaseModel):
     audio_base64: str = ""
-    mime: str = "audio/mpeg"
+    mime: str = "audio/pcm;rate=24000"
+    sample_rate: int = 24000
+    channels: int = 1
+    encoding: str = "pcm_s16le"
     duration_ms: int | None = None
     raw: dict = Field(default_factory=dict)
 
+
+class AudioChunkPayload(BaseModel):
+    chunk_id: str
+    mime: str = "audio/pcm;rate=16000"
+    sample_rate: int = 16000
+    channels: int = 1
+    encoding: Literal["pcm_s16le", "wav", "mp3", "webm_opus", "unknown"] = "pcm_s16le"
+    data_base64: str = ""
+    is_final: bool = False
+    metadata: dict = Field(default_factory=dict)
+
+
+class RealtimeTurnResult(BaseModel):
+    input_text: str = ""
+    output_text: str = ""
+    audio_chunks: list[TTSResult] = Field(default_factory=list)
+    emotion: str = "neutral"
+    raw: dict = Field(default_factory=dict)

@@ -160,6 +160,12 @@ select {
   background: #d7e7d1;
 }
 
+.icon-button.active {
+  border-color: #2f8f6b;
+  background: #cfe9df;
+  color: #103727;
+}
+
 .tool-button.subtle {
   background: #f2f4ef;
 }

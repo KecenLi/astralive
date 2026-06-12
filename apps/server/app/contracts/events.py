@@ -34,6 +34,8 @@ ServerEventType = Literal[
     "assistant.avatar.expression",
     "assistant.avatar.motion",
     "assistant.avatar.lipsync",
+    "asr.transcript.partial",
+    "asr.transcript.final",
     "vision.summary",
     "vision.need_focus",
     "vision.error",

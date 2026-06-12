@@ -13,7 +13,7 @@ try {
         $Python = Resolve-Python
 
         if ($Uv) {
-            & $Uv run pytest -s
+            & $Uv run python -m pytest -s
             & $Uv run ruff check app
         } elseif ($Python) {
             & $Python -m pytest -s

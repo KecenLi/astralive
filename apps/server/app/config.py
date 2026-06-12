@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     tts_provider: str = "mock"
     realtime_provider: str = "none"
 
+    google_application_credentials: str = ""
+
     openai_compatible_base_url: str = ""
     openai_compatible_api_key: str = ""
     openai_compatible_llm_model: str = ""
@@ -30,16 +32,31 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     gemini_llm_model: str = "gemini-3.5-flash"
     gemini_vision_model: str = "gemini-3.5-flash"
-    gemini_realtime_model: str = ""
+    gemini_asr_model: str = "gemini-3.1-flash-live-preview"
+    gemini_realtime_model: str = "gemini-3.1-flash-live-preview"
+    gemini_tts_model: str = "gemini-3.1-flash-tts-preview"
+    gemini_tts_voice: str = "Kore"
 
     vertex_ai_project: str = ""
     vertex_ai_location: str = "global"
     vertex_ai_api_endpoint: str = "https://aiplatform.googleapis.com"
     vertex_ai_llm_model: str = "gemini-2.5-flash"
     vertex_ai_vision_model: str = "gemini-2.5-flash"
+    vertex_ai_asr_model: str = "gemini-live-2.5-flash-native-audio"
+    vertex_ai_realtime_model: str = "gemini-live-2.5-flash-native-audio"
+    vertex_ai_tts_model: str = "gemini-3.1-flash-tts-preview"
+    vertex_ai_tts_voice: str = "Kore"
 
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_llm_model: str = "qwen2.5:0.5b"
+
+    audio_input_sample_rate: int = 16000
+    audio_output_sample_rate: int = 24000
+    audio_channels: int = 1
+    audio_chunk_max_bytes: int = 262144
+    audio_turn_max_bytes: int = 2097152
+    audio_transcription_language: str = "zh-CN"
+    realtime_turn_timeout_seconds: float = 30.0
 
     wake_word: str = "阿斯塔"
     frame_jpeg_quality: float = 0.72

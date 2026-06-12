@@ -1,22 +1,33 @@
-import { Mic, MicOff, Radio, Send } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { AudioLines, Mic, MicOff, Radio, Send, Square } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useAppStore } from "../../app/store";
+import {
+  arrayBufferToBase64,
+  LIVE_INPUT_SAMPLE_RATE,
+  PcmRecorder,
+} from "../../features/media/pcmRecorder";
 import { getSpeechRecognition, SpeechRecognition } from "../../features/wakeword/speechRecognition";
+import { AudioChunkPayload, createId } from "../../lib/events";
 
 interface MicPanelProps {
   onWake: () => void;
   onUserText: (text: string) => void;
+  onAudioChunk: (payload: AudioChunkPayload) => boolean;
+  stopSignal: number;
 }
 
-export function MicPanel({ onWake, onUserText }: MicPanelProps) {
+export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPanelProps) {
   const [micState, setMicState] = useState("未授权");
   const [muted, setMuted] = useState(false);
   const [level, setLevel] = useState(0);
   const [text, setText] = useState("");
+  const [liveStreaming, setLiveStreaming] = useState(false);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const recorderRef = useRef<PcmRecorder | null>(null);
+  const startingRef = useRef(false);
   const rafRef = useRef(0);
   const wakeAtRef = useRef(0);
   const [recognitionActive, setRecognitionActive] = useState(false);
@@ -24,6 +35,9 @@ export function MicPanel({ onWake, onUserText }: MicPanelProps) {
   const wakeWord = useAppStore((state) => state.wakeWord);
 
   function stopMic() {
+    recorderRef.current?.stop();
+    recorderRef.current = null;
+    setLiveStreaming(false);
     cancelAnimationFrame(rafRef.current);
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
@@ -52,8 +66,81 @@ export function MicPanel({ onWake, onUserText }: MicPanelProps) {
       };
       tick();
       setMicState("ready");
+      return stream;
     } catch (error) {
       setMicState(error instanceof Error ? error.message : "麦克风不可用");
+      return null;
+    }
+  }
+
+  const sendAudioChunk = useCallback((buffer: ArrayBuffer, isFinal: boolean) => {
+    if (!sessionId) return false;
+    const payload: AudioChunkPayload = {
+      chunk_id: createId("aud"),
+      mime: `audio/pcm;rate=${LIVE_INPUT_SAMPLE_RATE}`,
+      sample_rate: LIVE_INPUT_SAMPLE_RATE,
+      channels: 1,
+      encoding: "pcm_s16le",
+      data_base64: buffer.byteLength > 0 ? arrayBufferToBase64(buffer) : "",
+      is_final: isFinal,
+      metadata: { source: "browser_pcm" },
+    };
+    return onAudioChunk(payload);
+  }, [onAudioChunk, sessionId]);
+
+  const stopLiveAudio = useCallback(
+    (sendFinal: boolean) => {
+      const hadRecorder = Boolean(recorderRef.current);
+      recorderRef.current?.stop();
+      recorderRef.current = null;
+      startingRef.current = false;
+      setLiveStreaming(false);
+      if (sendFinal && hadRecorder) {
+        const sent = sendAudioChunk(new ArrayBuffer(0), true);
+        if (!sent) setMicState("WebSocket 未连接");
+      }
+      if (hadRecorder) {
+        setMicState("ready");
+      }
+    },
+    [sendAudioChunk],
+  );
+
+  async function startLiveAudio() {
+    if (liveStreaming || recorderRef.current) {
+      stopLiveAudio(true);
+      return;
+    }
+    if (startingRef.current) return;
+    if (muted) {
+      setMicState("静音中");
+      return;
+    }
+    startingRef.current = true;
+    const stream = streamRef.current ?? (await startMic());
+    if (!stream) {
+      startingRef.current = false;
+      return;
+    }
+
+    const recorder = new PcmRecorder({
+      outputSampleRate: LIVE_INPUT_SAMPLE_RATE,
+      onChunk: (chunk) => {
+        const sent = sendAudioChunk(chunk, false);
+        if (!sent) setMicState("WebSocket 未连接");
+      },
+      onError: (error) => setMicState(error.message),
+    });
+    recorderRef.current = recorder;
+    try {
+      await recorder.start(stream);
+      setLiveStreaming(true);
+      setMicState("live streaming");
+    } catch (error) {
+      recorderRef.current = null;
+      setMicState(error instanceof Error ? error.message : "实时语音不可用");
+    } finally {
+      startingRef.current = false;
     }
   }
 
@@ -119,8 +206,16 @@ export function MicPanel({ onWake, onUserText }: MicPanelProps) {
     });
     if (muted) {
       recognitionRef.current?.stop();
+      stopLiveAudio(true);
     }
-  }, [muted]);
+  }, [muted, stopLiveAudio]);
+
+  useEffect(() => {
+    if (stopSignal > 0) {
+      recognitionRef.current?.stop();
+      stopLiveAudio(false);
+    }
+  }, [stopSignal, stopLiveAudio]);
 
   return (
     <section className="panel mic-panel">
@@ -140,6 +235,14 @@ export function MicPanel({ onWake, onUserText }: MicPanelProps) {
         </button>
         <button className="icon-button" type="button" title="监听唤醒词" onClick={startWakeRecognition}>
           <Radio size={18} />
+        </button>
+        <button
+          className={`icon-button${liveStreaming ? " active" : ""}`}
+          type="button"
+          title={liveStreaming ? "结束实时语音" : "开始实时语音"}
+          onClick={() => void startLiveAudio()}
+        >
+          {liveStreaming ? <Square size={17} /> : <AudioLines size={18} />}
         </button>
       </div>
       <div className="input-row">
@@ -163,6 +266,10 @@ export function MicPanel({ onWake, onUserText }: MicPanelProps) {
         <div>
           <dt>会话</dt>
           <dd>{sessionId ? "ready" : "pending"}</dd>
+        </div>
+        <div>
+          <dt>实时</dt>
+          <dd>{liveStreaming ? "streaming" : "off"}</dd>
         </div>
       </dl>
     </section>

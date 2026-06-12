@@ -6,11 +6,14 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
+from app.config import Settings
 from app.config import get_settings
 from app.contracts.events import EventEnvelope, make_event
 from app.contracts.media import FramePayload
+from app.contracts.model_io import AudioChunkPayload, TTSResult
 from app.core.session_state import SessionState
 from app.providers.registry import ProviderRegistry
+from app.services.audio_service import AudioService
 from app.services.avatar_service import AvatarService
 from app.services.dialogue_service import DialogueService
 from app.services.vision_service import VisionService
@@ -29,13 +32,15 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
     registry = ProviderRegistry(settings)
     vision = VisionService(registry.vision(), settings)
     dialogue = DialogueService(registry.llm())
+    audio = AudioService(registry.tts(), registry.asr(), settings, registry.realtime())
     avatar = AvatarService()
     wake = WakeService()
 
     send_lock = asyncio.Lock()
     response_task: asyncio.Task[None] | None = None
+    audio_buffer = bytearray()
 
-    await _send(websocket, make_event("server.session.ready", session_id, session.public_dict()), send_lock)
+    await _send(websocket, make_event("server.session.ready", session_id, _session_payload(session, settings)), send_lock)
     await _send_cost(websocket, session, send_lock)
 
     try:
@@ -72,8 +77,11 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
                     session,
                     vision,
                     dialogue,
+                    audio,
                     avatar,
                     wake,
+                    settings,
+                    audio_buffer,
                     started,
                     send_lock,
                     response_task,
@@ -93,8 +101,11 @@ async def _handle_event(
     session: SessionState,
     vision: VisionService,
     dialogue: DialogueService,
+    audio: AudioService,
     avatar: AvatarService,
     wake: WakeService,
+    settings: Settings,
+    audio_buffer: bytearray,
     started: float,
     send_lock: asyncio.Lock,
     response_task: asyncio.Task[None] | None,
@@ -108,7 +119,7 @@ async def _handle_event(
         wake.wake(session)
         await _send(
             websocket,
-            make_event("server.session.state", session.session_id, session.public_dict()),
+            make_event("server.session.state", session.session_id, _session_payload(session, settings)),
             send_lock,
         )
         await _send(
@@ -121,10 +132,11 @@ async def _handle_event(
 
     if event.type == "client.wake.sleep":
         _cancel_task(response_task)
+        audio_buffer.clear()
         wake.sleep(session)
         await _send(
             websocket,
-            make_event("server.session.state", session.session_id, session.public_dict()),
+            make_event("server.session.state", session.session_id, _session_payload(session, settings)),
             send_lock,
         )
         await _send(
@@ -137,6 +149,7 @@ async def _handle_event(
 
     if event.type in {"client.control.interrupt", "client.control.cancel_response"}:
         _cancel_task(response_task)
+        audio_buffer.clear()
         session.status = "interrupted"
         session.response_in_progress = False
         session.interrupted_count += 1
@@ -148,7 +161,7 @@ async def _handle_event(
         session.status = "listening"
         await _send(
             websocket,
-            make_event("server.session.state", session.session_id, session.public_dict()),
+            make_event("server.session.state", session.session_id, _session_payload(session, settings)),
             send_lock,
         )
         await _send_cost(websocket, session, send_lock)
@@ -181,53 +194,173 @@ async def _handle_event(
         await _send_cost(websocket, session, send_lock)
         return response_task
 
-    if event.type in {"client.user.text", "client.user.speech.final"}:
-        user_text = str(event.payload.get("text", "")).strip()
-        if not user_text:
-            await _send_error(websocket, session.session_id, "empty_text", "User text is empty.", send_lock)
+    if event.type == "client.media.audio_chunk":
+        payload = AudioChunkPayload.model_validate(event.payload)
+        try:
+            audio_bytes = audio.decode_audio_chunk(payload)
+        except Exception as exc:  # noqa: BLE001
+            await _send_error(websocket, session.session_id, "invalid_audio_chunk", str(exc), send_lock)
             return response_task
-        if dialogue.needs_focus(user_text):
-            session.cost_meter.mode = "focus"
-            await _send(
+        audio_buffer.extend(audio_bytes)
+        session.cost_meter.bytes_uploaded += len(audio_bytes)
+        if len(audio_buffer) > settings.audio_turn_max_bytes:
+            audio_buffer.clear()
+            await _send_error(
                 websocket,
-                make_event(
-                    "vision.need_focus",
-                    session.session_id,
-                    {"reason": "focus_keyword", "text": user_text},
-                ),
+                session.session_id,
+                "audio_turn_too_large",
+                f"Audio turn exceeds AUDIO_TURN_MAX_BYTES ({settings.audio_turn_max_bytes}).",
                 send_lock,
             )
             await _send_cost(websocket, session, send_lock)
             return response_task
-        elif dialogue.needs_vision(user_text) and not session.last_visual_summary:
-            await _send(
-                websocket,
-                make_event(
-                    "vision.need_focus",
-                    session.session_id,
-                    {"reason": "missing_visual_summary", "text": user_text},
-                ),
-                send_lock,
-            )
-            await _send_cost(websocket, session, send_lock)
+        if not payload.is_final:
+            return response_task
+
+        turn_audio = bytes(audio_buffer)
+        audio_buffer.clear()
+        if not turn_audio:
+            await _send_error(websocket, session.session_id, "empty_audio", "Audio turn is empty.", send_lock)
             return response_task
 
         _cancel_task(response_task)
-        task = asyncio.create_task(
-            _run_dialogue_response(websocket, session, dialogue, avatar, user_text, started, send_lock)
+        if audio.has_realtime:
+            if not _is_realtime_pcm(payload, settings):
+                await _send_error(
+                    websocket,
+                    session.session_id,
+                    "unsupported_realtime_audio",
+                    "Realtime audio requires mono PCM16 at AUDIO_INPUT_SAMPLE_RATE.",
+                    send_lock,
+                )
+                await _send_cost(websocket, session, send_lock)
+                return None
+            task = asyncio.create_task(
+                _run_realtime_audio_response(
+                    websocket,
+                    session,
+                    audio,
+                    avatar,
+                    settings,
+                    turn_audio,
+                    payload,
+                    started,
+                    send_lock,
+                )
+            )
+            task.add_done_callback(_log_task_exception)
+            return task
+
+        asr_result = await audio.transcribe(turn_audio, _audio_metadata(payload))
+        session.cost_meter.asr_calls += 1
+        await _send(
+            websocket,
+            make_event(
+                "asr.transcript.final",
+                session.session_id,
+                {"text": asr_result.text, "confidence": asr_result.confidence},
+            ),
+            send_lock,
         )
-        task.add_done_callback(_log_task_exception)
-        return task
+        await _send_cost(websocket, session, send_lock)
+        return await _handle_user_text(
+            websocket,
+            session,
+            dialogue,
+            audio,
+            avatar,
+            settings,
+            asr_result.text,
+            started,
+            send_lock,
+            None,
+        )
+
+    if event.type in {"client.user.text", "client.user.speech.final"}:
+        user_text = str(event.payload.get("text", "")).strip()
+        return await _handle_user_text(
+            websocket,
+            session,
+            dialogue,
+            audio,
+            avatar,
+            settings,
+            user_text,
+            started,
+            send_lock,
+            response_task,
+        )
 
     await _send_error(websocket, session.session_id, "unsupported_event", event.type, send_lock)
     return response_task
+
+
+async def _handle_user_text(
+    websocket: WebSocket,
+    session: SessionState,
+    dialogue: DialogueService,
+    audio: AudioService,
+    avatar: AvatarService,
+    settings: Settings,
+    user_text: str,
+    started: float,
+    send_lock: asyncio.Lock,
+    response_task: asyncio.Task[None] | None,
+) -> asyncio.Task[None] | None:
+    if not user_text:
+        await _send_error(websocket, session.session_id, "empty_text", "User text is empty.", send_lock)
+        return response_task
+    if dialogue.needs_focus(user_text):
+        session.cost_meter.mode = "focus"
+        await _send(
+            websocket,
+            make_event(
+                "vision.need_focus",
+                session.session_id,
+                {"reason": "focus_keyword", "text": user_text},
+            ),
+            send_lock,
+        )
+        await _send_cost(websocket, session, send_lock)
+        return response_task
+    if dialogue.needs_vision(user_text) and not session.last_visual_summary:
+        await _send(
+            websocket,
+            make_event(
+                "vision.need_focus",
+                session.session_id,
+                {"reason": "missing_visual_summary", "text": user_text},
+            ),
+            send_lock,
+        )
+        await _send_cost(websocket, session, send_lock)
+        return response_task
+
+    _cancel_task(response_task)
+    task = asyncio.create_task(
+        _run_dialogue_response(
+            websocket,
+            session,
+            dialogue,
+            audio,
+            avatar,
+            settings,
+            user_text,
+            started,
+            send_lock,
+        )
+    )
+    task.add_done_callback(_log_task_exception)
+    return task
 
 
 async def _run_dialogue_response(
     websocket: WebSocket,
     session: SessionState,
     dialogue: DialogueService,
+    audio: AudioService,
     avatar: AvatarService,
+    settings: Settings,
     user_text: str,
     started: float,
     send_lock: asyncio.Lock,
@@ -249,7 +382,14 @@ async def _run_dialogue_response(
             )
         await _send(
             websocket,
-            make_event("assistant.text.final", session.session_id, {"text": result.text}),
+            make_event(
+                "assistant.text.final",
+                session.session_id,
+                {
+                    "text": result.text,
+                    "audio_expected": settings.tts_provider != "mock" and result.should_speak,
+                },
+            ),
             send_lock,
         )
         await _send(
@@ -257,11 +397,35 @@ async def _run_dialogue_response(
             avatar.state_event(session.session_id, "speaking", result.emotion, result.text, "talk", True),
             send_lock,
         )
+        if settings.tts_provider != "mock" and result.should_speak:
+            try:
+                tts_result = await audio.synthesize(result.text, result.emotion)
+                session.cost_meter.tts_calls += 1
+                await _send_tts_audio(
+                    websocket,
+                    session,
+                    [tts_result],
+                    "tts",
+                    send_lock,
+                    fallback_text=result.text,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("tts synthesis failed")
+                await _send_error(websocket, session.session_id, "tts_failed", str(exc), send_lock)
+                await _send(
+                    websocket,
+                    make_event(
+                        "assistant.audio.done",
+                        session.session_id,
+                        {"source": "tts", "chunks": 0, "fallback_text": result.text, "error": str(exc)},
+                    ),
+                    send_lock,
+                )
         session.response_in_progress = False
         session.cost_meter.last_latency_ms = int((time.perf_counter() - started) * 1000)
         await _send(
             websocket,
-            make_event("server.session.state", session.session_id, session.public_dict()),
+            make_event("server.session.state", session.session_id, _session_payload(session, settings)),
             send_lock,
         )
         await _send_cost(websocket, session, send_lock)
@@ -269,6 +433,135 @@ async def _run_dialogue_response(
         session.response_in_progress = False
         session.status = "listening"
         raise
+
+
+async def _run_realtime_audio_response(
+    websocket: WebSocket,
+    session: SessionState,
+    audio: AudioService,
+    avatar: AvatarService,
+    settings: Settings,
+    audio_bytes: bytes,
+    payload: AudioChunkPayload,
+    started: float,
+    send_lock: asyncio.Lock,
+) -> None:
+    try:
+        session.status = "thinking"
+        session.response_in_progress = True
+        await _send(
+            websocket,
+            avatar.state_event(session.session_id, "thinking", "curious", "正在听取语音。"),
+            send_lock,
+        )
+        result = await audio.respond_realtime_audio(audio_bytes, _realtime_metadata(session, payload))
+        session.cost_meter.asr_calls += 1
+        session.cost_meter.llm_calls += 1
+
+        if result.input_text:
+            session.last_user_text = result.input_text
+            await _send(
+                websocket,
+                make_event(
+                    "asr.transcript.final",
+                    session.session_id,
+                    {"text": result.input_text, "confidence": 0.75},
+                ),
+                send_lock,
+            )
+
+        audio_expected = any(chunk.audio_base64 for chunk in result.audio_chunks)
+        if result.output_text:
+            session.status = "speaking"
+            async for chunk in _stream_text(result.output_text):
+                await _send(
+                    websocket,
+                    make_event("assistant.text.delta", session.session_id, {"delta": chunk}),
+                    send_lock,
+                )
+            await _send(
+                websocket,
+                make_event(
+                    "assistant.text.final",
+                    session.session_id,
+                    {"text": result.output_text, "audio_expected": audio_expected},
+                ),
+                send_lock,
+            )
+
+        sent_chunks = await _send_tts_audio(websocket, session, result.audio_chunks, "realtime", send_lock)
+        if sent_chunks:
+            session.cost_meter.tts_calls += 1
+        await _send(
+            websocket,
+            avatar.state_event(
+                session.session_id,
+                "speaking",
+                result.emotion,
+                result.output_text or "Live 音频回复。",
+                "talk",
+                bool(sent_chunks),
+            ),
+            send_lock,
+        )
+        session.response_in_progress = False
+        session.cost_meter.last_latency_ms = int((time.perf_counter() - started) * 1000)
+        await _send(
+            websocket,
+            make_event("server.session.state", session.session_id, _session_payload(session, settings)),
+            send_lock,
+        )
+        await _send_cost(websocket, session, send_lock)
+    except asyncio.CancelledError:
+        session.response_in_progress = False
+        session.status = "listening"
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("realtime response failed")
+        session.response_in_progress = False
+        session.status = "listening"
+        await _send_error(websocket, session.session_id, "realtime_failed", str(exc), send_lock)
+        await _send_cost(websocket, session, send_lock)
+
+
+async def _send_tts_audio(
+    websocket: WebSocket,
+    session: SessionState,
+    chunks: list[TTSResult],
+    source: str,
+    send_lock: asyncio.Lock,
+    fallback_text: str = "",
+) -> int:
+    sent = 0
+    for index, chunk in enumerate(chunks):
+        if not chunk.audio_base64:
+            continue
+        await _send(
+            websocket,
+            make_event("assistant.audio.chunk", session.session_id, _audio_event_payload(chunk, source, index)),
+            send_lock,
+        )
+        sent += 1
+    await _send(
+        websocket,
+        make_event(
+            "assistant.audio.done",
+            session.session_id,
+            {
+                "source": source,
+                "chunks": sent,
+                **({"fallback_text": fallback_text} if sent == 0 and fallback_text else {}),
+            },
+        ),
+        send_lock,
+    )
+    return sent
+
+
+async def _stream_text(text: str):
+    for index in range(0, len(text), 12):
+        await asyncio.sleep(0.02)
+        yield text[index : index + 12]
 
 
 async def _send(websocket: WebSocket, event: EventEnvelope, send_lock: asyncio.Lock) -> None:
@@ -292,6 +585,59 @@ async def _send_error(
     send_lock: asyncio.Lock,
 ) -> None:
     await _send(websocket, make_event("error", session_id, {"code": code, "detail": detail}), send_lock)
+
+
+def _audio_metadata(payload: AudioChunkPayload) -> dict:
+    return payload.model_dump(exclude={"data_base64"})
+
+
+def _is_realtime_pcm(payload: AudioChunkPayload, settings: Settings) -> bool:
+    normalized_mime = payload.mime.lower().replace(" ", "")
+    return (
+        payload.encoding == "pcm_s16le"
+        and payload.channels == settings.audio_channels
+        and payload.sample_rate == settings.audio_input_sample_rate
+        and normalized_mime.startswith("audio/pcm")
+        and f"rate={settings.audio_input_sample_rate}" in normalized_mime
+    )
+
+
+def _realtime_metadata(session: SessionState, payload: AudioChunkPayload) -> dict:
+    metadata = _audio_metadata(payload)
+    system_instruction = "你是 AstraLive，一个中文优先的实时视觉语音助手。回答要自然、简洁。"
+    if session.last_visual_summary:
+        system_instruction += f"\n当前视觉摘要：{session.last_visual_summary}"
+    metadata["system_instruction"] = system_instruction
+    return metadata
+
+
+def _audio_event_payload(chunk: TTSResult, source: str, index: int) -> dict:
+    return {
+        "chunk_id": f"{source}_{int(time.time() * 1000)}_{index}",
+        "source": source,
+        "mime": chunk.mime,
+        "sample_rate": chunk.sample_rate,
+        "channels": chunk.channels,
+        "encoding": chunk.encoding,
+        "duration_ms": chunk.duration_ms,
+        "data_base64": chunk.audio_base64,
+        "is_final": False,
+    }
+
+
+def _session_payload(session: SessionState, settings: Settings) -> dict:
+    payload = session.public_dict()
+    payload["audio"] = {
+        "asr_provider": settings.asr_provider,
+        "tts_provider": settings.tts_provider,
+        "realtime_provider": settings.realtime_provider,
+        "input_sample_rate": settings.audio_input_sample_rate,
+        "output_sample_rate": settings.audio_output_sample_rate,
+        "channels": settings.audio_channels,
+        "server_tts": settings.tts_provider != "mock",
+        "server_realtime_audio": settings.realtime_provider != "none",
+    }
+    return payload
 
 
 def _cancel_task(task: asyncio.Task[None] | None) -> None:

@@ -1,5 +1,5 @@
 import { Activity, Moon, Play } from "lucide-react";
-import { useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAppStore } from "./app/store";
 import { AvatarStage } from "./components/AvatarStage/AvatarStage";
@@ -8,8 +8,17 @@ import { ConversationPanel } from "./components/ConversationPanel/ConversationPa
 import { CostPanel } from "./components/CostPanel/CostPanel";
 import { DebugPanel } from "./components/DebugPanel/DebugPanel";
 import { MicPanel } from "./components/MicPanel/MicPanel";
+import { assistantAudioPlayer } from "./features/media/pcmPlayer";
 import { API_BASE_URL } from "./lib/env";
-import { AvatarStatePayload, CostMeter, createEvent, EventEnvelope, FramePayload } from "./lib/events";
+import {
+  AssistantAudioPayload,
+  AudioChunkPayload,
+  AvatarStatePayload,
+  CostMeter,
+  createEvent,
+  EventEnvelope,
+  FramePayload,
+} from "./lib/events";
 import { wsClient } from "./lib/wsClient";
 
 function speak(text: string) {
@@ -31,12 +40,29 @@ function handleServerEvent(event: EventEnvelope<unknown>) {
     store.appendAssistantDelta((event.payload as { delta?: string }).delta ?? "");
   }
   if (event.type === "assistant.text.final") {
-    const text = (event.payload as { text?: string }).text ?? "";
+    const payload = event.payload as { text?: string; audio_expected?: boolean };
+    const text = payload.text ?? "";
     store.finalizeAssistant(text);
-    speak(text);
+    if (!payload.audio_expected) speak(text);
+  }
+  if (event.type === "assistant.audio.chunk") {
+    window.speechSynthesis.cancel();
+    void assistantAudioPlayer.play(event.payload as AssistantAudioPayload).catch((error) => {
+      store.addMessage("system", error instanceof Error ? error.message : String(error));
+    });
+  }
+  if (event.type === "assistant.audio.done") {
+    const payload = event.payload as { chunks?: number; fallback_text?: string };
+    if ((payload.chunks ?? 0) === 0 && payload.fallback_text) {
+      speak(payload.fallback_text);
+    }
   }
   if (event.type === "assistant.avatar.state") {
     store.setAvatar(event.payload as unknown as AvatarStatePayload);
+  }
+  if (event.type === "asr.transcript.final") {
+    const text = (event.payload as { text?: string }).text?.trim();
+    if (text) store.addMessage("user", text);
   }
   if (event.type === "vision.summary") {
     const payload = event.payload as { summary?: string; frame_id?: string; confidence?: number };
@@ -56,9 +82,11 @@ function handleServerEvent(event: EventEnvelope<unknown>) {
 
 export default function App() {
   const store = useAppStore();
+  const [audioStopSignal, setAudioStopSignal] = useState(0);
+  const audioTurnActiveRef = useRef(false);
 
   const providerLabel = useMemo(
-    () => `${store.cost.mode.toUpperCase()} / mock providers`,
+    () => `${store.cost.mode.toUpperCase()} / runtime providers`,
     [store.cost.mode],
   );
 
@@ -87,34 +115,66 @@ export default function App() {
     };
   }, []);
 
-function wake() {
-    if (!store.sessionId) return;
-    const sent = wsClient.send(createEvent("client.wake.detected", store.sessionId, { wake_word: store.wakeWord }));
+  const stopClientAudio = useCallback(() => {
+    window.speechSynthesis.cancel();
+    assistantAudioPlayer.reset();
+    audioTurnActiveRef.current = false;
+    setAudioStopSignal((value) => value + 1);
+  }, []);
+
+  const wake = useCallback(() => {
+    const actions = useAppStore.getState();
+    if (!actions.sessionId) return;
+    window.speechSynthesis.cancel();
+    assistantAudioPlayer.reset();
+    const sent = wsClient.send(
+      createEvent("client.wake.detected", actions.sessionId, { wake_word: actions.wakeWord }),
+    );
     if (!sent) {
-      store.addMessage("system", "WebSocket 未连接，唤醒未发送。");
+      actions.addMessage("system", "WebSocket 未连接，唤醒未发送。");
       return;
     }
-    store.markWake();
-    store.addMessage("system", `已听到唤醒词：${store.wakeWord}`);
-  }
+    actions.markWake();
+    actions.addMessage("system", `已听到唤醒词：${actions.wakeWord}`);
+  }, []);
 
-  function sleep() {
+  const sleep = useCallback(() => {
+    stopClientAudio();
+    const actions = useAppStore.getState();
+    if (!actions.sessionId) return;
+    wsClient.send(createEvent("client.wake.sleep", actions.sessionId, {}));
+  }, [stopClientAudio]);
+
+  const interrupt = useCallback(() => {
+    stopClientAudio();
+    const actions = useAppStore.getState();
+    if (!actions.sessionId) return;
+    wsClient.send(createEvent("client.control.interrupt", actions.sessionId, {}));
+  }, [stopClientAudio]);
+
+  const sendUserText = useCallback((text: string) => {
+    const actions = useAppStore.getState();
+    if (!actions.sessionId) return;
     window.speechSynthesis.cancel();
-    if (!store.sessionId) return;
-    wsClient.send(createEvent("client.wake.sleep", store.sessionId, {}));
-  }
+    assistantAudioPlayer.reset();
+    audioTurnActiveRef.current = false;
+    actions.addMessage("user", text);
+    wsClient.send(createEvent("client.user.text", actions.sessionId, { text }));
+  }, []);
 
-  function interrupt() {
-    window.speechSynthesis.cancel();
-    if (!store.sessionId) return;
-    wsClient.send(createEvent("client.control.interrupt", store.sessionId, {}));
-  }
-
-  function sendUserText(text: string) {
-    if (!store.sessionId) return;
-    store.addMessage("user", text);
-    wsClient.send(createEvent("client.user.text", store.sessionId, { text }));
-  }
+  const sendAudioChunk = useCallback((payload: AudioChunkPayload) => {
+    const actions = useAppStore.getState();
+    if (!actions.sessionId) return false;
+    if (!payload.is_final && !audioTurnActiveRef.current) {
+      window.speechSynthesis.cancel();
+      assistantAudioPlayer.reset();
+      audioTurnActiveRef.current = true;
+    }
+    if (payload.is_final) {
+      audioTurnActiveRef.current = false;
+    }
+    return wsClient.send(createEvent("client.media.audio_chunk", actions.sessionId, payload));
+  }, []);
 
   function handleFrameSent(frame: FramePayload) {
     store.setLastFrameInfo(`${frame.width}x${frame.height} / ${frame.capture_reason}`);
@@ -145,7 +205,12 @@ function wake() {
       <div className="workspace">
         <aside className="left-rail">
           <CameraPanel onFrameSent={handleFrameSent} />
-          <MicPanel onWake={wake} onUserText={sendUserText} />
+          <MicPanel
+            onWake={wake}
+            onUserText={sendUserText}
+            onAudioChunk={sendAudioChunk}
+            stopSignal={audioStopSignal}
+          />
           <CostPanel />
           <DebugPanel />
         </aside>

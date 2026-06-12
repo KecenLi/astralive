@@ -1,4 +1,5 @@
 import json
+import os
 from urllib import error, request
 
 import google.auth
@@ -60,6 +61,9 @@ class VertexAIClient:
 
     def _ensure_credentials(self) -> Credentials:
         if self._credentials is None:
+            credentials_path = self.settings.google_application_credentials.strip()
+            if credentials_path and not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = credentials_path
             try:
                 self._credentials, self._default_project = google.auth.default(
                     scopes=["https://www.googleapis.com/auth/cloud-platform"]

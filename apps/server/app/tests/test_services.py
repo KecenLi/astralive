@@ -1,10 +1,13 @@
 from app.config import Settings
 from app.contracts.media import FramePayload
-from app.contracts.model_io import ChatMessage, DialogueInput, VisionInput
+from app.contracts.model_io import ChatMessage, DialogueInput, TTSInput, VisionInput
 from app.core.session_state import SessionState
+from app.providers.asr.google_genai import GoogleGenAIASRProvider
 from app.providers.registry import ProviderRegistry
 from app.providers.llm.openai_compatible import OpenAICompatibleLLMProvider
 from app.providers.llm.vertex_ai import VertexAILLMProvider
+from app.providers.realtime.google_genai_live import GoogleGenAILiveProvider
+from app.providers.tts.google_genai import GoogleGenAITTSProvider
 from app.providers.vision.openai_compatible import OpenAICompatibleVisionProvider
 from app.providers.vision.vertex_ai import VertexAIVisionProvider
 from app.services.dialogue_service import DialogueService
@@ -131,7 +134,163 @@ async def test_vertex_ai_vision_provider_builds_multimodal_payload() -> None:
 
 
 def test_registry_can_select_vertex_ai_providers() -> None:
-    settings = Settings(llm_provider="vertex_ai", vision_provider="vertex_ai")
+    settings = Settings(
+        llm_provider="vertex_ai",
+        vision_provider="vertex_ai",
+        asr_provider="vertex_ai",
+        tts_provider="vertex_ai",
+        realtime_provider="vertex_ai",
+    )
     registry = ProviderRegistry(settings)
     assert isinstance(registry.llm(), VertexAILLMProvider)
     assert isinstance(registry.vision(), VertexAIVisionProvider)
+    assert isinstance(registry.asr(), GoogleGenAIASRProvider)
+    assert isinstance(registry.tts(), GoogleGenAITTSProvider)
+    assert isinstance(registry.realtime(), GoogleGenAILiveProvider)
+
+
+class StubGenAIModels:
+    def __init__(self, mime: str = "audio/pcm;rate=24000") -> None:
+        self.calls: list[dict] = []
+        self.mime = mime
+
+    def generate_content(self, **kwargs):
+        self.calls.append(kwargs)
+        return {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {
+                                "inlineData": {
+                                    "mimeType": self.mime,
+                                    "data": b"\x00\x00" * 240,
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+
+
+class StubGenAIClient:
+    def __init__(self, mime: str = "audio/pcm;rate=24000") -> None:
+        self.models = StubGenAIModels(mime)
+
+
+async def test_google_genai_tts_extracts_inline_audio() -> None:
+    settings = Settings(tts_provider="vertex_ai")
+    client = StubGenAIClient()
+    provider = GoogleGenAITTSProvider(settings, mode="vertex_ai", client=client)
+    result = await provider.synthesize(TTSInput(text="你好"))
+
+    assert client.models.calls[0]["model"] == settings.vertex_ai_tts_model
+    assert result.audio_base64
+    assert result.mime == "audio/pcm;rate=24000"
+    assert result.sample_rate == 24000
+    assert result.duration_ms == 10
+
+
+async def test_google_genai_tts_treats_l16_as_pcm() -> None:
+    settings = Settings(tts_provider="vertex_ai")
+    provider = GoogleGenAITTSProvider(
+        settings,
+        mode="vertex_ai",
+        client=StubGenAIClient(mime="audio/L16; codec=pcm; rate=24000; channels=1"),
+    )
+    result = await provider.synthesize(TTSInput(text="你好"))
+
+    assert result.mime == "audio/L16; codec=pcm; rate=24000; channels=1"
+    assert result.sample_rate == 24000
+    assert result.encoding == "pcm_s16le"
+
+
+class StubLiveSession:
+    def __init__(self, mime: str = "audio/pcm;rate=24000") -> None:
+        self.audio_bytes = b""
+        self.mime = mime
+
+    async def send_client_content(self, **kwargs) -> None:
+        self.client_content = kwargs
+
+    async def send_realtime_input(self, **kwargs) -> None:
+        audio = kwargs.get("audio")
+        if audio:
+            self.audio_bytes += audio.data
+
+    async def receive(self):
+        yield {
+            "serverContent": {
+                "inputTranscription": {"text": "你好"},
+                "outputTranscription": {"text": "收到"},
+                "modelTurn": {
+                    "parts": [
+                        {
+                            "inlineData": {
+                                "mimeType": self.mime,
+                                "data": b"\x00\x00" * 120,
+                            }
+                        }
+                    ]
+                },
+                "turnComplete": True,
+            }
+        }
+
+
+class StubLiveConnect:
+    def __init__(self, session: StubLiveSession) -> None:
+        self.session = session
+
+    async def __aenter__(self):
+        return self.session
+
+    async def __aexit__(self, exc_type, exc, traceback) -> None:
+        return None
+
+
+class StubLive:
+    def __init__(self, mime: str = "audio/pcm;rate=24000") -> None:
+        self.session = StubLiveSession(mime)
+        self.connect_kwargs: dict = {}
+
+    def connect(self, **kwargs):
+        self.connect_kwargs = kwargs
+        return StubLiveConnect(self.session)
+
+
+class StubAio:
+    def __init__(self, mime: str = "audio/pcm;rate=24000") -> None:
+        self.live = StubLive(mime)
+
+
+class StubLiveClient:
+    def __init__(self, mime: str = "audio/pcm;rate=24000") -> None:
+        self.aio = StubAio(mime)
+
+
+async def test_google_genai_live_merges_transcripts_and_audio_chunks() -> None:
+    settings = Settings(realtime_provider="vertex_ai")
+    client = StubLiveClient()
+    provider = GoogleGenAILiveProvider(settings, mode="vertex_ai", client=client)
+
+    result = await provider.respond_to_audio(b"\x01\x02", {"mime": "audio/pcm;rate=16000"})
+
+    assert client.aio.live.connect_kwargs["model"] == settings.vertex_ai_realtime_model
+    assert client.aio.live.session.audio_bytes == b"\x01\x02"
+    assert result.input_text == "你好"
+    assert result.output_text == "收到"
+    assert len(result.audio_chunks) == 1
+    assert result.audio_chunks[0].sample_rate == 24000
+
+
+async def test_google_genai_live_treats_l16_as_pcm() -> None:
+    settings = Settings(realtime_provider="vertex_ai")
+    client = StubLiveClient(mime="audio/L16; codec=pcm; rate=24000; channels=1")
+    provider = GoogleGenAILiveProvider(settings, mode="vertex_ai", client=client)
+
+    result = await provider.respond_to_audio(b"\x01\x02", {"mime": "audio/pcm;rate=16000"})
+
+    assert result.audio_chunks[0].sample_rate == 24000
+    assert result.audio_chunks[0].encoding == "pcm_s16le"

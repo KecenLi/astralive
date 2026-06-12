@@ -1,9 +1,13 @@
 from app.config import Settings
+from app.providers.asr.google_genai import GoogleGenAIASRProvider
 from app.providers.asr.mock import MockASRProvider
 from app.providers.llm.mock import MockLLMProvider
 from app.providers.llm.openai_compatible import OpenAICompatibleLLMProvider
 from app.providers.llm.ollama import OllamaLLMProvider
 from app.providers.llm.vertex_ai import VertexAILLMProvider
+from app.providers.realtime.google_genai_live import GoogleGenAILiveProvider
+from app.providers.realtime.mock import MockRealtimeProvider
+from app.providers.tts.google_genai import GoogleGenAITTSProvider
 from app.providers.tts.mock import MockTTSProvider
 from app.providers.vision.mock import MockVisionProvider
 from app.providers.vision.openai_compatible import OpenAICompatibleVisionProvider
@@ -15,6 +19,10 @@ class ProviderRegistry:
         self.settings = settings
 
     def asr(self):
+        if self.settings.asr_provider == "vertex_ai":
+            return GoogleGenAIASRProvider(self.settings, mode="vertex_ai")
+        if self.settings.asr_provider == "gemini":
+            return GoogleGenAIASRProvider(self.settings, mode="gemini")
         return MockASRProvider()
 
     def vision(self):
@@ -50,4 +58,17 @@ class ProviderRegistry:
         return MockLLMProvider()
 
     def tts(self):
+        if self.settings.tts_provider == "vertex_ai":
+            return GoogleGenAITTSProvider(self.settings, mode="vertex_ai")
+        if self.settings.tts_provider == "gemini":
+            return GoogleGenAITTSProvider(self.settings, mode="gemini")
         return MockTTSProvider()
+
+    def realtime(self):
+        if self.settings.realtime_provider == "vertex_ai":
+            return GoogleGenAILiveProvider(self.settings, mode="vertex_ai")
+        if self.settings.realtime_provider == "gemini":
+            return GoogleGenAILiveProvider(self.settings, mode="gemini")
+        if self.settings.realtime_provider == "mock":
+            return MockRealtimeProvider()
+        return None

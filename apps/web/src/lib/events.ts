@@ -59,6 +59,22 @@ export interface FramePayload {
   prompt?: string;
 }
 
+export interface AudioChunkPayload {
+  chunk_id: string;
+  mime: string;
+  sample_rate: number;
+  channels: number;
+  encoding: "pcm_s16le" | "wav" | "mp3" | "webm_opus" | "unknown";
+  data_base64: string;
+  is_final: boolean;
+  metadata?: Record<string, unknown>;
+}
+
+export interface AssistantAudioPayload extends AudioChunkPayload {
+  source?: "tts" | "realtime" | string;
+  duration_ms?: number | null;
+}
+
 export interface AvatarStatePayload {
   mode: AvatarMode;
   expression: AvatarExpression;
