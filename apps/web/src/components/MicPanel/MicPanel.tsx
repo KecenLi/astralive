@@ -15,14 +15,30 @@ export function MicPanel({ onWake, onUserText }: MicPanelProps) {
   const [level, setLevel] = useState(0);
   const [text, setText] = useState("");
   const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
   const rafRef = useRef(0);
+  const wakeAtRef = useRef(0);
+  const [recognitionActive, setRecognitionActive] = useState(false);
   const sessionId = useAppStore((state) => state.sessionId);
   const wakeWord = useAppStore((state) => state.wakeWord);
 
+  function stopMic() {
+    cancelAnimationFrame(rafRef.current);
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    void audioContextRef.current?.close();
+    audioContextRef.current = null;
+    setLevel(0);
+  }
+
   async function startMic() {
     try {
+      stopMic();
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      streamRef.current = stream;
       const audioContext = new AudioContext();
+      audioContextRef.current = audioContext;
       const source = audioContext.createMediaStreamSource(stream);
       const analyser = audioContext.createAnalyser();
       analyser.fftSize = 512;
@@ -42,6 +58,7 @@ export function MicPanel({ onWake, onUserText }: MicPanelProps) {
   }
 
   function startWakeRecognition() {
+    if (recognitionActive) return;
     const Recognition = getSpeechRecognition();
     if (!Recognition) {
       setMicState("浏览器不支持 SpeechRecognition，可用文本模拟");
@@ -53,15 +70,28 @@ export function MicPanel({ onWake, onUserText }: MicPanelProps) {
     recognition.interimResults = true;
     recognition.onresult = (event) => {
       const transcript = Array.from(event.results)
+        .slice(event.resultIndex)
         .map((result) => result[0]?.transcript ?? "")
         .join("");
-      if (transcript.includes(wakeWord)) {
+      const now = Date.now();
+      if (transcript.includes(wakeWord) && now - wakeAtRef.current > 4000) {
+        wakeAtRef.current = now;
         onWake();
       }
     };
     recognition.onerror = () => setMicState("语音识别暂不可用");
-    recognition.start();
+    recognition.onend = () => {
+      setRecognitionActive(false);
+      setMicState("ready");
+    };
+    try {
+      recognition.start();
+    } catch {
+      setMicState("语音识别已经在运行");
+      return;
+    }
     recognitionRef.current = recognition;
+    setRecognitionActive(true);
     setMicState("wake listening");
   }
 
@@ -79,9 +109,18 @@ export function MicPanel({ onWake, onUserText }: MicPanelProps) {
   useEffect(() => {
     return () => {
       recognitionRef.current?.stop();
-      cancelAnimationFrame(rafRef.current);
+      stopMic();
     };
   }, []);
+
+  useEffect(() => {
+    streamRef.current?.getAudioTracks().forEach((track) => {
+      track.enabled = !muted;
+    });
+    if (muted) {
+      recognitionRef.current?.stop();
+    }
+  }, [muted]);
 
   return (
     <section className="panel mic-panel">
@@ -109,7 +148,7 @@ export function MicPanel({ onWake, onUserText }: MicPanelProps) {
           placeholder={`输入“${wakeWord}”唤醒，或输入问题`}
           onChange={(event) => setText(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter") submitText();
+            if (event.key === "Enter" && !event.nativeEvent.isComposing) submitText();
           }}
         />
         <button className="icon-button" type="button" title="发送文本" onClick={submitText}>
@@ -119,7 +158,7 @@ export function MicPanel({ onWake, onUserText }: MicPanelProps) {
       <dl className="metric-list">
         <div>
           <dt>状态</dt>
-          <dd>{micState}</dd>
+          <dd>{recognitionActive ? `${micState} / active` : micState}</dd>
         </div>
         <div>
           <dt>会话</dt>

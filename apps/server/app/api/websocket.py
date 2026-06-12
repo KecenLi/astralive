@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 from typing import Any
@@ -31,21 +32,41 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
     avatar = AvatarService()
     wake = WakeService()
 
-    await _send(websocket, make_event("server.session.ready", session_id, session.public_dict()))
-    await _send_cost(websocket, session)
+    send_lock = asyncio.Lock()
+    response_task: asyncio.Task[None] | None = None
+
+    await _send(websocket, make_event("server.session.ready", session_id, session.public_dict()), send_lock)
+    await _send_cost(websocket, session, send_lock)
 
     try:
         while True:
-            raw = await websocket.receive_json()
+            try:
+                raw = await websocket.receive_json()
+            except WebSocketDisconnect:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                await _send_error(websocket, session_id, "invalid_json", str(exc), send_lock)
+                continue
+
             started = time.perf_counter()
             try:
                 event = EventEnvelope.model_validate(raw)
             except ValidationError as exc:
-                await _send_error(websocket, session_id, "invalid_event", exc.errors())
+                await _send_error(websocket, session_id, "invalid_event", exc.errors(), send_lock)
+                continue
+
+            if event.session_id != session_id:
+                await _send_error(
+                    websocket,
+                    session_id,
+                    "session_mismatch",
+                    {"path_session_id": session_id, "event_session_id": event.session_id},
+                    send_lock,
+                )
                 continue
 
             try:
-                await _handle_event(
+                response_task = await _handle_event(
                     websocket,
                     event,
                     session,
@@ -54,11 +75,15 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
                     avatar,
                     wake,
                     started,
+                    send_lock,
+                    response_task,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.exception("event handling failed")
-                await _send_error(websocket, session_id, "event_failed", str(exc))
+                await _send_error(websocket, session_id, "event_failed", str(exc), send_lock)
     except WebSocketDisconnect:
+        if response_task and not response_task.done():
+            response_task.cancel()
         logger.info("websocket disconnected: %s", session_id)
 
 
@@ -71,34 +96,63 @@ async def _handle_event(
     avatar: AvatarService,
     wake: WakeService,
     started: float,
-) -> None:
+    send_lock: asyncio.Lock,
+    response_task: asyncio.Task[None] | None,
+) -> asyncio.Task[None] | None:
     if event.type == "client.debug.ping":
-        await _send(websocket, make_event("debug.log", session.session_id, {"message": "pong"}))
-        return
+        await _send(websocket, make_event("debug.log", session.session_id, {"message": "pong"}), send_lock)
+        return response_task
 
     if event.type == "client.wake.detected":
+        _cancel_task(response_task)
         wake.wake(session)
-        await _send(websocket, make_event("server.session.state", session.session_id, session.public_dict()))
-        await _send(websocket, avatar.state_event(session.session_id, "listening", "curious", "我在听。"))
-        await _send_cost(websocket, session)
-        return
+        await _send(
+            websocket,
+            make_event("server.session.state", session.session_id, session.public_dict()),
+            send_lock,
+        )
+        await _send(
+            websocket,
+            avatar.state_event(session.session_id, "listening", "curious", "我在听。"),
+            send_lock,
+        )
+        await _send_cost(websocket, session, send_lock)
+        return None
 
     if event.type == "client.wake.sleep":
+        _cancel_task(response_task)
         wake.sleep(session)
-        await _send(websocket, make_event("server.session.state", session.session_id, session.public_dict()))
-        await _send(websocket, avatar.state_event(session.session_id, "sleeping", "sleepy", "进入睡眠。"))
-        await _send_cost(websocket, session)
-        return
+        await _send(
+            websocket,
+            make_event("server.session.state", session.session_id, session.public_dict()),
+            send_lock,
+        )
+        await _send(
+            websocket,
+            avatar.state_event(session.session_id, "sleeping", "sleepy", "进入睡眠。"),
+            send_lock,
+        )
+        await _send_cost(websocket, session, send_lock)
+        return None
 
-    if event.type == "client.control.interrupt":
+    if event.type in {"client.control.interrupt", "client.control.cancel_response"}:
+        _cancel_task(response_task)
         session.status = "interrupted"
         session.response_in_progress = False
         session.interrupted_count += 1
-        await _send(websocket, avatar.state_event(session.session_id, "interrupted", "surprised", "我先停下。"))
+        await _send(
+            websocket,
+            avatar.state_event(session.session_id, "interrupted", "surprised", "我先停下。"),
+            send_lock,
+        )
         session.status = "listening"
-        await _send(websocket, make_event("server.session.state", session.session_id, session.public_dict()))
-        await _send_cost(websocket, session)
-        return
+        await _send(
+            websocket,
+            make_event("server.session.state", session.session_id, session.public_dict()),
+            send_lock,
+        )
+        await _send_cost(websocket, session, send_lock)
+        return None
 
     if event.type == "client.media.frame":
         frame = FramePayload.model_validate(event.payload)
@@ -122,15 +176,16 @@ async def _handle_event(
                     "from_cache": from_cache,
                 },
             ),
+            send_lock,
         )
-        await _send_cost(websocket, session)
-        return
+        await _send_cost(websocket, session, send_lock)
+        return response_task
 
     if event.type in {"client.user.text", "client.user.speech.final"}:
         user_text = str(event.payload.get("text", "")).strip()
         if not user_text:
-            await _send_error(websocket, session.session_id, "empty_text", "User text is empty.")
-            return
+            await _send_error(websocket, session.session_id, "empty_text", "User text is empty.", send_lock)
+            return response_task
         if dialogue.needs_focus(user_text):
             session.cost_meter.mode = "focus"
             await _send(
@@ -140,7 +195,10 @@ async def _handle_event(
                     session.session_id,
                     {"reason": "focus_keyword", "text": user_text},
                 ),
+                send_lock,
             )
+            await _send_cost(websocket, session, send_lock)
+            return response_task
         elif dialogue.needs_vision(user_text) and not session.last_visual_summary:
             await _send(
                 websocket,
@@ -149,35 +207,101 @@ async def _handle_event(
                     session.session_id,
                     {"reason": "missing_visual_summary", "text": user_text},
                 ),
+                send_lock,
             )
+            await _send_cost(websocket, session, send_lock)
+            return response_task
 
+        _cancel_task(response_task)
+        task = asyncio.create_task(
+            _run_dialogue_response(websocket, session, dialogue, avatar, user_text, started, send_lock)
+        )
+        task.add_done_callback(_log_task_exception)
+        return task
+
+    await _send_error(websocket, session.session_id, "unsupported_event", event.type, send_lock)
+    return response_task
+
+
+async def _run_dialogue_response(
+    websocket: WebSocket,
+    session: SessionState,
+    dialogue: DialogueService,
+    avatar: AvatarService,
+    user_text: str,
+    started: float,
+    send_lock: asyncio.Lock,
+) -> None:
+    try:
         result = await dialogue.reply(session, user_text)
         session.status = "speaking"
         session.response_in_progress = True
-        await _send(websocket, avatar.state_event(session.session_id, "thinking", result.emotion, "正在组织回答。"))
+        await _send(
+            websocket,
+            avatar.state_event(session.session_id, "thinking", result.emotion, "正在组织回答。"),
+            send_lock,
+        )
         async for chunk in dialogue.stream_text(result.text):
-            await _send(websocket, make_event("assistant.text.delta", session.session_id, {"delta": chunk}))
-        await _send(websocket, make_event("assistant.text.final", session.session_id, {"text": result.text}))
+            await _send(
+                websocket,
+                make_event("assistant.text.delta", session.session_id, {"delta": chunk}),
+                send_lock,
+            )
+        await _send(
+            websocket,
+            make_event("assistant.text.final", session.session_id, {"text": result.text}),
+            send_lock,
+        )
         await _send(
             websocket,
             avatar.state_event(session.session_id, "speaking", result.emotion, result.text, "talk", True),
+            send_lock,
         )
         session.response_in_progress = False
         session.cost_meter.last_latency_ms = int((time.perf_counter() - started) * 1000)
-        await _send(websocket, make_event("server.session.state", session.session_id, session.public_dict()))
-        await _send_cost(websocket, session)
+        await _send(
+            websocket,
+            make_event("server.session.state", session.session_id, session.public_dict()),
+            send_lock,
+        )
+        await _send_cost(websocket, session, send_lock)
+    except asyncio.CancelledError:
+        session.response_in_progress = False
+        session.status = "listening"
+        raise
+
+
+async def _send(websocket: WebSocket, event: EventEnvelope, send_lock: asyncio.Lock) -> None:
+    async with send_lock:
+        await websocket.send_json(event.model_dump())
+
+
+async def _send_cost(websocket: WebSocket, session: SessionState, send_lock: asyncio.Lock) -> None:
+    await _send(
+        websocket,
+        make_event("cost.update", session.session_id, session.cost_meter.model_dump()),
+        send_lock,
+    )
+
+
+async def _send_error(
+    websocket: WebSocket,
+    session_id: str,
+    code: str,
+    detail: Any,
+    send_lock: asyncio.Lock,
+) -> None:
+    await _send(websocket, make_event("error", session_id, {"code": code, "detail": detail}), send_lock)
+
+
+def _cancel_task(task: asyncio.Task[None] | None) -> None:
+    if task and not task.done():
+        task.cancel()
+
+
+def _log_task_exception(task: asyncio.Task[None]) -> None:
+    if task.cancelled():
         return
-
-    await _send_error(websocket, session.session_id, "unsupported_event", event.type)
-
-
-async def _send(websocket: WebSocket, event: EventEnvelope) -> None:
-    await websocket.send_json(event.model_dump())
-
-
-async def _send_cost(websocket: WebSocket, session: SessionState) -> None:
-    await _send(websocket, make_event("cost.update", session.session_id, session.cost_meter.model_dump()))
-
-
-async def _send_error(websocket: WebSocket, session_id: str, code: str, detail: Any) -> None:
-    await _send(websocket, make_event("error", session_id, {"code": code, "detail": detail}))
+    exc = task.exception()
+    if exc:
+        logger.exception("response task failed", exc_info=exc)

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-import { AvatarStatePayload, CostMeter } from "../lib/events";
+import { AvatarStatePayload, CostMeter, createId } from "../lib/events";
 
 export interface ConversationMessage {
   id: string;
@@ -75,14 +75,13 @@ export const useAppStore = create<AppState>((set) => ({
   setCost: (cost) => set({ cost }),
   addMessage: (speaker, text) =>
     set((state) => ({
-      messages: [...state.messages, { id: crypto.randomUUID(), speaker, text }],
+      messages: [...state.messages, { id: createId("msg"), speaker, text }],
     })),
   appendAssistantDelta: (delta) =>
     set((state) => ({ currentAssistantDraft: state.currentAssistantDraft + delta })),
   finalizeAssistant: (text) =>
     set((state) => ({
       currentAssistantDraft: "",
-      messages: [...state.messages, { id: crypto.randomUUID(), speaker: "assistant", text }],
+      messages: [...state.messages, { id: createId("msg"), speaker: "assistant", text }],
     })),
 }));
-

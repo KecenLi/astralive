@@ -11,8 +11,20 @@ export class AstraWsClient {
     this.close();
     this.socket = new WebSocket(`${WS_BASE_URL}/ws/session/${sessionId}`);
     this.socket.onmessage = (message) => {
-      const event = JSON.parse(message.data) as EventEnvelope<unknown>;
-      this.handlers.forEach((handler) => handler(event));
+      try {
+        const event = JSON.parse(message.data) as EventEnvelope<unknown>;
+        this.handlers.forEach((handler) => handler(event));
+      } catch {
+        this.handlers.forEach((handler) =>
+          handler({
+            id: "evt_parse_error",
+            type: "error",
+            session_id: sessionId,
+            ts: Date.now(),
+            payload: { code: "invalid_server_message" },
+          }),
+        );
+      }
     };
     return this.socket;
   }

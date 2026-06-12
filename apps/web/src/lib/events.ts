@@ -67,17 +67,24 @@ export interface AvatarStatePayload {
   lip_sync: boolean;
 }
 
+export function createId(prefix: string) {
+  const random =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID().replace(/-/g, "")
+      : `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+  return `${prefix}_${random.slice(0, 16)}`;
+}
+
 export function createEvent<TPayload>(
   type: string,
   sessionId: string,
   payload: TPayload,
 ): EventEnvelope<TPayload> {
   return {
-    id: `evt_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`,
+    id: createId("evt"),
     type,
     session_id: sessionId,
     ts: Date.now(),
     payload,
   };
 }
-

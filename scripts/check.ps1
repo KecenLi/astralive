@@ -26,10 +26,10 @@ try {
     Push-Location "apps\server"
     try {
         if (Get-Command uv -ErrorAction SilentlyContinue) {
-            uv run pytest
+            uv run pytest -s
             uv run ruff check app
         } elseif (Get-Command python -ErrorAction SilentlyContinue) {
-            python -m pytest
+            python -m pytest -s
             python -m ruff check app
         } else {
             throw "Python 3.11+ or uv is required to run backend checks."

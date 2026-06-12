@@ -21,9 +21,15 @@ export function CameraPanel({ onFrameSent }: CameraPanelProps) {
   const wakeSerial = useAppStore((state) => state.wakeSerial);
   const lastFrameInfo = useAppStore((state) => state.lastFrameInfo);
 
+  const stopCamera = useCallback(() => {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    if (videoRef.current) videoRef.current.srcObject = null;
+  }, []);
+
   async function startCamera(nextDeviceId = deviceId) {
     try {
-      streamRef.current?.getTracks().forEach((track) => track.stop());
+      stopCamera();
       const stream = await navigator.mediaDevices.getUserMedia({
         video: nextDeviceId ? { deviceId: { exact: nextDeviceId } } : true,
         audio: false,
@@ -47,11 +53,22 @@ export function CameraPanel({ onFrameSent }: CameraPanelProps) {
         maxHeight: reason === "focus_roi" ? 900 : 720,
       });
     } else {
-      frame = createMockFrame(reason, prompt);
+      setCameraState("摄像头未就绪，未上传真实画面");
+      return;
     }
     onFrameSent(frame);
     if (sessionId) {
-      wsClient.send(createEvent("client.media.frame", sessionId, frame));
+      const sent = wsClient.send(createEvent("client.media.frame", sessionId, frame));
+      if (!sent) setCameraState("WebSocket 未连接，帧未发送");
+    }
+  }, [onFrameSent, sessionId]);
+
+  const sendMockFrame = useCallback(() => {
+    const frame = createMockFrame("manual_debug", "手动 Mock 帧，仅用于无摄像头演示。");
+    onFrameSent(frame);
+    if (sessionId) {
+      const sent = wsClient.send(createEvent("client.media.frame", sessionId, frame));
+      if (!sent) setCameraState("WebSocket 未连接，Mock 帧未发送");
     }
   }, [onFrameSent, sessionId]);
 
@@ -60,6 +77,8 @@ export function CameraPanel({ onFrameSent }: CameraPanelProps) {
       void sendFrame("wake_snapshot", "唤醒时生成低成本视觉摘要。");
     }
   }, [sendFrame, wakeSerial]);
+
+  useEffect(() => stopCamera, [stopCamera]);
 
   return (
     <section className="panel camera-panel">
@@ -75,7 +94,7 @@ export function CameraPanel({ onFrameSent }: CameraPanelProps) {
         <button
           className="icon-button"
           type="button"
-          title="普通视觉上传"
+          title="上传摄像头帧"
           onClick={() => void sendFrame("visual_question", "用户问了视觉相关问题。")}
         >
           <Upload size={18} />
@@ -87,6 +106,14 @@ export function CameraPanel({ onFrameSent }: CameraPanelProps) {
           onClick={() => void sendFrame("focus_roi", "用户要求看清楚一点或读文字。")}
         >
           <ScanEye size={18} />
+        </button>
+        <button
+          className="icon-button"
+          type="button"
+          title="手动 Mock 帧"
+          onClick={sendMockFrame}
+        >
+          <Upload size={18} />
         </button>
         <button
           className="icon-button"

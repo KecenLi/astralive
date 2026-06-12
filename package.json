@@ -2,6 +2,7 @@
   "name": "astralive",
   "private": true,
   "version": "0.1.0",
+  "packageManager": "pnpm@9.15.4",
   "scripts": {
     "dev:web": "pnpm --filter @astralive/web dev",
     "build:web": "pnpm --filter @astralive/web build",
@@ -13,4 +14,3 @@
     "typescript": "^5.5.4"
   }
 }
-

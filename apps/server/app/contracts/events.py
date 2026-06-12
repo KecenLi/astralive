@@ -2,7 +2,7 @@ from typing import Any, Literal
 from uuid import uuid4
 import time
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 ClientEventType = Literal[
@@ -44,6 +44,8 @@ ServerEventType = Literal[
 
 
 class EventEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     id: str = Field(default_factory=lambda: f"evt_{uuid4().hex[:16]}")
     type: ClientEventType | ServerEventType
     session_id: str
@@ -57,4 +59,3 @@ def make_event(
     payload: dict[str, Any] | None = None,
 ) -> EventEnvelope:
     return EventEnvelope(type=event_type, session_id=session_id, payload=payload or {})
-

@@ -13,9 +13,11 @@ class VisionService:
         self.settings = settings
 
     def _cache_valid(self, session: SessionState, scene_hash: str | None) -> bool:
+        if not scene_hash or not session.last_scene_hash:
+            return False
         if not session.last_visual_summary or not session.last_visual_summary_at:
             return False
-        if scene_hash and session.last_scene_hash and scene_hash != session.last_scene_hash:
+        if scene_hash != session.last_scene_hash:
             return False
         expires_at = session.last_visual_summary_at + timedelta(
             seconds=self.settings.vision_cache_ttl_seconds
@@ -63,4 +65,3 @@ class VisionService:
         session.cost_meter.vision_calls += 1
         session.cost_meter.mode = "focus" if mode == "focus" else "active"
         return result, False
-

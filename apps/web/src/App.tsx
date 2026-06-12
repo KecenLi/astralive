@@ -13,6 +13,7 @@ import { AvatarStatePayload, CostMeter, createEvent, EventEnvelope, FramePayload
 import { wsClient } from "./lib/wsClient";
 
 function speak(text: string) {
+  if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") return;
   window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.lang = "zh-CN";
@@ -86,11 +87,15 @@ export default function App() {
     };
   }, []);
 
-  function wake() {
+function wake() {
     if (!store.sessionId) return;
+    const sent = wsClient.send(createEvent("client.wake.detected", store.sessionId, { wake_word: store.wakeWord }));
+    if (!sent) {
+      store.addMessage("system", "WebSocket 未连接，唤醒未发送。");
+      return;
+    }
     store.markWake();
     store.addMessage("system", `已听到唤醒词：${store.wakeWord}`);
-    wsClient.send(createEvent("client.wake.detected", store.sessionId, { wake_word: store.wakeWord }));
   }
 
   function sleep() {

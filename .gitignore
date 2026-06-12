@@ -29,6 +29,9 @@ data/sqlite/
 *.db
 *.sqlite
 *.sqlite3
+apps/web/public/live2d/
+assets/live2d/
+models/
 
 # Editors and OS files
 .idea/
