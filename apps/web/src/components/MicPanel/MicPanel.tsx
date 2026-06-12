@@ -32,7 +32,9 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
   const wakeAtRef = useRef(0);
   const [recognitionActive, setRecognitionActive] = useState(false);
   const sessionId = useAppStore((state) => state.sessionId);
+  const connection = useAppStore((state) => state.connection);
   const wakeWord = useAppStore((state) => state.wakeWord);
+  const realtimeReady = Boolean(sessionId) && connection === "connected";
 
   function stopMic() {
     recorderRef.current?.stop();
@@ -112,6 +114,10 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
       return;
     }
     if (startingRef.current) return;
+    if (!realtimeReady) {
+      setMicState("WebSocket 未连接");
+      return;
+    }
     if (muted) {
       setMicState("静音中");
       return;
@@ -127,7 +133,12 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
       outputSampleRate: LIVE_INPUT_SAMPLE_RATE,
       onChunk: (chunk) => {
         const sent = sendAudioChunk(chunk, false);
-        if (!sent) setMicState("WebSocket 未连接");
+        if (!sent) {
+          recorder.stop();
+          if (recorderRef.current === recorder) recorderRef.current = null;
+          setLiveStreaming(false);
+          setMicState("WebSocket 未连接");
+        }
       },
       onError: (error) => setMicState(error.message),
     });
@@ -217,6 +228,13 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
     }
   }, [stopSignal, stopLiveAudio]);
 
+  useEffect(() => {
+    if (liveStreaming && !realtimeReady) {
+      stopLiveAudio(false);
+      setMicState("WebSocket 未连接");
+    }
+  }, [liveStreaming, realtimeReady, stopLiveAudio]);
+
   return (
     <section className="panel mic-panel">
       <div className="panel-title">
@@ -240,6 +258,7 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
           className={`icon-button${liveStreaming ? " active" : ""}`}
           type="button"
           title={liveStreaming ? "结束实时语音" : "开始实时语音"}
+          disabled={!liveStreaming && !realtimeReady}
           onClick={() => void startLiveAudio()}
         >
           {liveStreaming ? <Square size={17} /> : <AudioLines size={18} />}

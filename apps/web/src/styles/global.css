@@ -160,6 +160,17 @@ select {
   background: #d7e7d1;
 }
 
+.tool-button:disabled,
+.icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.tool-button:disabled:hover,
+.icon-button:disabled:hover {
+  background: #e4eee0;
+}
+
 .icon-button.active {
   border-color: #2f8f6b;
   background: #cfe9df;
