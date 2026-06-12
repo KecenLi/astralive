@@ -386,17 +386,6 @@ async def _handle_realtime_audio_chunk(
             return None
         audio_runtime.input_finished = False
         audio_runtime.input_finished_at = 0.0
-        audio_runtime.receive_task = asyncio.create_task(
-            _run_realtime_stream_receiver(
-                websocket,
-                session,
-                avatar,
-                settings,
-                audio_runtime,
-                send_lock,
-            )
-        )
-        audio_runtime.receive_task.add_done_callback(_log_task_exception)
         await _send(
             websocket,
             avatar.state_event(session.session_id, "listening", "curious", "正在接收实时语音。"),
@@ -418,6 +407,18 @@ async def _handle_realtime_audio_chunk(
             await audio_runtime.stream.finish_audio()
             audio_runtime.input_finished = True
             audio_runtime.input_finished_at = time.perf_counter()
+            if audio_runtime.receive_task is None:
+                audio_runtime.receive_task = asyncio.create_task(
+                    _run_realtime_stream_receiver(
+                        websocket,
+                        session,
+                        avatar,
+                        settings,
+                        audio_runtime,
+                        send_lock,
+                    )
+                )
+                audio_runtime.receive_task.add_done_callback(_log_task_exception)
         except Exception as exc:  # noqa: BLE001
             logger.exception("failed to finish realtime audio stream")
             await _close_audio_runtime(audio_runtime)
@@ -635,7 +636,11 @@ async def _run_realtime_stream_receiver(
                 )
                 sent_audio_chunks += 1
 
-            if event.turn_complete or event.interrupted:
+            has_turn_output = bool(event.input_text or event.output_text or event.audio_chunks)
+            has_accumulated_output = bool(input_text or output_text or sent_audio_chunks)
+            if event.interrupted or (
+                event.turn_complete and audio_runtime.input_finished and (has_turn_output or has_accumulated_output)
+            ):
                 break
 
         input_text = input_text.strip()

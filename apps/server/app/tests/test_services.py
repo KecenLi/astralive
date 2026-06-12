@@ -3,11 +3,20 @@ import time
 
 import pytest
 
-from app.api.websocket import AudioRuntimeState, _next_realtime_stream_event
+from app.api.websocket import AudioRuntimeState, _handle_realtime_audio_chunk, _next_realtime_stream_event
 from app.config import Settings
 from app.contracts.media import FramePayload
-from app.contracts.model_io import ChatMessage, DialogueInput, RealtimeStreamEvent, TTSInput, VisionInput
+from app.contracts.model_io import (
+    AudioChunkPayload,
+    ChatMessage,
+    DialogueInput,
+    RealtimeStreamEvent,
+    TTSInput,
+    TTSResult,
+    VisionInput,
+)
 from app.core.session_state import SessionState
+from app.services.avatar_service import AvatarService
 from app.providers.asr.google_genai import GoogleGenAIASRProvider
 from app.providers.registry import ProviderRegistry
 from app.providers.llm.openai_compatible import OpenAICompatibleLLMProvider
@@ -371,3 +380,125 @@ async def test_realtime_stream_wait_times_out_after_final_audio() -> None:
 
     with pytest.raises(TimeoutError):
         await _next_realtime_stream_event(events().__aiter__(), runtime, settings)
+
+
+class OrderSensitiveRealtimeStream:
+    def __init__(self) -> None:
+        self.audio_sent = False
+        self.closed = False
+        self.finished = asyncio.Event()
+
+    async def send_audio(self, audio_bytes: bytes, mime: str) -> None:
+        if self.closed:
+            raise RuntimeError("stream was closed before first audio chunk")
+        self.audio_sent = True
+
+    async def finish_audio(self) -> None:
+        self.finished.set()
+
+    async def receive(self):
+        await asyncio.sleep(0)
+        if not self.audio_sent:
+            self.closed = True
+            yield RealtimeStreamEvent(turn_complete=True)
+            return
+        yield RealtimeStreamEvent(turn_complete=True)
+        await self.finished.wait()
+        yield RealtimeStreamEvent(
+            input_text="browser mic ok",
+            output_text="live ok",
+            audio_chunks=[
+                TTSResult(
+                    audio_base64="AAAA",
+                    mime="audio/pcm;rate=24000",
+                    sample_rate=24000,
+                    channels=1,
+                    encoding="pcm_s16le",
+                )
+            ],
+            turn_complete=True,
+        )
+
+    async def close(self) -> None:
+        self.closed = True
+        self.finished.set()
+
+
+class StubStreamingAudioService:
+    def __init__(self, stream: OrderSensitiveRealtimeStream) -> None:
+        self.stream = stream
+        self.has_realtime = True
+        self.can_stream_realtime = True
+
+    async def open_realtime_audio_stream(self, metadata: dict | None = None):
+        return self.stream
+
+
+class StubWebSocket:
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    async def send_json(self, event: dict) -> None:
+        await asyncio.sleep(0)
+        self.events.append(event)
+
+
+async def test_realtime_audio_receiver_starts_after_final_audio_chunk() -> None:
+    stream = OrderSensitiveRealtimeStream()
+    websocket = StubWebSocket()
+    runtime = AudioRuntimeState()
+    session = SessionState(session_id="test_session")
+    settings = Settings(realtime_provider="mock")
+    send_lock = asyncio.Lock()
+    audio = StubStreamingAudioService(stream)
+    avatar = AvatarService()
+
+    first_payload = AudioChunkPayload(
+        chunk_id="chunk_1",
+        mime="audio/pcm;rate=16000",
+        sample_rate=16000,
+        channels=1,
+        encoding="pcm_s16le",
+        data_base64="",
+        is_final=False,
+    )
+    task = await _handle_realtime_audio_chunk(
+        websocket,  # type: ignore[arg-type]
+        session,
+        audio,  # type: ignore[arg-type]
+        avatar,
+        settings,
+        runtime,
+        first_payload,
+        b"\x00\x00" * 160,
+        0.0,
+        send_lock,
+        None,
+    )
+
+    assert stream.audio_sent is True
+    assert task is None
+    assert runtime.receive_task is None
+    assert not any(event["type"] == "error" for event in websocket.events)
+
+    final_payload = first_payload.model_copy(update={"chunk_id": "chunk_final", "is_final": True})
+    task = await _handle_realtime_audio_chunk(
+        websocket,  # type: ignore[arg-type]
+        session,
+        audio,  # type: ignore[arg-type]
+        avatar,
+        settings,
+        runtime,
+        final_payload,
+        b"",
+        0.0,
+        send_lock,
+        task,
+    )
+    assert task is runtime.receive_task
+    if task:
+        await asyncio.wait_for(task, timeout=1)
+
+    event_types = [event["type"] for event in websocket.events]
+    assert "asr.transcript.final" in event_types
+    assert "assistant.audio.done" in event_types

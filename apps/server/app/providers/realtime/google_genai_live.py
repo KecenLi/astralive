@@ -165,7 +165,7 @@ class GoogleGenAILiveAudioStream(RealtimeAudioStream):
         async for message in self._session.receive():
             event = _stream_event_from_live_message(message, self.settings)
             yield event
-            if event.turn_complete or event.interrupted:
+            if event.interrupted:
                 break
 
     async def close(self) -> None:
