@@ -35,3 +35,12 @@
 - Latest-frame-wins is applied per source (`screen`, `camera`, `focus`, `general`), so screen and camera can run in parallel while repeated screen frames replace older pending screen frames.
 - `VisionService.analyze_frame(..., commit=False)` allows the scheduler to discard stale provider results before they update `session.last_visual_summary` or the UI.
 - Domestic provider script now includes DashScope, SiliconFlow, Volcano Ark, Baidu AI Studio/Qianfan, DeepSeek, Kimi, Zhipu, Tencent Hunyuan, and MiniMax routes. DeepSeek is text-only in the route template; use a vision-capable provider for screen/camera.
+
+## 2026-06-14 Lisette Local Reference Notes
+
+- Lisette source checked: ShiraLive2D sample page and BOOTH listing state the model is free but non-commercial only. Treat it as local personal reference, not a public/commercial package asset.
+- Do not commit `apps/web/public/live2d/lisette/` or `.installers/lisette-drive/lisette_v2.zip`; both are ignored and blocked by the public-tree guard.
+- Install with `scripts/install-lisette-live2d.ps1 -AcceptNonCommercialTerms -SetEnv` after `lisette_v2.zip` is available locally.
+- The installer patches `Lisette.model3.json` with Pixi-compatible expression/motion groups and `ParamMouthOpenY` lip sync.
+- Live2D rendering now uses non-premultiplied alpha plus high-DPI Pixi settings so Lisette stays clear in transparent desktop-pet windows.
+- This round must push only code/scripts/config notes, not the Lisette asset files.

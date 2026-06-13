@@ -52,9 +52,14 @@ export class Live2DAvatarController implements AvatarController {
       view: canvas,
       resizeTo: canvas.parentElement ?? canvas,
       backgroundAlpha: 0,
+      premultipliedAlpha: false,
+      antialias: true,
+      autoDensity: true,
+      resolution: Math.min(window.devicePixelRatio || 1, 2),
       autoStart: true,
     });
     this.model = await Live2DModel.from(modelUrl);
+    this.initializePartVisibility();
     this.fitModel(canvas);
     const stage = (this.app as { stage?: { addChild: (model: unknown) => void } }).stage;
     stage?.addChild(this.model);
@@ -95,6 +100,7 @@ export class Live2DAvatarController implements AvatarController {
       height?: number;
       scale?: { set: (value: number) => void };
       anchor?: { set: (x: number, y?: number) => void };
+      alpha?: number;
       x?: number;
       y?: number;
     } | null;
@@ -103,8 +109,58 @@ export class Live2DAvatarController implements AvatarController {
     const scale = Math.min((parent.clientWidth * 0.62) / model.width, (parent.clientHeight * 0.9) / model.height);
     model.scale?.set(scale);
     model.anchor?.set(0.5, 0.5);
+    model.alpha = 1;
     model.x = parent.clientWidth / 2;
     model.y = parent.clientHeight * 0.56;
+  }
+
+  private initializePartVisibility() {
+    const coreModel = (
+      this.model as {
+        internalModel?: { coreModel?: { setPartOpacityById?: (id: string, value: number) => void } };
+      } | null
+    )?.internalModel?.coreModel;
+    if (!coreModel?.setPartOpacityById) return;
+
+    const visibleParts = [
+      "HairFrontPart",
+      "ExpressionsPart",
+      "EyeLPart",
+      "EyeRPart",
+      "FacePart",
+      "HairSideL3SkinningPart",
+      "HairSideL4SkinningPart",
+      "HairSideR4SkinningPart",
+      "NeckScarfPart",
+      "ArmLPart",
+      "LowerArmLPart",
+      "BodyPart",
+      "DressPart",
+      "ArmRPart",
+      "LegRPart",
+      "LegLPart",
+      "DressBackPart",
+      "HairRibbonPart",
+      "HairBackPart",
+      "ScissorLPart",
+      "ScissorRPart",
+      "HairBackSkinningPart",
+    ];
+    for (const id of visibleParts) {
+      coreModel.setPartOpacityById(id, 1);
+    }
+    const hiddenParts = [
+      "GlowTracingPart",
+      "SpecialEffectsPart",
+      "ScissorLAnimationPart",
+      "ScissorRAnimationPart",
+      "GuideImagePart",
+      "BodySilhouettePart",
+      "FaceBackupPart",
+    ];
+    for (const id of hiddenParts) {
+      coreModel.setPartOpacityById(id, 0);
+    }
   }
 
   private addLipSyncTicker() {
@@ -112,6 +168,7 @@ export class Live2DAvatarController implements AvatarController {
       ticker?: { add: (callback: () => void) => void };
     } | null;
     app?.ticker?.add(() => {
+      this.initializePartVisibility();
       const fallback = this.lipSync ? 0.12 + Math.abs(Math.sin(performance.now() / 120)) * 0.18 : 0;
       const target = this.lipSync ? Math.max(this.targetMouthOpen, fallback) : 0;
       this.mouthOpen += (target - this.mouthOpen) * 0.35;
@@ -120,14 +177,18 @@ export class Live2DAvatarController implements AvatarController {
   }
 
   private applyExpression(expression: AvatarExpression) {
-    const mapped = expressionName(expression);
-    if (mapped === this.lastExpression) return;
-    this.lastExpression = mapped;
+    const mapped = expressionNames(expression);
+    const key = mapped.join("|");
+    if (key === this.lastExpression) return;
+    this.lastExpression = key;
     const model = this.model as { expression?: (nameOrIndex: string | number) => void } | null;
-    try {
-      model?.expression?.(mapped);
-    } catch {
-      return;
+    for (const name of mapped) {
+      try {
+        model?.expression?.(name);
+        return;
+      } catch {
+        // Try the next model-specific expression alias.
+      }
     }
   }
 
@@ -282,16 +343,16 @@ function patchPixiUrlResolve(PIXI: unknown) {
   }
 }
 
-function expressionName(expression: AvatarExpression) {
-  const map: Record<AvatarExpression, string> = {
-    neutral: "Normal",
-    happy: "Smile",
-    curious: "f01",
-    surprised: "Surprised",
-    confused: "f02",
-    concerned: "Sad",
-    thinking: "Blushing",
-    sleepy: "Normal",
+function expressionNames(expression: AvatarExpression) {
+  const map: Record<AvatarExpression, string[]> = {
+    neutral: ["Normal"],
+    happy: ["Smile", "shy"],
+    curious: ["f01", "sans_eye_glow", "shy"],
+    surprised: ["Surprised", "frenzy"],
+    confused: ["f02", "frenzy"],
+    concerned: ["Sad", "sad", "tear"],
+    thinking: ["Blushing", "shy"],
+    sleepy: ["Normal", "shy"],
   };
   return map[expression];
 }
@@ -309,24 +370,24 @@ function motionSpec(motion: string | undefined, mode: AvatarMode): MotionSpec {
   }
 
   const map: Record<string, MotionSpec> = {
-    idle: { groups: ["Idle"] },
-    sleep: { groups: ["Idle"] },
-    sleeping: { groups: ["Idle"] },
-    listen: { groups: ["Tap", "Tap@Body", "Flick"] },
-    listening: { groups: ["Tap", "Tap@Body", "Flick"] },
-    think: { groups: ["Flick", "FlickDown", "Tap", "Tap@Body"] },
-    thinking: { groups: ["Flick", "FlickDown", "Tap", "Tap@Body"] },
-    talk: { groups: ["Tap", "Tap@Body", "Flick"] },
-    speaking: { groups: ["Tap", "Tap@Body", "Flick"] },
-    happy: { groups: ["Flick3", "Flick", "Tap"] },
-    curious: { groups: ["FlickRight", "Flick", "Tap"] },
-    surprised: { groups: ["FlickLeft", "FlickDown", "Flick"] },
-    concerned: { groups: ["Shake", "FlickDown", "Tap"] },
-    confused: { groups: ["Shake", "FlickDown", "Tap"] },
-    nod: { groups: ["Tap", "Tap@Body"] },
-    reject: { groups: ["Shake", "FlickDown"] },
-    interrupted: { groups: ["Shake", "FlickLeft", "Tap"] },
-    error: { groups: ["Shake", "FlickDown", "Tap"] },
+    idle: { groups: ["Idle", "Breathing", "HandFiddle", "ShyIdle"] },
+    sleep: { groups: ["Idle", "Breathing", "ShyIdle"] },
+    sleeping: { groups: ["Idle", "Breathing", "ShyIdle"] },
+    listen: { groups: ["Tap", "Tap@Body", "Flick", "Greeting", "HandFiddle"] },
+    listening: { groups: ["Tap", "Tap@Body", "Flick", "Greeting", "HandFiddle"] },
+    think: { groups: ["Flick", "FlickDown", "Tap", "Tap@Body", "HandFiddle", "ShyIdle"] },
+    thinking: { groups: ["Flick", "FlickDown", "Tap", "Tap@Body", "HandFiddle", "ShyIdle"] },
+    talk: { groups: ["Tap", "Tap@Body", "Flick", "Greeting", "Happy"] },
+    speaking: { groups: ["Tap", "Tap@Body", "Flick", "Greeting", "Happy"] },
+    happy: { groups: ["Flick3", "Flick", "Tap", "Happy", "Greeting", "ShyIdle"] },
+    curious: { groups: ["FlickRight", "Flick", "Tap", "Greeting", "HandFiddle"] },
+    surprised: { groups: ["FlickLeft", "FlickDown", "Flick", "Jump", "Frenzy"] },
+    concerned: { groups: ["Shake", "FlickDown", "Tap", "Sad", "SadIdle", "ShyIdle"] },
+    confused: { groups: ["Shake", "FlickDown", "Tap", "Frenzy", "HandFiddle"] },
+    nod: { groups: ["Tap", "Tap@Body", "Greeting"] },
+    reject: { groups: ["Shake", "FlickDown", "Sad"] },
+    interrupted: { groups: ["Shake", "FlickLeft", "Tap", "Jump"] },
+    error: { groups: ["Shake", "FlickDown", "Tap", "Sad"] },
   };
   return map[normalized] ?? map[mode] ?? { groups: ["Idle"] };
 }
