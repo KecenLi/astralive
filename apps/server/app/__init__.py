@@ -1,2 +1,1 @@
-"""AstraLive server package."""
-
+"""MODVII server package."""

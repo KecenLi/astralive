@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("server", "web", "all")]
+    [ValidateSet("server", "web", "desktop", "all")]
     [string]$Target = "all"
 )
 
@@ -35,7 +35,7 @@ function Start-Server {
 function Start-Web {
     Push-Location $Root
     try {
-        Invoke-Pnpm @("--filter", "@astralive/web", "dev")
+        Invoke-Pnpm @("--filter", "@modvii/web", "dev")
     } finally {
         Pop-Location
     }
@@ -47,6 +47,14 @@ switch ($Target) {
     }
     "web" {
         Start-Web
+    }
+    "desktop" {
+        Push-Location $Root
+        try {
+            Invoke-Pnpm @("--filter", "modvii-desktop", "dev")
+        } finally {
+            Pop-Location
+        }
     }
     "all" {
         Start-Process powershell -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSScriptRoot\dev.ps1`"", "server" -WorkingDirectory $Root

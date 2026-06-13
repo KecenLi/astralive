@@ -2,7 +2,7 @@ import { PauseCircle } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { useAppStore } from "../../app/store";
-import { Live2DAvatarController } from "../../features/avatar/avatarController";
+import { describeLive2DError, Live2DAvatarController } from "../../features/avatar/avatarController";
 import { LIVE2D_MODEL_URL } from "../../lib/env";
 
 const expressionLabel: Record<string, string> = {
@@ -19,7 +19,8 @@ const expressionLabel: Record<string, string> = {
 export function AvatarStage({ onInterrupt }: { onInterrupt: () => void }) {
   const avatar = useAppStore((state) => state.avatar);
   const status = useAppStore((state) => state.status);
-  const isSpeaking = avatar.mode === "speaking";
+  const lipSyncLevel = avatar.lip_sync_level ?? 0;
+  const isSpeaking = avatar.mode === "speaking" || avatar.lip_sync || lipSyncLevel > 0.02;
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const controllerRef = useRef<Live2DAvatarController | null>(null);
   const [isLive2DReady, setIsLive2DReady] = useState(false);
@@ -36,7 +37,7 @@ export function AvatarStage({ onInterrupt }: { onInterrupt: () => void }) {
         await controller.mount(canvasRef.current as HTMLCanvasElement, LIVE2D_MODEL_URL);
         if (!disposed) setIsLive2DReady(true);
       } catch (error) {
-        console.warn("Live2D model failed to load; using fallback avatar.", error);
+        console.warn(`Live2D model failed to load; using fallback avatar. ${describeLive2DError(error)}`);
         if (!disposed) setIsLive2DReady(false);
       }
     }
@@ -57,8 +58,11 @@ export function AvatarStage({ onInterrupt }: { onInterrupt: () => void }) {
       expression: avatar.expression,
       subtitle: avatar.subtitle,
       lipSync: isSpeaking,
+      lipSyncLevel,
     });
-  }, [avatar.expression, avatar.mode, avatar.subtitle, isSpeaking]);
+  }, [avatar.expression, avatar.mode, avatar.subtitle, isSpeaking, lipSyncLevel]);
+
+  const mouthOpen = Math.max(0.08, Math.min(1, lipSyncLevel || (isSpeaking ? 0.35 : 0.08)));
 
   return (
     <section className="avatar-stage" aria-label="Avatar">
@@ -76,7 +80,10 @@ export function AvatarStage({ onInterrupt }: { onInterrupt: () => void }) {
           <div className="avatar-brow avatar-brow-right" />
           <div className="avatar-eye avatar-eye-left" />
           <div className="avatar-eye avatar-eye-right" />
-          <div className={`avatar-mouth ${isSpeaking ? "avatar-mouth-speaking" : ""}`} />
+          <div
+            className={`avatar-mouth ${isSpeaking ? "avatar-mouth-speaking" : ""}`}
+            style={{ transform: `scaleY(${1 + mouthOpen * 1.8})` }}
+          />
         </div>
         <div className="avatar-shadow" />
       </div>

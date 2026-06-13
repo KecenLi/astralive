@@ -1,6 +1,6 @@
 param(
-    [ValidateSet("hiyori_free")]
-    [string]$Model = "hiyori_free",
+    [ValidateSet("haru", "hiyori_free")]
+    [string]$Model = "haru",
     [ValidateSet("en", "ja", "zh", "ko")]
     [string]$Language = "en",
     [string]$OutputDir = "apps\web\public\live2d",
@@ -22,6 +22,12 @@ New-Item -ItemType Directory -Force -Path $Target | Out-Null
 New-Item -ItemType Directory -Force -Path $ZipDir | Out-Null
 
 $Downloads = @{
+    haru = @{
+        en = "https://cubism.live2d.com/sample-data/bin/haru/haru.zip"
+        ja = "https://cubism.live2d.com/sample-data/bin/haru/haru.zip"
+        zh = "https://cubism.live2d.com/sample-data/bin/haru/haru.zip"
+        ko = "https://cubism.live2d.com/sample-data/bin/haru/haru.zip"
+    }
     hiyori_free = @{
         en = "https://cubism.live2d.com/sample-data/bin/hiyori_free/hiyori_free_en.zip"
         ja = "https://cubism.live2d.com/sample-data/bin/hiyori_free/hiyori_free_jp.zip"
@@ -40,11 +46,11 @@ if (Test-Path $ExtractRoot) {
 
 Expand-Archive -Path $ZipPath -DestinationPath $ExtractRoot -Force
 
-$ModelJson = Get-ChildItem -Path $ExtractRoot -Filter "*.model3.json" -Recurse |
+$ModelJson = Get-ChildItem -Path $ExtractRoot -Include "*.model3.json", "*.model.json" -Recurse |
     Select-Object -First 1
 
 if (-not $ModelJson) {
-    throw "Downloaded archive did not contain a model3.json file."
+    throw "Downloaded archive did not contain a Live2D model JSON file."
 }
 
 $Relative = $ModelJson.FullName.Substring($Target.Length).TrimStart("\") -replace "\\", "/"

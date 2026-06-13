@@ -1,24 +1,64 @@
 import { AudioLines, Mic, MicOff, Radio, Send, Square } from "lucide-react";
+import { MicVAD } from "@ricky0123/vad-web";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useAppStore } from "../../app/store";
 import {
   arrayBufferToBase64,
+  encodePcm16,
   LIVE_INPUT_SAMPLE_RATE,
   PcmRecorder,
 } from "../../features/media/pcmRecorder";
+import { TenVadRecorder } from "../../features/media/tenVadRecorder";
 import { LiveAudioGate, LiveAudioGateDecision } from "../../features/media/voiceActivity";
 import { getSpeechRecognition, SpeechRecognition } from "../../features/wakeword/speechRecognition";
+import { extractWakeRequest } from "../../features/wakeword/wakePhrase";
 import { AudioChunkPayload, createId } from "../../lib/events";
 
 interface MicPanelProps {
+  autoStartSignal: number;
+  wakeListenSignal: number;
   onWake: () => void;
   onUserText: (text: string) => void;
   onAudioChunk: (payload: AudioChunkPayload) => boolean;
+  onLiveStateChange?: (active: boolean) => void;
   stopSignal: number;
 }
 
-export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPanelProps) {
+const MIC_AUDIO_CONSTRAINTS: MediaTrackConstraints = {
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true,
+  channelCount: 1,
+  sampleRate: 48000,
+};
+const AUDIO_SEND_CHUNK_BYTES = 120_000;
+
+function publicAssetBase(path: string) {
+  return new URL(path, window.location.href).toString();
+}
+
+function splitPcm16Buffer(buffer: ArrayBuffer) {
+  const chunks: ArrayBuffer[] = [];
+  let offset = 0;
+  while (offset < buffer.byteLength) {
+    let end = Math.min(offset + AUDIO_SEND_CHUNK_BYTES, buffer.byteLength);
+    if (end < buffer.byteLength && end % 2 !== 0) end -= 1;
+    chunks.push(buffer.slice(offset, end));
+    offset = end;
+  }
+  return chunks;
+}
+
+export function MicPanel({
+  autoStartSignal,
+  wakeListenSignal,
+  onWake,
+  onUserText,
+  onAudioChunk,
+  onLiveStateChange,
+  stopSignal,
+}: MicPanelProps) {
   const [micState, setMicState] = useState("未授权");
   const [muted, setMuted] = useState(false);
   const [level, setLevel] = useState(0);
@@ -29,6 +69,9 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
   const audioContextRef = useRef<AudioContext | null>(null);
   const recorderRef = useRef<PcmRecorder | null>(null);
   const audioGateRef = useRef<LiveAudioGate | null>(null);
+  const tenVadRecorderRef = useRef<TenVadRecorder | null>(null);
+  const sileroVadRef = useRef<MicVAD | null>(null);
+  const startLiveAudioRef = useRef<() => Promise<void>>(async () => undefined);
   const audioSentRef = useRef(false);
   const startingRef = useRef(false);
   const rafRef = useRef(0);
@@ -60,7 +103,14 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
       ? "开始实时语音"
       : realtimeUnavailableReason;
 
-  function stopMic() {
+  const stopMic = useCallback(() => {
+    tenVadRecorderRef.current?.stop();
+    tenVadRecorderRef.current = null;
+    const vad = sileroVadRef.current;
+    sileroVadRef.current = null;
+    void vad?.destroy().catch((error) => {
+      console.warn("MODVII mic Silero cleanup failed", error);
+    });
     recorderRef.current?.stop();
     recorderRef.current = null;
     audioGateRef.current = null;
@@ -72,12 +122,15 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
     void audioContextRef.current?.close();
     audioContextRef.current = null;
     setLevel(0);
-  }
+  }, []);
 
-  async function startMic() {
+  const startMic = useCallback(async () => {
     try {
       stopMic();
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: MIC_AUDIO_CONSTRAINTS,
+        video: false,
+      });
       streamRef.current = stream;
       const audioContext = new AudioContext();
       audioContextRef.current = audioContext;
@@ -99,7 +152,7 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
       setMicState(error instanceof Error ? error.message : "麦克风不可用");
       return null;
     }
-  }
+  }, [stopMic]);
 
   const sendAudioChunk = useCallback((buffer: ArrayBuffer, isFinal: boolean) => {
     if (!sessionId) return false;
@@ -116,22 +169,50 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
     return onAudioChunk(payload);
   }, [onAudioChunk, sessionId]);
 
+  const sendAudioTurn = useCallback((buffer: ArrayBuffer) => {
+    let sentAudio = false;
+    let sentChunks = 0;
+    for (const chunk of splitPcm16Buffer(buffer)) {
+      const sent = sendAudioChunk(chunk, false);
+      if (!sent) {
+        return { sentAudio, sentFinal: false, sentChunks, totalBytes: buffer.byteLength };
+      }
+      sentAudio = true;
+      sentChunks += 1;
+    }
+    return {
+      sentAudio,
+      sentFinal: sentAudio ? sendAudioChunk(new ArrayBuffer(0), true) : false,
+      sentChunks,
+      totalBytes: buffer.byteLength,
+    };
+  }, [sendAudioChunk]);
+
   const stopLiveAudio = useCallback(
     (sendFinal: boolean) => {
       const hadRecorder = Boolean(recorderRef.current);
+      const hadTenVad = Boolean(tenVadRecorderRef.current);
+      const hadSileroVad = Boolean(sileroVadRef.current);
+      tenVadRecorderRef.current?.stop();
+      tenVadRecorderRef.current = null;
+      const vad = sileroVadRef.current;
+      sileroVadRef.current = null;
+      void vad?.destroy().catch((error) => {
+        console.warn("MODVII mic Silero stop failed", error);
+      });
       recorderRef.current?.stop();
       recorderRef.current = null;
       audioGateRef.current?.reset();
       audioGateRef.current = null;
       startingRef.current = false;
       setLiveStreaming(false);
-      const shouldSendFinal = sendFinal && hadRecorder && audioSentRef.current;
+      const shouldSendFinal = sendFinal && (hadRecorder || hadTenVad || hadSileroVad) && audioSentRef.current;
       if (shouldSendFinal) {
         const sent = sendAudioChunk(new ArrayBuffer(0), true);
         if (!sent) setMicState("WebSocket 未连接");
       }
       audioSentRef.current = false;
-      if (hadRecorder) {
+      if (hadRecorder || hadTenVad || hadSileroVad) {
         setMicState("ready");
       }
     },
@@ -139,7 +220,7 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
   );
 
   async function startLiveAudio() {
-    if (liveStreaming || recorderRef.current) {
+    if (liveStreaming || recorderRef.current || tenVadRecorderRef.current || sileroVadRef.current) {
       stopLiveAudio(true);
       return;
     }
@@ -159,7 +240,132 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
       return;
     }
 
-    audioGateRef.current = new LiveAudioGate({ sampleRate: LIVE_INPUT_SAMPLE_RATE });
+    audioSentRef.current = false;
+    try {
+      const tenRecorder = new TenVadRecorder({
+        threshold: 0.72,
+        rmsFloor: 0.012,
+        debounceOn: 4,
+        debounceOff: 42,
+        preRollMs: 320,
+        initialSilenceMs: 10_000,
+        maxTurnMs: 24_000,
+        minSpeechMs: 260,
+        onSpeechStart: () => {
+          setMicState("TEN VAD: 检测到语音");
+          console.warn("MODVII mic TEN VAD speech start");
+        },
+        onSpeechEnd: (pcm, stats) => {
+          if (!tenVadRecorderRef.current) return;
+          const result = sendAudioTurn(pcm);
+          audioSentRef.current = audioSentRef.current || result.sentAudio;
+          console.warn(`MODVII mic TEN VAD speech end ${JSON.stringify({ ...stats, ...result })}`);
+          if (!result.sentAudio || !result.sentFinal) {
+            setMicState("WebSocket 未连接");
+          } else {
+            setMicState("正在回应");
+          }
+          window.setTimeout(() => stopLiveAudio(false), 0);
+        },
+        onVADMisfire: (stats) => {
+          setMicState("等待语音");
+          console.warn(`MODVII mic TEN VAD misfire ${JSON.stringify(stats)}`);
+        },
+        onNoSpeechTimeout: () => {
+          stopLiveAudio(false);
+          setMicState("未检测到语音");
+        },
+        onError: (error) => {
+          setMicState(error.message);
+          console.warn("MODVII mic TEN VAD error", error);
+        },
+        onDebug: (message, detail) => {
+          console.warn(message, detail ?? "");
+        },
+      });
+      tenVadRecorderRef.current = tenRecorder;
+      await tenRecorder.start(stream);
+      setLiveStreaming(true);
+      setMicState("TEN VAD: 等待语音");
+      console.warn("MODVII mic TEN VAD started");
+      return;
+    } catch (error) {
+      tenVadRecorderRef.current?.stop();
+      tenVadRecorderRef.current = null;
+      console.warn("MODVII mic TEN VAD unavailable; falling back to Silero", error);
+    }
+
+    try {
+      const vad = await MicVAD.new({
+        model: "v5",
+        baseAssetPath: publicAssetBase("vendor/vad/"),
+        onnxWASMBasePath: publicAssetBase("vendor/onnxruntime/"),
+        startOnLoad: false,
+        processorType: "ScriptProcessor",
+        positiveSpeechThreshold: 0.35,
+        negativeSpeechThreshold: 0.22,
+        redemptionMs: 1300,
+        preSpeechPadMs: 700,
+        minSpeechMs: 280,
+        submitUserSpeechOnPause: true,
+        getStream: async () => stream,
+        pauseStream: async () => undefined,
+        resumeStream: async () => stream,
+        onSpeechStart: () => {
+          setMicState("检测到语音");
+          console.warn("MODVII mic Silero speech start");
+        },
+        onSpeechRealStart: () => {
+          setMicState("live streaming");
+        },
+        onSpeechEnd: (audio) => {
+          if (!sileroVadRef.current) return;
+          const pcm = encodePcm16(audio);
+          const result = pcm.byteLength > 0
+            ? sendAudioTurn(pcm)
+            : { sentAudio: false, sentFinal: false, sentChunks: 0, totalBytes: 0 };
+          audioSentRef.current = audioSentRef.current || result.sentAudio;
+          console.warn(`MODVII mic Silero speech end ${JSON.stringify({
+            samples: audio.length,
+            ...result,
+          })}`);
+          if (!result.sentAudio || !result.sentFinal) {
+            setMicState("WebSocket 未连接");
+          } else {
+            setMicState("正在回应");
+          }
+          window.setTimeout(() => stopLiveAudio(false), 0);
+        },
+        onVADMisfire: () => {
+          setMicState("等待语音");
+          console.warn("MODVII mic Silero VAD misfire");
+        },
+        onFrameProcessed: () => undefined,
+      });
+      sileroVadRef.current = vad;
+      await vad.start();
+      setLiveStreaming(true);
+      setMicState("等待语音");
+      console.warn("MODVII mic Silero started");
+      return;
+    } catch (error) {
+      const vad = sileroVadRef.current;
+      sileroVadRef.current = null;
+      void vad?.destroy().catch(() => undefined);
+      console.warn("MODVII mic Silero unavailable; falling back to RMS gate", error);
+    }
+
+    audioGateRef.current = new LiveAudioGate({
+      sampleRate: LIVE_INPUT_SAMPLE_RATE,
+      startThreshold: 0.006,
+      continueThreshold: 0.0035,
+      minContinueThreshold: 0.0015,
+      noiseMargin: 0.0025,
+      peakDropRatio: 0.2,
+      initialSilenceMs: 10000,
+      silenceAfterSpeechMs: 1300,
+      maxTurnMs: 22000,
+    });
     audioSentRef.current = false;
     const recorder = new PcmRecorder({
       outputSampleRate: LIVE_INPUT_SAMPLE_RATE,
@@ -191,6 +397,11 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
         }
 
         if (decision.shouldStop) {
+          console.warn("MODVII mic RMS gate stop", {
+            rms: decision.rms,
+            sendFinal: decision.sendFinal,
+            state: decision.state,
+          });
           if (decision.state === "initial_timeout") {
             stopLiveAudio(false);
             setMicState("未检测到语音");
@@ -216,6 +427,11 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
       startingRef.current = false;
     }
   }
+  startLiveAudioRef.current = startLiveAudio;
+
+  useEffect(() => {
+    onLiveStateChange?.(liveStreaming);
+  }, [liveStreaming, onLiveStateChange]);
 
   function startWakeRecognition() {
     if (recognitionActive) return;
@@ -234,9 +450,17 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
         .map((result) => result[0]?.transcript ?? "")
         .join("");
       const now = Date.now();
-      if (transcript.includes(wakeWord) && now - wakeAtRef.current > 4000) {
+      const wakeRequest = extractWakeRequest(transcript, wakeWord);
+      if (wakeRequest.matched && now - wakeAtRef.current > 4000) {
         wakeAtRef.current = now;
         onWake();
+        if (wakeRequest.requestText) {
+          onUserText(wakeRequest.requestText);
+        } else {
+          window.setTimeout(() => {
+            void startLiveAudio();
+          }, 250);
+        }
       }
     };
     recognition.onerror = () => setMicState("语音识别暂不可用");
@@ -258,8 +482,14 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
   function submitText() {
     const trimmed = text.trim();
     if (!trimmed) return;
-    if (trimmed.includes(wakeWord)) {
+    const wakeRequest = extractWakeRequest(trimmed, wakeWord);
+    if (wakeRequest.matched) {
       onWake();
+      if (wakeRequest.requestText) {
+        onUserText(wakeRequest.requestText);
+      } else {
+        void startLiveAudio();
+      }
     } else {
       onUserText(trimmed);
     }
@@ -271,7 +501,19 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
       recognitionRef.current?.stop();
       stopMic();
     };
-  }, []);
+  }, [stopMic]);
+
+  useEffect(() => {
+    if (autoStartSignal > 0) {
+      void startMic();
+    }
+  }, [autoStartSignal, startMic]);
+
+  useEffect(() => {
+    if (wakeListenSignal > 0) {
+      void startLiveAudioRef.current();
+    }
+  }, [wakeListenSignal]);
 
   useEffect(() => {
     streamRef.current?.getAudioTracks().forEach((track) => {
@@ -360,6 +602,16 @@ export function MicPanel({ onWake, onUserText, onAudioChunk, stopSignal }: MicPa
                 : "unavailable"}
           </dd>
         </div>
+        <div>
+          <dt>输入优化</dt>
+          <dd>降噪/回声消除/自动增益</dd>
+        </div>
+        {!liveStreaming && realtimeUnavailableReason ? (
+          <div>
+            <dt>按钮原因</dt>
+            <dd>{realtimeUnavailableReason}</dd>
+          </div>
+        ) : null}
       </dl>
     </section>
   );

@@ -10,6 +10,10 @@ CaptureReason = Literal[
     "manual_debug",
     "focus_roi",
     "periodic_low_cost",
+    "screen_low_fps",
+    "screen_stream",
+    "camera_stream",
+    "screen_focus",
 ]
 
 
@@ -22,4 +26,3 @@ class FramePayload(BaseModel):
     capture_reason: CaptureReason
     scene_hash: str | None = None
     data_base64: str = Field(min_length=1)
-

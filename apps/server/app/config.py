@@ -9,7 +9,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 class Settings(BaseSettings):
     app_env: str = "development"
-    app_name: str = "AstraLive"
+    app_name: str = "MODVII"
     server_host: str = "127.0.0.1"
     server_port: int = 8000
     web_origin: str = "http://localhost:5173"
@@ -47,6 +47,18 @@ class Settings(BaseSettings):
     vertex_ai_tts_model: str = "gemini-3.1-flash-tts-preview"
     vertex_ai_tts_voice: str = "Kore"
 
+    cosyvoice3_python: str = ""
+    cosyvoice3_repo_dir: str = str(PROJECT_ROOT / "third_party" / "CosyVoice")
+    cosyvoice3_model_dir: str = str(PROJECT_ROOT / "models" / "Fun-CosyVoice3-0.5B")
+    cosyvoice3_script: str = str(PROJECT_ROOT / "scripts" / "cosyvoice3_synth.py")
+    cosyvoice3_prompt_audio: str = ""
+    cosyvoice3_prompt_text: str = (
+        "You are MODVII, a warm and lively bilingual desktop companion.<|endofprompt|>"
+        "希望你以后能够做的比我还好呦。"
+    )
+    cosyvoice3_device: str = "cpu"
+    cosyvoice3_timeout_seconds: float = 120.0
+
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_llm_model: str = "qwen2.5:0.5b"
 
@@ -59,11 +71,21 @@ class Settings(BaseSettings):
     realtime_input_idle_timeout_seconds: float = 8.0
     realtime_turn_timeout_seconds: float = 30.0
 
-    wake_word: str = "阿斯塔"
+    wake_word: str = "小七"
+    persona_prompt: str = (
+        "你是 MODVII，也叫小七，一个中文优先的女性 AI VTuber 桌面伴侣。"
+        "你通过麦克风、摄像头和屏幕理解用户当前上下文。"
+        "用户说出“小七”后，先确认自己在听，然后专注理解用户接下来的要求并直接回应。"
+        "回答要适合语音朗读，保持简短、自然、具体，通常一到两句话。"
+        "多用追问推动对话，但不要空泛寒暄。"
+        "你可以使用表情意图：neutral、happy、curious、surprised、confused、concerned、thinking、sleepy。"
+        "如果视觉信息不足，明确说明不确定，并请求更清晰的镜头或屏幕。"
+    )
     frame_jpeg_quality: float = 0.72
     max_frame_width: int = 1280
     max_frame_height: int = 720
     vision_cache_ttl_seconds: int = 30
+    vision_request_timeout_seconds: float = 8.0
     scene_change_threshold: float = 0.12
 
     data_dir: Path = Field(default=Path("data"))

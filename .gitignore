@@ -22,9 +22,11 @@ venv/
 # Node
 node_modules/
 dist/
+build/
 .vite/
 coverage/
 *.tsbuildinfo
+*.spec
 
 # App data
 data/cache/
@@ -37,6 +39,7 @@ data/api-hold/
 apps/web/public/live2d/
 assets/live2d/
 models/
+third_party/
 
 # Editors and OS files
 .idea/

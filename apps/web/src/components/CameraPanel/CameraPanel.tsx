@@ -1,33 +1,50 @@
-import { Camera, RefreshCw, ScanEye, Upload } from "lucide-react";
+import { Camera, RefreshCw, ScanEye, Upload, Video } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useAppStore } from "../../app/store";
+import { captureVideoFrame } from "../../features/media/frameCapture";
+import {
+  activityFromStatus,
+  captureOptionsFor,
+  captureReasonFor,
+  getFrameIntervalMs,
+  shouldSendSceneHash,
+  VisualCaptureActivity,
+  VisualCaptureMode,
+} from "../../features/media/frameSampler";
+import { createMockFrame } from "../../features/media/mockFrame";
 import { createEvent, FramePayload } from "../../lib/events";
 import { wsClient } from "../../lib/wsClient";
-import { captureVideoFrame } from "../../features/media/frameCapture";
-import { createMockFrame } from "../../features/media/mockFrame";
 
 interface CameraPanelProps {
+  autoStartSignal: number;
   onFrameSent: (frame: FramePayload) => void;
+  suspendAutoUpload?: boolean;
 }
 
-export function CameraPanel({ onFrameSent }: CameraPanelProps) {
+export function CameraPanel({ autoStartSignal, onFrameSent, suspendAutoUpload = false }: CameraPanelProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const lastSceneHashRef = useRef<string | null>(null);
+  const captureInFlightRef = useRef(false);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [deviceId, setDeviceId] = useState("");
   const [cameraState, setCameraState] = useState("未授权");
+  const [mode, setMode] = useState<VisualCaptureMode>("low_fps");
+  const [autoUpload, setAutoUpload] = useState(true);
+  const [focusUntil, setFocusUntil] = useState(0);
   const sessionId = useAppStore((state) => state.sessionId);
-  const wakeSerial = useAppStore((state) => state.wakeSerial);
+  const status = useAppStore((state) => state.status);
   const lastFrameInfo = useAppStore((state) => state.lastFrameInfo);
 
   const stopCamera = useCallback(() => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
+    lastSceneHashRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
   }, []);
 
-  async function startCamera(nextDeviceId = deviceId) {
+  const startCamera = useCallback(async (nextDeviceId = deviceId) => {
     try {
       stopCamera();
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -42,26 +59,37 @@ export function CameraPanel({ onFrameSent }: CameraPanelProps) {
     } catch (error) {
       setCameraState(error instanceof Error ? error.message : "摄像头不可用");
     }
-  }
+  }, [deviceId, stopCamera]);
 
-  const sendFrame = useCallback(async (reason: FramePayload["capture_reason"], prompt: string) => {
-    let frame: FramePayload;
-    if (videoRef.current?.videoWidth) {
-      frame = await captureVideoFrame(videoRef.current, reason, prompt, {
-        quality: reason === "focus_roi" ? 0.9 : 0.72,
-        maxWidth: reason === "focus_roi" ? 1600 : 1280,
-        maxHeight: reason === "focus_roi" ? 900 : 720,
-      });
-    } else {
-      setCameraState("摄像头未就绪，未上传真实画面");
-      return;
-    }
-    onFrameSent(frame);
-    if (sessionId) {
-      const sent = wsClient.send(createEvent("client.media.frame", sessionId, frame));
-      if (!sent) setCameraState("WebSocket 未连接，帧未发送");
-    }
-  }, [onFrameSent, sessionId]);
+  const sendFrame = useCallback(
+    async (reason: FramePayload["capture_reason"], prompt: string, activity: VisualCaptureActivity = "active") => {
+      if (captureInFlightRef.current) return;
+      const video = videoRef.current;
+      if (!video?.videoWidth) {
+        setCameraState("摄像头未就绪，未上传真实画面");
+        return;
+      }
+      captureInFlightRef.current = true;
+      try {
+        const frame = await captureVideoFrame(video, reason, prompt, captureOptionsFor(mode, activity));
+        if (!shouldSendSceneHash(lastSceneHashRef.current, frame.scene_hash, activity)) {
+          setCameraState("重复画面跳过");
+          return;
+        }
+        lastSceneHashRef.current = frame.scene_hash;
+        onFrameSent(frame);
+        if (sessionId) {
+          const sent = wsClient.send(createEvent("client.media.frame", sessionId, frame));
+          setCameraState(sent ? `sent ${reason}` : "WebSocket 未连接，帧未发送");
+        } else {
+          setCameraState("会话未就绪，帧未发送");
+        }
+      } finally {
+        captureInFlightRef.current = false;
+      }
+    },
+    [mode, onFrameSent, sessionId],
+  );
 
   const sendMockFrame = useCallback(() => {
     const frame = createMockFrame("manual_debug", "手动 Mock 帧，仅用于无摄像头演示。");
@@ -73,12 +101,40 @@ export function CameraPanel({ onFrameSent }: CameraPanelProps) {
   }, [onFrameSent, sessionId]);
 
   useEffect(() => {
-    if (wakeSerial > 0) {
-      void sendFrame("wake_snapshot", "唤醒时生成低成本视觉摘要。");
+    if (autoStartSignal > 0) {
+      void startCamera();
     }
-  }, [sendFrame, wakeSerial]);
+  }, [autoStartSignal, startCamera]);
 
   useEffect(() => stopCamera, [stopCamera]);
+
+  useEffect(() => {
+    if (suspendAutoUpload && autoUpload) {
+      setCameraState("语音优先，暂停自动上传");
+    }
+  }, [autoUpload, suspendAutoUpload]);
+
+  useEffect(() => {
+    if (!autoUpload || suspendAutoUpload || !streamRef.current) return;
+    let disposed = false;
+    let timer = 0;
+
+    async function tick() {
+      const activity: VisualCaptureActivity =
+        Date.now() < focusUntil ? "focus" : activityFromStatus(status);
+      const reason = captureReasonFor("camera", mode, activity);
+      await sendFrame(reason, "连续摄像头视觉上下文。", activity);
+      if (!disposed) {
+        timer = window.setTimeout(tick, getFrameIntervalMs(mode, activity));
+      }
+    }
+
+    timer = window.setTimeout(tick, 800);
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+    };
+  }, [autoUpload, focusUntil, mode, sendFrame, status, suspendAutoUpload]);
 
   return (
     <section className="panel camera-panel">
@@ -95,7 +151,7 @@ export function CameraPanel({ onFrameSent }: CameraPanelProps) {
           className="icon-button"
           type="button"
           title="上传摄像头帧"
-          onClick={() => void sendFrame("visual_question", "用户问了视觉相关问题。")}
+          onClick={() => void sendFrame("visual_question", "用户问了视觉相关问题。", "active")}
         >
           <Upload size={18} />
         </button>
@@ -103,7 +159,10 @@ export function CameraPanel({ onFrameSent }: CameraPanelProps) {
           className="icon-button"
           type="button"
           title="高清凝视"
-          onClick={() => void sendFrame("focus_roi", "用户要求看清楚一点或读文字。")}
+          onClick={() => {
+            setFocusUntil(Date.now() + 10_000);
+            void sendFrame("focus_roi", "用户要求看清楚一点或读文字。", "focus");
+          }}
         >
           <ScanEye size={18} />
         </button>
@@ -139,6 +198,23 @@ export function CameraPanel({ onFrameSent }: CameraPanelProps) {
           </option>
         ))}
       </select>
+      <div className="capture-controls">
+        <label>
+          <Video size={15} />
+          <select
+            className="select inline-select"
+            value={mode}
+            onChange={(event) => setMode(event.target.value as VisualCaptureMode)}
+          >
+            <option value="low_fps">低帧稳定</option>
+            <option value="continuous">连续视频采样</option>
+          </select>
+        </label>
+        <label className="check-row">
+          <input type="checkbox" checked={autoUpload} onChange={(event) => setAutoUpload(event.target.checked)} />
+          自动上传采样帧
+        </label>
+      </div>
       <dl className="metric-list">
         <div>
           <dt>状态</dt>

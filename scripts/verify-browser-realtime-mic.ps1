@@ -1,7 +1,7 @@
 param(
     [string]$WebUrl = "http://127.0.0.1:5173",
     [string]$ServerBaseUrl = "http://127.0.0.1:8765",
-    [string]$Text = "AstraLive browser microphone verification. Please answer briefly in Chinese.",
+    [string]$Text = "MODVII browser microphone verification. Please answer briefly in Chinese.",
     [switch]$SkipDependencySync,
     [switch]$Headed,
     [switch]$KeepArtifacts
@@ -50,7 +50,7 @@ if ($Page.StatusCode -ne 200) {
     throw "Web page check failed with HTTP $($Page.StatusCode)."
 }
 
-$WorkDir = Join-Path $env:TEMP "astralive_browser_mic_$([guid]::NewGuid().ToString('N'))"
+$WorkDir = Join-Path $env:TEMP "modvii_browser_mic_$([guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
 $FakeAudioPath = Join-Path $WorkDir "fake_microphone.wav"
 $ChromeProfile = Join-Path $WorkDir "chrome-profile"

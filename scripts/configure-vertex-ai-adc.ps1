@@ -133,7 +133,7 @@ async def main() -> None:
 asyncio.run(main())
 '@
 
-$TempScript = Join-Path $env:TEMP "astralive_verify_vertex_ai.py"
+$TempScript = Join-Path $env:TEMP "modvii_verify_vertex_ai.py"
 Set-Content -Path $TempScript -Value $VerifyScript -Encoding UTF8
 Push-Location (Join-Path $Root "apps\server")
 try {

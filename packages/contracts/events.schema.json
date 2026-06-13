@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://astralive.local/contracts/events.schema.json",
-  "title": "AstraLive event envelope",
+  "$id": "https://modvii.local/contracts/events.schema.json",
+  "title": "MODVII event envelope",
   "type": "object",
   "required": ["id", "type", "session_id", "ts", "payload"],
   "properties": {

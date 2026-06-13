@@ -7,6 +7,7 @@ from app.providers.llm.ollama import OllamaLLMProvider
 from app.providers.llm.vertex_ai import VertexAILLMProvider
 from app.providers.realtime.google_genai_live import GoogleGenAILiveProvider
 from app.providers.realtime.mock import MockRealtimeProvider
+from app.providers.tts.cosyvoice3 import CosyVoice3TTSProvider
 from app.providers.tts.google_genai import GoogleGenAITTSProvider
 from app.providers.tts.mock import MockTTSProvider
 from app.providers.vision.mock import MockVisionProvider
@@ -58,6 +59,8 @@ class ProviderRegistry:
         return MockLLMProvider()
 
     def tts(self):
+        if self.settings.tts_provider == "cosyvoice3":
+            return CosyVoice3TTSProvider(self.settings)
         if self.settings.tts_provider == "vertex_ai":
             return GoogleGenAITTSProvider(self.settings, mode="vertex_ai")
         if self.settings.tts_provider == "gemini":

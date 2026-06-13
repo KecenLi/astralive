@@ -1,8 +1,10 @@
 import asyncio
 from contextlib import suppress
+import io
 import logging
 import time
 from typing import Any
+import wave
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
@@ -30,6 +32,8 @@ REALTIME_TTS_FALLBACK_MAX_CHARS = 360
 class AudioRuntimeState:
     def __init__(self) -> None:
         self.buffer = bytearray()
+        self.stream_buffer = bytearray()
+        self.last_audio_metadata: dict[str, Any] = {}
         self.stream: RealtimeAudioStream | None = None
         self.receive_task: asyncio.Task[None] | None = None
         self.input_idle_task: asyncio.Task[None] | None = None
@@ -46,7 +50,7 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
     session = sessions.setdefault(session_id, SessionState(session_id=session_id, wake_word=settings.wake_word))
     registry = ProviderRegistry(settings)
     vision = VisionService(registry.vision(), settings)
-    dialogue = DialogueService(registry.llm())
+    dialogue = DialogueService(registry.llm(), settings)
     audio = AudioService(registry.tts(), registry.asr(), settings, registry.realtime())
     avatar = AvatarService()
     wake = WakeService()
@@ -101,6 +105,8 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
                     send_lock,
                     response_task,
                 )
+            except WebSocketDisconnect:
+                raise
             except Exception as exc:  # noqa: BLE001
                 logger.exception("event handling failed")
                 await _send_error(websocket, session_id, "event_failed", str(exc), send_lock)
@@ -362,6 +368,11 @@ async def _handle_realtime_audio_chunk(
         await _send_error(websocket, session.session_id, "empty_audio", "Audio turn is empty.", send_lock)
         return response_task
 
+    new_realtime_turn = audio_runtime.stream is None and audio_runtime.turn_bytes == 0
+    if new_realtime_turn:
+        audio_runtime.stream_buffer.clear()
+        audio_runtime.last_audio_metadata = {}
+
     audio_runtime.turn_bytes += len(audio_bytes)
     if audio_runtime.turn_bytes > settings.audio_turn_max_bytes:
         await _close_audio_runtime(audio_runtime)
@@ -375,6 +386,11 @@ async def _handle_realtime_audio_chunk(
         await _send_cost(websocket, session, send_lock)
         return None
 
+    if audio_bytes:
+        audio_runtime.stream_buffer.extend(audio_bytes)
+    if audio_bytes or payload.is_final:
+        audio_runtime.last_audio_metadata = _audio_metadata(payload)
+
     if audio_runtime.stream is None:
         _cancel_task(response_task)
         audio_runtime.turn_started_at = started
@@ -382,7 +398,7 @@ async def _handle_realtime_audio_chunk(
         session.response_in_progress = True
         try:
             audio_runtime.stream = await audio.open_realtime_audio_stream(
-                _realtime_metadata(session, payload)
+                _realtime_metadata(session, payload, settings)
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("failed to open realtime audio stream")
@@ -454,6 +470,26 @@ async def _handle_user_text(
     if not user_text:
         await _send_error(websocket, session.session_id, "empty_text", "User text is empty.", send_lock)
         return response_task
+
+    security_verdict = dialogue.assess_user_text(user_text)
+    if not security_verdict.allowed:
+        _cancel_task(response_task)
+        task = asyncio.create_task(
+            _run_dialogue_response(
+                websocket,
+                session,
+                dialogue,
+                audio,
+                avatar,
+                settings,
+                user_text,
+                started,
+                send_lock,
+            )
+        )
+        task.add_done_callback(_log_task_exception)
+        return task
+
     if dialogue.needs_focus(user_text):
         session.cost_meter.mode = "focus"
         await _send(
@@ -738,19 +774,271 @@ async def _run_realtime_stream_receiver(
         raise
     except Exception as exc:  # noqa: BLE001
         logger.exception("realtime stream receiver failed")
-        session.response_in_progress = False
-        session.status = "listening"
-        await _send_error(websocket, session.session_id, "realtime_stream_failed", str(exc), send_lock)
-        await _send_cost(websocket, session, send_lock)
+        fallback_audio = bytes(audio_runtime.stream_buffer)
+        fallback_metadata = dict(audio_runtime.last_audio_metadata)
+        recovered = await _recover_realtime_stream_failure(
+            websocket,
+            session,
+            dialogue,
+            audio,
+            avatar,
+            settings,
+            input_text,
+            fallback_audio,
+            fallback_metadata,
+            exc,
+            started,
+            send_lock,
+        )
+        if not recovered:
+            session.response_in_progress = False
+            session.status = "listening"
+            await _send_error(websocket, session.session_id, "realtime_stream_failed", str(exc), send_lock)
+            await _send_cost(websocket, session, send_lock)
     finally:
         if audio_runtime.stream is stream:
             await stream.close()
             audio_runtime.stream = None
             audio_runtime.receive_task = None
+            audio_runtime.stream_buffer.clear()
+            audio_runtime.last_audio_metadata = {}
             audio_runtime.turn_started_at = 0.0
             audio_runtime.turn_bytes = 0
             audio_runtime.input_finished = False
             audio_runtime.input_finished_at = 0.0
+
+
+async def _recover_realtime_stream_failure(
+    websocket: WebSocket,
+    session: SessionState,
+    dialogue: DialogueService,
+    audio: AudioService,
+    avatar: AvatarService,
+    settings: Settings,
+    input_text: str,
+    fallback_audio: bytes,
+    fallback_metadata: dict[str, Any],
+    original_exc: Exception,
+    started: float,
+    send_lock: asyncio.Lock,
+) -> bool:
+    transcript = input_text.strip()
+    if transcript:
+        session.cost_meter.asr_calls += 1
+        session.last_user_text = transcript
+        await _send(
+            websocket,
+            make_event(
+                "asr.transcript.final",
+                session.session_id,
+                {"text": transcript, "confidence": 0.55, "recovered_from": "realtime_stream"},
+            ),
+            send_lock,
+        )
+        await _run_recovered_dialogue_response(
+            websocket,
+            session,
+            dialogue,
+            audio,
+            avatar,
+            settings,
+            transcript,
+            started,
+            send_lock,
+        )
+        return True
+
+    if not fallback_audio:
+        await _send_realtime_failure_notice(
+            websocket,
+            session,
+            avatar,
+            settings,
+            started,
+            send_lock,
+            "我这边听到实时语音通道断开了，但没有收到可识别的音频。请再说一次。",
+            original_exc,
+        )
+        return True
+
+    await _send(
+        websocket,
+        avatar.state_event(session.session_id, "thinking", "concerned", "实时语音无响应，正在改用普通识别。"),
+        send_lock,
+    )
+    try:
+        asr_audio, asr_metadata = _fallback_asr_payload(fallback_audio, fallback_metadata, settings)
+        asr_result = await audio.transcribe(asr_audio, asr_metadata)
+        session.cost_meter.asr_calls += 1
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("realtime fallback ASR failed")
+        await _send_realtime_failure_notice(
+            websocket,
+            session,
+            avatar,
+            settings,
+            started,
+            send_lock,
+            "我听到你说话了，但实时通道和备用识别都没有返回结果。请再说一次，或者先用文本输入。",
+            exc,
+        )
+        return True
+
+    transcript = asr_result.text.strip()
+    if not transcript:
+        await _send_realtime_failure_notice(
+            websocket,
+            session,
+            avatar,
+            settings,
+            started,
+            send_lock,
+            "我听到你说话了，但这次没有识别出清楚内容。请离麦克风近一点再说一次。",
+            original_exc,
+        )
+        return True
+
+    session.last_user_text = transcript
+    await _send(
+        websocket,
+        make_event(
+            "asr.transcript.final",
+            session.session_id,
+            {
+                "text": transcript,
+                "confidence": asr_result.confidence,
+                "recovered_from": "realtime_stream",
+            },
+        ),
+        send_lock,
+    )
+    await _send_cost(websocket, session, send_lock)
+    await _run_recovered_dialogue_response(
+        websocket,
+        session,
+        dialogue,
+        audio,
+        avatar,
+        settings,
+        transcript,
+        started,
+        send_lock,
+    )
+    return True
+
+
+async def _run_recovered_dialogue_response(
+    websocket: WebSocket,
+    session: SessionState,
+    dialogue: DialogueService,
+    audio: AudioService,
+    avatar: AvatarService,
+    settings: Settings,
+    user_text: str,
+    started: float,
+    send_lock: asyncio.Lock,
+) -> None:
+    try:
+        await _run_dialogue_response(
+            websocket,
+            session,
+            dialogue,
+            audio,
+            avatar,
+            settings,
+            user_text,
+            started,
+            send_lock,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("realtime fallback dialogue failed")
+        await _send_realtime_failure_notice(
+            websocket,
+            session,
+            avatar,
+            settings,
+            started,
+            send_lock,
+            "我识别到了你的话，但生成回复时失败了。请稍后再试，或者先切换到文本输入。",
+            exc,
+        )
+
+
+async def _send_realtime_failure_notice(
+    websocket: WebSocket,
+    session: SessionState,
+    avatar: AvatarService,
+    settings: Settings,
+    started: float,
+    send_lock: asyncio.Lock,
+    message: str,
+    exc: Exception,
+) -> None:
+    session.response_in_progress = False
+    session.status = "listening"
+    session.cost_meter.last_latency_ms = int((time.perf_counter() - started) * 1000)
+    await _send(
+        websocket,
+        make_event(
+            "debug.log",
+            session.session_id,
+            {"message": "Realtime voice recovery failed.", "detail": str(exc)},
+        ),
+        send_lock,
+    )
+    await _send(
+        websocket,
+        make_event("assistant.text.final", session.session_id, {"text": message, "audio_expected": False}),
+        send_lock,
+    )
+    await _send(
+        websocket,
+        make_event(
+            "assistant.audio.done",
+            session.session_id,
+            {"source": "realtime", "chunks": 0, "fallback_text": message},
+        ),
+        send_lock,
+    )
+    await _send(
+        websocket,
+        avatar.state_event(session.session_id, "listening", "concerned", message),
+        send_lock,
+    )
+    await _send(
+        websocket,
+        make_event("server.session.state", session.session_id, _session_payload(session, settings)),
+        send_lock,
+    )
+    await _send_cost(websocket, session, send_lock)
+
+
+def _fallback_asr_payload(
+    audio_bytes: bytes,
+    metadata: dict[str, Any],
+    settings: Settings,
+) -> tuple[bytes, dict[str, Any]]:
+    asr_metadata = dict(metadata)
+    if str(asr_metadata.get("encoding") or "").lower() != "pcm_s16le":
+        return audio_bytes, asr_metadata
+
+    sample_rate = int(asr_metadata.get("sample_rate") or settings.audio_input_sample_rate)
+    channels = int(asr_metadata.get("channels") or settings.audio_channels)
+    asr_metadata["mime"] = "audio/wav"
+    asr_metadata["encoding"] = "wav"
+    return _pcm16_to_wav(audio_bytes, sample_rate, channels), asr_metadata
+
+
+def _pcm16_to_wav(audio_bytes: bytes, sample_rate: int, channels: int) -> bytes:
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav_file:
+        wav_file.setnchannels(channels)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(audio_bytes)
+    return buffer.getvalue()
 
 
 async def _run_realtime_audio_response(
@@ -772,7 +1060,7 @@ async def _run_realtime_audio_response(
             avatar.state_event(session.session_id, "thinking", "curious", "正在听取语音。"),
             send_lock,
         )
-        result = await audio.respond_realtime_audio(audio_bytes, _realtime_metadata(session, payload))
+        result = await audio.respond_realtime_audio(audio_bytes, _realtime_metadata(session, payload, settings))
         session.cost_meter.asr_calls += 1
         session.cost_meter.llm_calls += 1
 
@@ -936,7 +1224,14 @@ async def _stream_text(text: str):
 
 async def _send(websocket: WebSocket, event: EventEnvelope, send_lock: asyncio.Lock) -> None:
     async with send_lock:
-        await websocket.send_json(event.model_dump())
+        try:
+            await websocket.send_json(event.model_dump())
+        except WebSocketDisconnect:
+            raise
+        except RuntimeError as exc:
+            if "close message has been sent" in str(exc) or "WebSocket is not connected" in str(exc):
+                raise WebSocketDisconnect from exc
+            raise
 
 
 async def _send_cost(websocket: WebSocket, session: SessionState, send_lock: asyncio.Lock) -> None:
@@ -972,11 +1267,12 @@ def _is_realtime_pcm(payload: AudioChunkPayload, settings: Settings) -> bool:
     )
 
 
-def _realtime_metadata(session: SessionState, payload: AudioChunkPayload) -> dict:
+def _realtime_metadata(session: SessionState, payload: AudioChunkPayload, settings: Settings) -> dict:
     metadata = _audio_metadata(payload)
-    system_instruction = "你是 AstraLive，一个中文优先的实时视觉语音助手。回答要自然、简洁。"
+    system_instruction = settings.persona_prompt
     if session.last_visual_summary:
         system_instruction += f"\n当前视觉摘要：{session.last_visual_summary}"
+    system_instruction += "\n输出约束：只输出要说给用户听的话；不要输出 Markdown；不要解释内部流程。"
     metadata["system_instruction"] = system_instruction
     return metadata
 
@@ -1070,6 +1366,8 @@ async def _close_audio_runtime(audio_runtime: AudioRuntimeState) -> None:
     stream = audio_runtime.stream
 
     audio_runtime.buffer.clear()
+    audio_runtime.stream_buffer.clear()
+    audio_runtime.last_audio_metadata = {}
     audio_runtime.stream = None
     audio_runtime.receive_task = None
     audio_runtime.input_idle_task = None

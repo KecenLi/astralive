@@ -21,9 +21,8 @@ class MockLLMProvider(LLMProvider):
         elif any(word in user_text for word in ["看到", "画面", "手里", "拿着", "什么"]):
             text = f"基于刚才的画面，我的观察是：{visual}"
         elif user_text:
-            text = f"我听到了：{user_text}。如果你需要我看画面，可以直接问我看到了什么。"
+            text = f"我是小七，我听到了：{user_text}。如果你需要我看画面，可以直接问我看到了什么。"
         else:
-            text = "我在，已经准备好听你说话了。"
+            text = "小七在，已经准备好听你说话了。"
 
         return DialogueResult(text=text, emotion=emotion, raw={"provider": "mock"})
-

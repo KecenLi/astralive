@@ -1,6 +1,6 @@
 module.exports = {
   root: true,
-  ignorePatterns: ["dist", "node_modules", "coverage"],
+  ignorePatterns: ["dist", "node_modules", "coverage", "public/vendor"],
   env: {
     browser: true,
     es2020: true,

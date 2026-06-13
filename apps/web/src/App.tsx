@@ -1,4 +1,4 @@
-import { Activity, Moon, Play } from "lucide-react";
+import { Activity, Bot, Moon, Play } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAppStore } from "./app/store";
@@ -6,11 +6,14 @@ import { AvatarStage } from "./components/AvatarStage/AvatarStage";
 import { CameraPanel } from "./components/CameraPanel/CameraPanel";
 import { ConversationPanel } from "./components/ConversationPanel/ConversationPanel";
 import { CostPanel } from "./components/CostPanel/CostPanel";
+import { DesktopPet } from "./components/DesktopPet/DesktopPet";
+import { DevicePermissionWizard } from "./components/DevicePermissionWizard/DevicePermissionWizard";
 import { DebugPanel } from "./components/DebugPanel/DebugPanel";
 import { MicPanel } from "./components/MicPanel/MicPanel";
+import { ScreenCapturePanel } from "./components/ScreenCapturePanel/ScreenCapturePanel";
 import { assistantAudioPlayer } from "./features/media/pcmPlayer";
 import { shouldStopRealtimeAudioOnError } from "./features/realtime/serverErrorActions";
-import { API_BASE_URL } from "./lib/env";
+import { API_BASE_URL, APP_MODE } from "./lib/env";
 import {
   AudioCapabilities,
   AssistantAudioPayload,
@@ -30,6 +33,7 @@ interface ServerEventEffects {
 function cancelSpeech() {
   if (!("speechSynthesis" in window)) return;
   window.speechSynthesis.cancel();
+  useAppStore.getState().setAvatarLipSync(0);
 }
 
 function speak(text: string) {
@@ -38,6 +42,18 @@ function speak(text: string) {
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.lang = "zh-CN";
   utterance.rate = 1;
+  let lipTimer: number | null = null;
+  utterance.onstart = () => {
+    const startedAt = performance.now();
+    lipTimer = window.setInterval(() => {
+      const level = 0.18 + Math.abs(Math.sin((performance.now() - startedAt) / 150)) * 0.35;
+      useAppStore.getState().setAvatarLipSync(level);
+    }, 90);
+  };
+  utterance.onend = utterance.onerror = () => {
+    if (lipTimer) window.clearInterval(lipTimer);
+    useAppStore.getState().setAvatarLipSync(0);
+  };
   window.speechSynthesis.speak(utterance);
 }
 
@@ -104,9 +120,12 @@ function handleServerEvent(event: EventEnvelope<unknown>, effects: ServerEventEf
   }
 }
 
-export default function App() {
+function MainApp() {
   const store = useAppStore();
   const [audioStopSignal, setAudioStopSignal] = useState(0);
+  const [wakeListenSignal, setWakeListenSignal] = useState(0);
+  const [deviceStartSignal, setDeviceStartSignal] = useState(0);
+  const [liveAudioActive, setLiveAudioActive] = useState(false);
   const audioTurnActiveRef = useRef(false);
 
   const providerLabel = useMemo(
@@ -122,7 +141,12 @@ export default function App() {
     setAudioStopSignal((value) => value + 1);
   }, []);
 
+  const handleDevicePermissionComplete = useCallback(() => {
+    setDeviceStartSignal((value) => value + 1);
+  }, []);
+
   useEffect(() => {
+    assistantAudioPlayer.setLipSyncSink((level) => useAppStore.getState().setAvatarLipSync(level));
     let cleanup: () => void = () => {};
     async function bootstrap() {
       const actions = useAppStore.getState();
@@ -130,7 +154,7 @@ export default function App() {
       try {
         const response = await fetch(`${API_BASE_URL}/api/session`, { method: "POST" });
         const session = await response.json();
-        actions.setSession(session.session_id, session.wake_word ?? "阿斯塔");
+        actions.setSession(session.session_id, session.wake_word ?? "小七");
         cleanup = wsClient.onEvent((event) => handleServerEvent(event, { stopRealtimeAudio: stopClientAudio }));
         const socket = wsClient.connect(session.session_id);
         socket.onopen = () => useAppStore.getState().setConnection("connected");
@@ -142,6 +166,7 @@ export default function App() {
     }
     void bootstrap();
     return () => {
+      assistantAudioPlayer.setLipSyncSink(null);
       cleanup();
       wsClient.close();
     };
@@ -149,7 +174,7 @@ export default function App() {
 
   const wake = useCallback(() => {
     const actions = useAppStore.getState();
-    if (!actions.sessionId) return;
+    if (!actions.sessionId) return false;
     cancelSpeech();
     assistantAudioPlayer.reset();
     const sent = wsClient.send(
@@ -157,11 +182,18 @@ export default function App() {
     );
     if (!sent) {
       actions.addMessage("system", "WebSocket 未连接，唤醒未发送。");
-      return;
+      return false;
     }
     actions.markWake();
     actions.addMessage("system", `已听到唤醒词：${actions.wakeWord}`);
+    return true;
   }, []);
+
+  const wakeAndListen = useCallback(() => {
+    if (wake()) {
+      setWakeListenSignal((value) => value + 1);
+    }
+  }, [wake]);
 
   const sleep = useCallback(() => {
     stopClientAudio();
@@ -177,12 +209,24 @@ export default function App() {
     wsClient.send(createEvent("client.control.interrupt", actions.sessionId, {}));
   }, [stopClientAudio]);
 
+  const togglePet = useCallback(() => {
+    const actions = useAppStore.getState();
+    if (!window.modvii?.pet) {
+      actions.addMessage("system", "桌宠窗口只在 Windows exe 中可用。");
+      return;
+    }
+    void window.modvii.pet.toggle().catch((error) => {
+      actions.addMessage("system", error instanceof Error ? error.message : "桌宠窗口打开失败。");
+    });
+  }, []);
+
   const sendUserText = useCallback((text: string) => {
     const actions = useAppStore.getState();
     if (!actions.sessionId) return;
     cancelSpeech();
     assistantAudioPlayer.reset();
     audioTurnActiveRef.current = false;
+    setAudioStopSignal((value) => value + 1);
     actions.setUserSpeechDraft("");
     actions.addMessage("user", text);
     wsClient.send(createEvent("client.user.text", actions.sessionId, { text }));
@@ -213,12 +257,12 @@ export default function App() {
         <div className="brand">
           <Activity size={22} />
           <div>
-            <h1>AstraLive</h1>
+            <h1>MODVII</h1>
             <span>{providerLabel}</span>
           </div>
         </div>
         <div className="top-actions">
-          <button className="tool-button" type="button" onClick={wake}>
+          <button className="tool-button" type="button" onClick={wakeAndListen}>
             <Play size={18} />
             唤醒
           </button>
@@ -226,16 +270,33 @@ export default function App() {
             <Moon size={18} />
             睡眠
           </button>
+          <button className="tool-button subtle" type="button" onClick={togglePet} data-testid="toggle-pet">
+            <Bot size={18} />
+            桌宠
+          </button>
         </div>
       </header>
 
       <div className="workspace">
         <aside className="left-rail">
-          <CameraPanel onFrameSent={handleFrameSent} />
+          <DevicePermissionWizard onComplete={handleDevicePermissionComplete} />
+          <CameraPanel
+            autoStartSignal={deviceStartSignal}
+            onFrameSent={handleFrameSent}
+            suspendAutoUpload={liveAudioActive}
+          />
+          <ScreenCapturePanel
+            autoStartSignal={deviceStartSignal}
+            onFrameSent={handleFrameSent}
+            suspendAutoUpload={liveAudioActive}
+          />
           <MicPanel
+            autoStartSignal={deviceStartSignal}
+            wakeListenSignal={wakeListenSignal}
             onWake={wake}
             onUserText={sendUserText}
             onAudioChunk={sendAudioChunk}
+            onLiveStateChange={setLiveAudioActive}
             stopSignal={audioStopSignal}
           />
           <CostPanel />
@@ -249,4 +310,8 @@ export default function App() {
       <ConversationPanel />
     </main>
   );
+}
+
+export default function App() {
+  return APP_MODE === "pet" ? <DesktopPet /> : <MainApp />;
 }

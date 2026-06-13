@@ -186,7 +186,7 @@ if (Test-TcpPortOpen -Port $WebPort) {
     $WebPort = Get-FreeTcpPort
 }
 
-$WorkDir = Join-Path $env:TEMP "astralive_browser_mic_offline_$([guid]::NewGuid().ToString('N'))"
+$WorkDir = Join-Path $env:TEMP "modvii_browser_mic_offline_$([guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
 $FakeAudioPath = Join-Path $WorkDir "fake_microphone.wav"
 $ChromeProfile = Join-Path $WorkDir "chrome-profile"
@@ -554,22 +554,22 @@ async function main() {
     if (VERIFY_IDLE_TIMEOUT) {
       await cdp.send("Runtime.evaluate", {
         expression: `(() => {
-          if (window.__astraliveDropRealtimeAudioAfterStart) return true;
+          if (window.__modviiDropRealtimeAudioAfterStart) return true;
           const originalSend = WebSocket.prototype.send;
           let nonFinalAudioChunks = 0;
-          window.__astraliveDroppedAudioAttempts = 0;
-          window.__astraliveDroppedFinalAttempts = 0;
+          window.__modviiDroppedAudioAttempts = 0;
+          window.__modviiDroppedFinalAttempts = 0;
           WebSocket.prototype.send = function(data) {
             try {
               const event = JSON.parse(data);
               if (event && event.type === "client.media.audio_chunk") {
                 if (event.payload?.is_final) {
-                  window.__astraliveDroppedFinalAttempts += 1;
+                  window.__modviiDroppedFinalAttempts += 1;
                   return undefined;
                 }
                 nonFinalAudioChunks += 1;
                 if (nonFinalAudioChunks > 4) {
-                  window.__astraliveDroppedAudioAttempts += 1;
+                  window.__modviiDroppedAudioAttempts += 1;
                   return undefined;
                 }
               }
@@ -578,7 +578,7 @@ async function main() {
             }
             return originalSend.call(this, data);
           };
-          window.__astraliveDropRealtimeAudioAfterStart = true;
+          window.__modviiDropRealtimeAudioAfterStart = true;
           return true;
         })()`,
         awaitPromise: true,
@@ -600,8 +600,8 @@ async function main() {
       const readIdleProbe = async () => {
         const result = await cdp.send("Runtime.evaluate", {
           expression: `({
-            droppedAudioAttempts: window.__astraliveDroppedAudioAttempts ?? 0,
-            droppedFinalAttempts: window.__astraliveDroppedFinalAttempts ?? 0,
+            droppedAudioAttempts: window.__modviiDroppedAudioAttempts ?? 0,
+            droppedFinalAttempts: window.__modviiDroppedFinalAttempts ?? 0,
           })`,
           returnByValue: true,
         });

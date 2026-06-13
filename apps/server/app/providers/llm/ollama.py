@@ -19,14 +19,6 @@ class OllamaLLMProvider(LLMProvider):
 
     def _complete_sync(self, data: DialogueInput) -> DialogueResult:
         messages = [{"role": item.role, "content": item.content} for item in data.messages]
-        if data.visual_summary:
-            messages.insert(
-                0,
-                {
-                    "role": "system",
-                    "content": f"你是 AstraLive。请结合这个视觉摘要回答：{data.visual_summary}",
-                },
-            )
 
         payload = {
             "model": self.settings.ollama_llm_model,

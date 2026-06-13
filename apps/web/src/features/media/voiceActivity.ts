@@ -2,6 +2,9 @@ export interface LiveAudioGateOptions {
   sampleRate?: number;
   startThreshold?: number;
   continueThreshold?: number;
+  minContinueThreshold?: number;
+  noiseMargin?: number;
+  peakDropRatio?: number;
   preRollMs?: number;
   initialSilenceMs?: number;
   silenceAfterSpeechMs?: number;
@@ -20,6 +23,9 @@ const DEFAULT_OPTIONS = {
   sampleRate: 16000,
   startThreshold: 0.01,
   continueThreshold: 0.006,
+  minContinueThreshold: 0.002,
+  noiseMargin: 0.003,
+  peakDropRatio: 0.22,
   preRollMs: 300,
   initialSilenceMs: 6000,
   silenceAfterSpeechMs: 1200,
@@ -53,6 +59,8 @@ export class LiveAudioGate {
   private speechStarted = false;
   private preRoll: ArrayBuffer[] = [];
   private preRollDurationMs = 0;
+  private noiseFloor = 0.001;
+  private speechPeakRms = 0;
 
   constructor(options: LiveAudioGateOptions = {}) {
     this.options = { ...DEFAULT_OPTIONS, ...options };
@@ -65,14 +73,21 @@ export class LiveAudioGate {
 
     const rms = pcm16Rms(chunk);
     const elapsedMs = nowMs - this.startedAtMs;
-    const isStartVoice = rms >= this.options.startThreshold;
-    const isContinuingVoice = rms >= this.options.continueThreshold;
+    const startThreshold = Math.max(
+      this.options.minContinueThreshold,
+      Math.min(this.options.startThreshold, this.noiseFloor + this.options.noiseMargin * 2),
+    );
+    const isStartVoice = rms >= startThreshold;
 
     if (!this.speechStarted) {
+      if (!isStartVoice) {
+        this.updateNoiseFloor(rms);
+      }
       this.pushPreRoll(chunk);
       if (isStartVoice) {
         this.speechStarted = true;
         this.lastVoiceAtMs = nowMs;
+        this.speechPeakRms = Math.max(this.speechPeakRms, rms);
         const chunks = this.preRoll;
         this.preRoll = [];
         this.preRollDurationMs = 0;
@@ -87,8 +102,19 @@ export class LiveAudioGate {
       return { chunks: [], rms, state: "waiting", shouldStop: false, sendFinal: false };
     }
 
+    this.speechPeakRms = Math.max(this.speechPeakRms, rms);
+    const continueThreshold = Math.max(
+      this.options.minContinueThreshold,
+      this.noiseFloor + this.options.noiseMargin,
+      this.speechPeakRms * this.options.peakDropRatio,
+      Math.min(this.options.continueThreshold, this.options.startThreshold),
+    );
+    const isContinuingVoice = rms >= continueThreshold;
+
     if (isContinuingVoice) {
       this.lastVoiceAtMs = nowMs;
+    } else {
+      this.updateNoiseFloor(rms);
     }
 
     if (elapsedMs >= this.options.maxTurnMs) {
@@ -117,6 +143,8 @@ export class LiveAudioGate {
     this.speechStarted = false;
     this.preRoll = [];
     this.preRollDurationMs = 0;
+    this.noiseFloor = 0.001;
+    this.speechPeakRms = 0;
   }
 
   get hasSpeechStarted() {
@@ -133,5 +161,13 @@ export class LiveAudioGate {
         this.preRollDurationMs -= pcm16DurationMs(removed, this.options.sampleRate);
       }
     }
+  }
+
+  private updateNoiseFloor(rms: number) {
+    const bounded = Math.max(0, Math.min(0.1, rms));
+    this.noiseFloor = Math.min(
+      Math.max(this.noiseFloor * 0.95 + bounded * 0.05, 0.0005),
+      Math.max(bounded, 0.0005),
+    );
   }
 }

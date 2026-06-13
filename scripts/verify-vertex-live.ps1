@@ -1,5 +1,5 @@
 param(
-    [string]$Prompt = "Answer in one short Chinese sentence: AstraLive Live API is connected.",
+    [string]$Prompt = "Answer in one short Chinese sentence: MODVII Live API is connected.",
     [switch]$SkipDependencySync
 )
 
@@ -29,7 +29,7 @@ async def main() -> None:
 
     result = await provider.respond_to_text(
         __PROMPT_JSON__,
-        {"system_instruction": "You are AstraLive's connection verifier. Answer in one short Chinese sentence."},
+        {"system_instruction": "You are MODVII's connection verifier. Answer in one short Chinese sentence."},
     )
     audio_bytes = 0
     for chunk in result.audio_chunks:
@@ -51,7 +51,7 @@ asyncio.run(main())
 
 $PromptJson = $Prompt | ConvertTo-Json -Compress
 $VerifyScript = $VerifyScript.Replace("__PROMPT_JSON__", $PromptJson)
-$TempScript = Join-Path $env:TEMP "astralive_verify_vertex_live.py"
+$TempScript = Join-Path $env:TEMP "modvii_verify_vertex_live.py"
 Set-Content -Path $TempScript -Value $VerifyScript -Encoding UTF8
 
 Push-Location (Join-Path $Root "apps\server")

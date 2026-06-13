@@ -1,0 +1,62 @@
+{
+  "name": "modvii-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "MODVII Windows desktop shell",
+  "type": "commonjs",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "pnpm build && electron .",
+    "package": "pnpm build && electron-builder --win nsis portable"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.12",
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3",
+    "typescript": "^5.5.4"
+  },
+  "build": {
+    "appId": "local.modvii.desktop",
+    "productName": "MODVII",
+    "asar": false,
+    "directories": {
+      "output": "../../dist/desktop"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../web/dist",
+        "to": "web",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../server/dist/modvii-server",
+        "to": "server",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "signAndEditExecutable": false,
+      "verifyUpdateCodeSignature": false,
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "MODVII"
+    }
+  }
+}

@@ -30,6 +30,7 @@ export interface AppState {
   setVisualSummary: (summary: string) => void;
   setLastFrameInfo: (info: string) => void;
   setAvatar: (payload: AvatarStatePayload) => void;
+  setAvatarLipSync: (level: number) => void;
   setCost: (cost: CostMeter) => void;
   addMessage: (speaker: ConversationMessage["speaker"], text: string) => void;
   setUserSpeechDraft: (text: string) => void;
@@ -56,7 +57,7 @@ export const useAppStore = create<AppState>((set) => ({
   sessionId: "",
   connection: "idle",
   status: "sleeping",
-  wakeWord: "阿斯塔",
+  wakeWord: "小七",
   wakeSerial: 0,
   currentUserDraft: "",
   currentAssistantDraft: "",
@@ -80,6 +81,14 @@ export const useAppStore = create<AppState>((set) => ({
   setVisualSummary: (visualSummary) => set({ visualSummary }),
   setLastFrameInfo: (lastFrameInfo) => set({ lastFrameInfo }),
   setAvatar: (avatar) => set({ avatar, status: avatar.mode }),
+  setAvatarLipSync: (level) =>
+    set((state) => ({
+      avatar: {
+        ...state.avatar,
+        lip_sync: level > 0.02,
+        lip_sync_level: Math.min(1, Math.max(0, level)),
+      },
+    })),
   setCost: (cost) => set({ cost }),
   addMessage: (speaker, text) =>
     set((state) => ({

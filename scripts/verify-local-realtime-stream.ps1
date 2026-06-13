@@ -1,6 +1,6 @@
 param(
     [string]$ServerBaseUrl = "http://127.0.0.1:8765",
-    [string]$Text = "AstraLive realtime audio stream test. Please answer in Chinese.",
+    [string]$Text = "MODVII realtime audio stream test. Please answer in Chinese.",
     [switch]$SkipDependencySync
 )
 
@@ -180,7 +180,7 @@ $ServerBaseUrlJson = $ServerBaseUrl | ConvertTo-Json -Compress
 $TextJson = $Text | ConvertTo-Json -Compress
 $VerifyScript = $VerifyScript.Replace("__SERVER_BASE_URL_JSON__", $ServerBaseUrlJson)
 $VerifyScript = $VerifyScript.Replace("__TEXT_JSON__", $TextJson)
-$TempScript = Join-Path $env:TEMP "astralive_verify_local_realtime_stream.py"
+$TempScript = Join-Path $env:TEMP "modvii_verify_local_realtime_stream.py"
 Set-Content -Path $TempScript -Value $VerifyScript -Encoding UTF8
 
 Push-Location (Join-Path $Root "apps\server")

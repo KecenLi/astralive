@@ -23,9 +23,6 @@ class VertexAILLMProvider(LLMProvider):
         contents: list[dict] = []
         system_parts: list[str] = []
 
-        if data.visual_summary:
-            system_parts.append(f"你是 AstraLive。请结合这个视觉摘要回答：{data.visual_summary}")
-
         for item in data.messages:
             if item.role == "system":
                 system_parts.append(item.content)

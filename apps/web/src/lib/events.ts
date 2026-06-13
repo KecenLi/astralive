@@ -65,7 +65,11 @@ export interface FramePayload {
     | "scene_changed"
     | "manual_debug"
     | "focus_roi"
-    | "periodic_low_cost";
+    | "periodic_low_cost"
+    | "screen_low_fps"
+    | "screen_stream"
+    | "camera_stream"
+    | "screen_focus";
   scene_hash: string;
   data_base64: string;
   prompt?: string;
@@ -93,6 +97,7 @@ export interface AvatarStatePayload {
   motion: string;
   subtitle: string;
   lip_sync: boolean;
+  lip_sync_level?: number;
 }
 
 export function createId(prefix: string) {

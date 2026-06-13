@@ -1,5 +1,5 @@
 param(
-    [string]$Text = "AstraLive text to speech is connected.",
+    [string]$Text = "MODVII text to speech is connected.",
     [switch]$SkipDependencySync
 )
 
@@ -41,7 +41,7 @@ asyncio.run(main())
 
 $TextJson = $Text | ConvertTo-Json -Compress
 $VerifyScript = $VerifyScript.Replace("__TEXT_JSON__", $TextJson)
-$TempScript = Join-Path $env:TEMP "astralive_verify_vertex_tts.py"
+$TempScript = Join-Path $env:TEMP "modvii_verify_vertex_tts.py"
 Set-Content -Path $TempScript -Value $VerifyScript -Encoding UTF8
 
 Push-Location (Join-Path $Root "apps\server")

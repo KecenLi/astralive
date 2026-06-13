@@ -14,7 +14,7 @@ class SessionState(BaseModel):
     session_id: str = Field(default_factory=lambda: f"sess_{uuid4().hex[:16]}")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     status: SessionStatus = "sleeping"
-    wake_word: str = "阿斯塔"
+    wake_word: str = "小七"
     last_user_text: str | None = None
     last_visual_summary: str | None = None
     last_visual_summary_at: datetime | None = None
@@ -34,4 +34,3 @@ class SessionState(BaseModel):
             "interrupted_count": self.interrupted_count,
             "cost": self.cost_meter.model_dump(),
         }
-

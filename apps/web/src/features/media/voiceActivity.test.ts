@@ -50,6 +50,25 @@ describe("voiceActivity helpers", () => {
     expect(decision.chunks).toHaveLength(1);
   });
 
+  it("stops after speech when trailing mic noise stays above the old static threshold", () => {
+    const gate = new LiveAudioGate({
+      startThreshold: 0.008,
+      continueThreshold: 0.004,
+      minContinueThreshold: 0.0015,
+      noiseMargin: 0.0025,
+      peakDropRatio: 0.2,
+      silenceAfterSpeechMs: 250,
+    });
+    gate.accept(pcm(0.05), 0);
+    gate.accept(pcm(0.05), 100);
+    gate.accept(pcm(0.006), 200);
+
+    const decision = gate.accept(pcm(0.006), 400);
+    expect(decision.state).toBe("silence");
+    expect(decision.shouldStop).toBe(true);
+    expect(decision.sendFinal).toBe(true);
+  });
+
   it("caps long realtime turns", () => {
     const gate = new LiveAudioGate({ startThreshold: 0.05, maxTurnMs: 250 });
     gate.accept(pcm(0.2), 0);

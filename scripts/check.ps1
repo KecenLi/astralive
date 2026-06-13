@@ -2,34 +2,11 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "common.ps1")
 
-function Resolve-PnpmPackageScript {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$PackagePrefix,
-        [Parameter(Mandatory = $true)]
-        [string]$RelativeScriptPath
-    )
-
-    $PnpmRoot = Join-Path $Root "node_modules\.pnpm"
-    $Script = Get-ChildItem -Path $PnpmRoot -Directory -Filter "$PackagePrefix@*" |
-        Sort-Object -Property Name -Descending |
-        ForEach-Object { Join-Path $_.FullName $RelativeScriptPath } |
-        Where-Object { Test-Path $_ } |
-        Select-Object -First 1
-
-    if (-not $Script) {
-        throw "Could not find $PackagePrefix script at $RelativeScriptPath. Run pnpm install first."
-    }
-    return $Script
-}
-
 Push-Location $Root
 try {
     Push-Location "apps\web"
     try {
-        $Node = Resolve-CommandPath -Name "node.exe" -Candidates @(
-            (Join-Path $env:ProgramFiles "nodejs\node.exe")
-        )
+        $Node = Resolve-Node
         if (-not $Node) {
             throw "Node.js is required to run frontend checks."
         }
@@ -53,6 +30,16 @@ try {
     } finally {
         Pop-Location
     }
+
+    Push-Location "apps\desktop"
+    try {
+        Invoke-NodePackageScript -PackagePrefix "typescript" -RelativeScriptPath "node_modules\typescript\bin\tsc" -Arguments @("-p", "tsconfig.json")
+    } finally {
+        Pop-Location
+    }
+
+    & (Join-Path $PSScriptRoot "verify-open-llm-vtuber-standards.ps1")
+    & (Join-Path $PSScriptRoot "verify-modvii-adversarial-dialogue.ps1") -SkipDependencySync
 
     Push-Location "apps\server"
     try {

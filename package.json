@@ -1,13 +1,16 @@
 {
-  "name": "astralive",
+  "name": "modvii",
   "private": true,
   "version": "0.1.0",
   "packageManager": "pnpm@9.15.4",
   "scripts": {
-    "dev:web": "pnpm --filter @astralive/web dev",
-    "build:web": "pnpm --filter @astralive/web build",
-    "test:web": "pnpm --filter @astralive/web test",
-    "lint:web": "pnpm --filter @astralive/web lint"
+    "dev:web": "pnpm --filter @modvii/web dev",
+    "build:web": "pnpm --filter @modvii/web build",
+    "test:web": "pnpm --filter @modvii/web test",
+    "lint:web": "pnpm --filter @modvii/web lint",
+    "dev:desktop": "pnpm --filter modvii-desktop dev",
+    "build:desktop": "pnpm --filter modvii-desktop build",
+    "package:desktop": "pnpm --filter modvii-desktop package"
   },
   "devDependencies": {
     "@types/node": "^20.14.12",

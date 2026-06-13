@@ -37,6 +37,13 @@ function Resolve-Python {
     return Resolve-CommandPath -Name "python" -Candidates $Candidates
 }
 
+function Resolve-Node {
+    $Candidates = @(
+        (Join-Path $env:ProgramFiles "nodejs\node.exe")
+    )
+    return Resolve-CommandPath -Name "node.exe" -Candidates $Candidates
+}
+
 function Resolve-Uv {
     $Candidates = @()
     $Candidates += Get-UserPythonRoots | ForEach-Object { Join-Path $_ "Scripts\uv.exe" }
@@ -236,6 +243,46 @@ function Invoke-CmdExecutable {
     }
 }
 
+function Resolve-PnpmPackageScript {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PackagePrefix,
+        [Parameter(Mandatory = $true)]
+        [string]$RelativeScriptPath
+    )
+
+    $PnpmRoot = Join-Path (Get-ProjectRoot) "node_modules\.pnpm"
+    $Script = Get-ChildItem -Path $PnpmRoot -Directory -Filter "$PackagePrefix@*" |
+        Sort-Object -Property Name -Descending |
+        ForEach-Object { Join-Path $_.FullName $RelativeScriptPath } |
+        Where-Object { Test-Path $_ } |
+        Select-Object -First 1
+
+    if (-not $Script) {
+        throw "Could not find $PackagePrefix script at $RelativeScriptPath. Run pnpm install first."
+    }
+    return $Script
+}
+
+function Invoke-NodePackageScript {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PackagePrefix,
+        [Parameter(Mandatory = $true)]
+        [string]$RelativeScriptPath,
+        [string[]]$Arguments = @()
+    )
+
+    $Node = Resolve-Node
+    if (-not $Node) {
+        throw "Node.js is required."
+    }
+
+    Invoke-CmdExecutable -Executable $Node -Arguments (@(
+        (Resolve-PnpmPackageScript -PackagePrefix $PackagePrefix -RelativeScriptPath $RelativeScriptPath)
+    ) + $Arguments)
+}
+
 function Invoke-ApiCommand {
     param(
         [Parameter(Mandatory = $true)]
@@ -248,8 +295,8 @@ function Invoke-ApiCommand {
     Assert-ApiHoldClear -Provider $Provider
     Add-ProcessPathEntry -Path (Join-Path $env:ProgramFiles "nodejs")
 
-    $StdOut = Join-Path $env:TEMP "astralive_api_stdout_$([guid]::NewGuid().ToString('N')).log"
-    $StdErr = Join-Path $env:TEMP "astralive_api_stderr_$([guid]::NewGuid().ToString('N')).log"
+    $StdOut = Join-Path $env:TEMP "modvii_api_stdout_$([guid]::NewGuid().ToString('N')).log"
+    $StdErr = Join-Path $env:TEMP "modvii_api_stderr_$([guid]::NewGuid().ToString('N')).log"
     try {
         $Extension = [System.IO.Path]::GetExtension($Executable).ToLowerInvariant()
         if ($Extension -in @(".cmd", ".bat")) {
