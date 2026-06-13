@@ -28,3 +28,10 @@
 - China provider route added but not activated: use `scripts/configure-china-provider.ps1` after the user provides paid API keys. Default route is DashScope Hong Kong `qwen-plus` for LLM/Vision plus optional SiliconFlow ASR/TTS; Beijing route keeps `qwen3.5-plus`.
 - Live2D mouth fix: Haru uses `PARAM_MOUTH_OPEN_Y`; controller now writes common Cubism mouth parameter aliases and maps MODVII response text to available Haru motion groups.
 - Validation before push: backend pytest and ruff, web eslint/tsc/vitest/build.
+
+## 2026-06-14 Visual Scheduler Notes
+
+- Visual frame handling is now a bounded scheduler, not a single blocking task: active tasks are capped by `VISION_MAX_CONCURRENCY`, pending frames by `VISION_PENDING_FRAME_LIMIT`, and stale results by `VISION_RESULT_MAX_AGE_SECONDS`.
+- Latest-frame-wins is applied per source (`screen`, `camera`, `focus`, `general`), so screen and camera can run in parallel while repeated screen frames replace older pending screen frames.
+- `VisionService.analyze_frame(..., commit=False)` allows the scheduler to discard stale provider results before they update `session.last_visual_summary` or the UI.
+- Domestic provider script now includes DashScope, SiliconFlow, Volcano Ark, Baidu AI Studio/Qianfan, DeepSeek, Kimi, Zhipu, Tencent Hunyuan, and MiniMax routes. DeepSeek is text-only in the route template; use a vision-capable provider for screen/camera.

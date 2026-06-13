@@ -34,6 +34,8 @@ class VisionService:
         session: SessionState,
         frame: FramePayload,
         prompt: str,
+        *,
+        commit: bool = True,
     ) -> tuple[VisionResult, bool]:
         encoded_size = len(frame.data_base64)
         session.cost_meter.add_frame(encoded_size)
@@ -72,14 +74,18 @@ class VisionService:
         except Exception as exc:  # noqa: BLE001
             logger.warning("vision provider failed; frame skipped: %s", exc)
             summary = session.last_visual_summary or "视觉服务暂时不可用，已跳过本帧，不影响语音对话。"
-            session.last_visual_summary = summary
-            session.last_visual_summary_at = datetime.now(timezone.utc)
-            session.last_scene_hash = frame.scene_hash
-            return VisionResult(summary=summary, confidence=0.0, raw={"error": str(exc)}), False
+            result = VisionResult(summary=summary, confidence=0.0, raw={"error": str(exc)})
+            if commit:
+                self.apply_frame_result(session, frame, result)
+            return result, False
 
+        session.cost_meter.vision_calls += 1
+        if commit:
+            self.apply_frame_result(session, frame, result)
+        return result, False
+
+    def apply_frame_result(self, session: SessionState, frame: FramePayload, result: VisionResult) -> None:
         session.last_visual_summary = result.summary
         session.last_visual_summary_at = datetime.now(timezone.utc)
         session.last_scene_hash = frame.scene_hash
-        session.cost_meter.vision_calls += 1
-        session.cost_meter.mode = "focus" if mode == "focus" else "active"
-        return result, False
+        session.cost_meter.mode = "focus" if frame.capture_reason in {"focus_roi", "screen_focus"} else "active"

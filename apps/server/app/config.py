@@ -96,6 +96,9 @@ class Settings(BaseSettings):
     max_frame_height: int = 720
     vision_cache_ttl_seconds: int = 30
     vision_request_timeout_seconds: float = 8.0
+    vision_max_concurrency: int = 1
+    vision_pending_frame_limit: int = 2
+    vision_result_max_age_seconds: float = 12.0
     scene_change_threshold: float = 0.12
 
     data_dir: Path = Field(default=Path("data"))

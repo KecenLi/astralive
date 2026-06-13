@@ -27,7 +27,9 @@ async def public_config() -> dict:
             "max_frame_width": settings.max_frame_width,
             "max_frame_height": settings.max_frame_height,
             "vision_cache_ttl_seconds": settings.vision_cache_ttl_seconds,
+            "vision_max_concurrency": settings.vision_max_concurrency,
+            "vision_pending_frame_limit": settings.vision_pending_frame_limit,
+            "vision_result_max_age_seconds": settings.vision_result_max_age_seconds,
             "scene_change_threshold": settings.scene_change_threshold,
         },
     }
-

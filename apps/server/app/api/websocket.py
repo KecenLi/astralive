@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import dataclass
 from contextlib import suppress
 import io
 import logging
@@ -29,6 +30,15 @@ sessions: dict[str, SessionState] = {}
 REALTIME_TTS_FALLBACK_MAX_CHARS = 360
 
 
+@dataclass
+class VisualFrameJob:
+    sequence: int
+    source: str
+    frame: FramePayload
+    prompt: str
+    received_at: float
+
+
 class AudioRuntimeState:
     def __init__(self) -> None:
         self.buffer = bytearray()
@@ -45,7 +55,41 @@ class AudioRuntimeState:
 
 class VisualRuntimeState:
     def __init__(self) -> None:
-        self.task: asyncio.Task[None] | None = None
+        self.pending: dict[str, VisualFrameJob] = {}
+        self.active_tasks: set[asyncio.Task[None]] = set()
+        self.latest_sequence: int = 0
+        self.latest_sequence_by_source: dict[str, int] = {}
+        self.applied_sequence: int = 0
+        self.dropped_pending_frames: int = 0
+
+    @property
+    def task(self) -> asyncio.Task[None] | None:
+        return next(iter(self.active_tasks), None)
+
+    def enqueue(self, frame: FramePayload, prompt: str, settings: Settings) -> tuple[VisualFrameJob, int]:
+        self.latest_sequence += 1
+        source = _visual_source_key(frame.capture_reason)
+        job = VisualFrameJob(
+            sequence=self.latest_sequence,
+            source=source,
+            frame=frame,
+            prompt=prompt,
+            received_at=time.perf_counter(),
+        )
+        dropped = 1 if source in self.pending else 0
+        self.pending[source] = job
+        self.latest_sequence_by_source[source] = job.sequence
+
+        pending_limit = max(1, settings.vision_pending_frame_limit)
+        while len(self.pending) > pending_limit:
+            oldest_source = min(self.pending, key=lambda item: self.pending[item].sequence)
+            if oldest_source == source and len(self.pending) > 1:
+                candidates = [item for item in self.pending if item != source]
+                oldest_source = min(candidates, key=lambda item: self.pending[item].sequence)
+            self.pending.pop(oldest_source, None)
+            dropped += 1
+        self.dropped_pending_frames += dropped
+        return job, dropped
 
 
 @router.websocket("/ws/session/{session_id}")
@@ -204,6 +248,7 @@ async def _handle_event(
 
     if event.type == "client.media.frame":
         if _should_defer_visual_frame(session, audio_runtime):
+            visual_runtime.pending.clear()
             await _send(
                 websocket,
                 make_event(
@@ -217,34 +262,28 @@ async def _handle_event(
                 send_lock,
             )
             return response_task
-        if visual_runtime.task and not visual_runtime.task.done():
+        frame = FramePayload.model_validate(event.payload)
+        _, dropped = visual_runtime.enqueue(
+            frame,
+            str(event.payload.get("prompt") or session.last_user_text or "请描述画面。"),
+            settings,
+        )
+        if dropped:
             await _send(
                 websocket,
                 make_event(
                     "debug.log",
                     session.session_id,
                     {
-                        "message": "Visual frame skipped while a previous visual analysis is in progress.",
-                        "status": session.status,
+                        "message": "Older visual frame dropped; latest frame kept for analysis.",
+                        "dropped": dropped,
+                        "pending": len(visual_runtime.pending),
+                        "active": len(visual_runtime.active_tasks),
                     },
                 ),
                 send_lock,
             )
-            return response_task
-        frame = FramePayload.model_validate(event.payload)
-        visual_runtime.task = asyncio.create_task(
-            _run_visual_frame_analysis(
-                websocket,
-                session,
-                vision,
-                settings,
-                audio_runtime,
-                frame,
-                str(event.payload.get("prompt") or session.last_user_text or "请描述画面。"),
-                send_lock,
-            )
-        )
-        visual_runtime.task.add_done_callback(_log_task_exception)
+        _start_visual_tasks(websocket, session, vision, settings, audio_runtime, visual_runtime, send_lock)
         return response_task
 
     if event.type == "client.media.audio_chunk":
@@ -1135,18 +1174,90 @@ def _should_defer_visual_frame(session: SessionState, audio_runtime: AudioRuntim
     )
 
 
+def _visual_source_key(capture_reason: str) -> str:
+    if capture_reason.startswith("screen_") or capture_reason == "scene_changed":
+        return "screen"
+    if capture_reason.startswith("camera_"):
+        return "camera"
+    if capture_reason in {"focus_roi", "visual_question"}:
+        return "focus"
+    return "general"
+
+
+def _start_visual_tasks(
+    websocket: WebSocket,
+    session: SessionState,
+    vision: VisionService,
+    settings: Settings,
+    audio_runtime: AudioRuntimeState,
+    visual_runtime: VisualRuntimeState,
+    send_lock: asyncio.Lock,
+) -> None:
+    if _should_defer_visual_frame(session, audio_runtime):
+        return
+
+    max_concurrency = max(1, settings.vision_max_concurrency)
+    while visual_runtime.pending and len(visual_runtime.active_tasks) < max_concurrency:
+        source = max(visual_runtime.pending, key=lambda item: visual_runtime.pending[item].sequence)
+        job = visual_runtime.pending.pop(source)
+        task = asyncio.create_task(
+            _run_visual_frame_analysis(
+                websocket,
+                session,
+                vision,
+                settings,
+                audio_runtime,
+                visual_runtime,
+                job,
+                send_lock,
+            )
+        )
+        visual_runtime.active_tasks.add(task)
+        task.add_done_callback(_log_task_exception)
+
+
 async def _run_visual_frame_analysis(
     websocket: WebSocket,
     session: SessionState,
     vision: VisionService,
     settings: Settings,
     audio_runtime: AudioRuntimeState,
-    frame: FramePayload,
-    prompt: str,
+    visual_runtime: VisualRuntimeState,
+    job: VisualFrameJob,
     send_lock: asyncio.Lock,
 ) -> None:
+    frame = job.frame
     try:
-        result, from_cache = await vision.analyze_frame(session, frame, prompt=prompt)
+        result, from_cache = await vision.analyze_frame(session, frame, prompt=job.prompt, commit=False)
+        result_age = time.perf_counter() - job.received_at
+        latest_for_source = visual_runtime.latest_sequence_by_source.get(job.source, job.sequence)
+        if (
+            job.sequence < latest_for_source
+            or job.sequence < visual_runtime.applied_sequence
+            or result_age > settings.vision_result_max_age_seconds
+        ):
+            await _send(
+                websocket,
+                make_event(
+                    "debug.log",
+                    session.session_id,
+                    {
+                        "message": "Stale visual result discarded.",
+                        "frame_id": frame.frame_id,
+                        "source": job.source,
+                        "sequence": job.sequence,
+                        "latest_sequence": latest_for_source,
+                        "applied_sequence": visual_runtime.applied_sequence,
+                        "age_seconds": round(result_age, 3),
+                    },
+                ),
+                send_lock,
+            )
+            await _send_cost(websocket, session, send_lock)
+            return
+
+        vision.apply_frame_result(session, frame, result)
+        visual_runtime.applied_sequence = max(visual_runtime.applied_sequence, job.sequence)
         if _should_defer_visual_frame(session, audio_runtime):
             await _send(
                 websocket,
@@ -1187,13 +1298,20 @@ async def _run_visual_frame_analysis(
     except Exception as exc:  # noqa: BLE001
         logger.exception("visual frame analysis failed")
         await _send_error(websocket, session.session_id, "vision_error", str(exc), send_lock)
+    finally:
+        current_task = asyncio.current_task()
+        if current_task:
+            visual_runtime.active_tasks.discard(current_task)
+        _start_visual_tasks(websocket, session, vision, settings, audio_runtime, visual_runtime, send_lock)
 
 
 def _cancel_visual_runtime(visual_runtime: VisualRuntimeState) -> None:
-    task = visual_runtime.task
-    visual_runtime.task = None
-    if task and not task.done():
-        task.cancel()
+    visual_runtime.pending.clear()
+    tasks = list(visual_runtime.active_tasks)
+    visual_runtime.active_tasks.clear()
+    for task in tasks:
+        if not task.done():
+            task.cancel()
 
 
 async def _run_realtime_audio_response(

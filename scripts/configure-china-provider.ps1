@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("dashscope-hk", "dashscope-cn", "siliconflow", "volcengine", "qianfan-aistudio")]
+    [ValidateSet("dashscope-hk", "dashscope-cn", "siliconflow", "volcengine", "qianfan-aistudio", "deepseek", "kimi", "zhipu", "hunyuan", "minimax")]
     [string]$Profile = "dashscope-hk",
     [string]$ApiKey,
     [string]$LlmModel = "",
@@ -35,6 +35,36 @@ $Profiles = @{
         Vision = "Qwen/Qwen2.5-VL-72B-Instruct"
         Note = "SiliconFlow OpenAI-compatible multimodal and audio route."
     }
+    "deepseek" = @{
+        BaseUrl = "https://api.deepseek.com"
+        Llm = "deepseek-v4-flash"
+        Vision = ""
+        Note = "DeepSeek OpenAI-compatible text route. Keep vision on another provider."
+    }
+    "kimi" = @{
+        BaseUrl = "https://api.moonshot.ai/v1"
+        Llm = "kimi-k2.6"
+        Vision = "kimi-k2.6"
+        Note = "Kimi OpenAI-compatible multimodal route."
+    }
+    "zhipu" = @{
+        BaseUrl = "https://open.bigmodel.cn/api/paas/v4"
+        Llm = "glm-5.1"
+        Vision = "glm-4.6v"
+        Note = "Zhipu OpenAI-compatible GLM route."
+    }
+    "hunyuan" = @{
+        BaseUrl = "https://api.hunyuan.cloud.tencent.com/v1"
+        Llm = "hunyuan-turbos-latest"
+        Vision = "hunyuan-vision"
+        Note = "Tencent Hunyuan OpenAI-compatible text and vision route."
+    }
+    "minimax" = @{
+        BaseUrl = "https://api.minimax.io/v1"
+        Llm = "MiniMax-M3"
+        Vision = "MiniMax-M3"
+        Note = "MiniMax OpenAI-compatible multimodal route."
+    }
     "volcengine" = @{
         BaseUrl = "https://ark.cn-beijing.volces.com/api/v3"
         Llm = ""
@@ -63,9 +93,6 @@ if (-not $VisionModel) {
 if (-not $LlmModel) {
     throw "Provide -LlmModel for $Profile. Some providers require an activated model or endpoint id."
 }
-if (-not $VisionModel) {
-    $VisionModel = $LlmModel
-}
 
 $EnvPath = Join-Path $Root ".env"
 $EnvExamplePath = Join-Path $Root ".env.example"
@@ -75,12 +102,15 @@ if (Test-Path $EnvPath) {
 
 $Values = @{
     "LLM_PROVIDER" = "openai_compatible"
-    "VISION_PROVIDER" = "openai_compatible"
     "OPENAI_COMPATIBLE_BASE_URL" = $Selected.BaseUrl
     "OPENAI_COMPATIBLE_API_KEY" = $ApiKey
     "OPENAI_COMPATIBLE_LLM_MODEL" = $LlmModel
-    "OPENAI_COMPATIBLE_VISION_MODEL" = $VisionModel
     "REALTIME_PROVIDER" = "none"
+}
+
+if ($VisionModel) {
+    $Values["VISION_PROVIDER"] = "openai_compatible"
+    $Values["OPENAI_COMPATIBLE_VISION_MODEL"] = $VisionModel
 }
 
 if ($EnableSiliconFlowAudio) {
