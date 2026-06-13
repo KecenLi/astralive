@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import random
 import sys
 from pathlib import Path
 
@@ -21,6 +22,7 @@ def main() -> int:
         "希望你以后能够做的比我还好呦。"
     )
     device = str(request.get("device") or "cpu").lower()
+    seed = int(request.get("seed") or 7327)
     text = str(request.get("text") or "").strip()
     if not text:
         raise ValueError("No text was provided for CosyVoice3 synthesis.")
@@ -39,6 +41,17 @@ def main() -> int:
     import torch
     import torchaudio
     from cosyvoice.cli.cosyvoice import AutoModel
+
+    random.seed(seed)
+    try:
+        import numpy as np
+
+        np.random.seed(seed)
+    except Exception:
+        pass
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
     model = AutoModel(model_dir=str(model_dir))
     chunks = [

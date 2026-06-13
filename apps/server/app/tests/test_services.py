@@ -31,6 +31,7 @@ from app.contracts.model_io import (
 from app.core.session_state import SessionState
 from app.services.avatar_service import AvatarService
 from app.providers.asr.google_genai import GoogleGenAIASRProvider
+from app.providers.asr.local_whisper import LocalWhisperASRProvider
 from app.providers.asr.openai_compatible import OpenAICompatibleASRProvider
 from app.providers.registry import ProviderRegistry
 from app.providers.llm.openai_compatible import OpenAICompatibleLLMProvider
@@ -44,6 +45,7 @@ from app.providers.tts.openai_compatible import OpenAICompatibleTTSProvider
 from app.providers.vision.openai_compatible import OpenAICompatibleVisionProvider
 from app.providers.vision.base import VisionProvider
 from app.providers.vision.vertex_ai import VertexAIVisionProvider
+from app.services.audio_service import AudioService
 from app.services.dialogue_service import DialogueService
 from app.services.vision_service import VisionService
 from app.services.wake_service import WakeService
@@ -361,6 +363,67 @@ def test_registry_can_select_vertex_ai_providers() -> None:
     assert isinstance(registry.asr(), GoogleGenAIASRProvider)
     assert isinstance(registry.tts(), GoogleGenAITTSProvider)
     assert isinstance(registry.realtime(), GoogleGenAILiveProvider)
+
+
+def test_registry_can_select_local_whisper_asr() -> None:
+    settings = Settings(asr_provider="local_whisper")
+    provider = ProviderRegistry(settings).asr()
+
+    assert isinstance(provider, LocalWhisperASRProvider)
+
+
+async def test_local_whisper_asr_uses_worker_wav(tmp_path) -> None:
+    calls: list[tuple[object, str]] = []
+
+    class StubWorker:
+        async def transcribe(self, audio_path, language: str):
+            calls.append((audio_path, language))
+            assert audio_path.read_bytes().startswith(b"RIFF")
+            return {"text": "小七本地识别", "language": "zh", "segments": 1}
+
+    settings = Settings(asr_provider="local_whisper", data_dir=tmp_path / "data")
+    provider = LocalWhisperASRProvider(settings)
+    provider._worker = StubWorker()  # type: ignore[assignment]
+
+    result = await provider.transcribe(
+        b"\x01\x00" * 320,
+        metadata={"encoding": "pcm_s16le", "sample_rate": 16000, "channels": 1},
+    )
+
+    assert result.text == "小七本地识别"
+    assert result.raw["provider"] == "local_whisper"
+    assert calls == [(calls[0][0], "zh-CN")]
+
+
+async def test_audio_service_prewarm_calls_provider_hooks() -> None:
+    class PrewarmASR:
+        def __init__(self) -> None:
+            self.prewarm_calls = 0
+
+        async def prewarm(self) -> None:
+            self.prewarm_calls += 1
+
+        async def transcribe(self, audio_bytes, metadata=None):
+            return ASRResult(text="")
+
+    class PrewarmTTS:
+        def __init__(self) -> None:
+            self.prewarm_calls = 0
+
+        async def prewarm(self) -> None:
+            self.prewarm_calls += 1
+
+        async def synthesize(self, data):
+            return TTSResult()
+
+    asr = PrewarmASR()
+    tts = PrewarmTTS()
+    service = AudioService(tts, asr, Settings())
+
+    await service.prewarm()
+
+    assert asr.prewarm_calls == 1
+    assert tts.prewarm_calls == 1
 
 
 def test_registry_can_select_cosyvoice3_tts() -> None:

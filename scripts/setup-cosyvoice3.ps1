@@ -150,6 +150,7 @@ if (-not $SkipDependencyInstall) {
     if (-not $SkipWhisper) {
         Invoke-External -FilePath $Python -Arguments @("-m", "pip", "install", "setuptools<81")
         Invoke-External -FilePath $Python -Arguments @("-m", "pip", "install", "--no-build-isolation", "openai-whisper==20231117")
+        Invoke-External -FilePath $Python -Arguments @("-m", "pip", "install", "imageio-ffmpeg")
     }
     Invoke-External -FilePath $Python -Arguments @("-m", "pip", "install", "huggingface_hub")
 }
@@ -183,10 +184,21 @@ if (-not $NoEnvWrite) {
     $ExamplePath = Join-Path $ProjectRoot ".env.example"
     Set-DotEnvValues -Path $EnvPath -ExamplePath $ExamplePath -Values @{
         "TTS_PROVIDER" = "cosyvoice3"
+        "ASR_PROVIDER" = "local_whisper"
+        "REALTIME_PROVIDER" = "none"
+        "LOCAL_ASR_PYTHON" = $Python
+        "LOCAL_ASR_WORKER_SCRIPT" = (Join-Path $ProjectRoot "scripts\local_whisper_worker.py")
+        "LOCAL_ASR_MODEL" = "base"
+        "LOCAL_ASR_DEVICE" = "cpu"
+        "LOCAL_ASR_TIMEOUT_SECONDS" = "120"
+        "AUDIO_PREWARM_ENABLED" = "true"
         "COSYVOICE3_PYTHON" = $Python
         "COSYVOICE3_REPO_DIR" = $RepoDir
         "COSYVOICE3_MODEL_DIR" = $ModelDir
         "COSYVOICE3_SCRIPT" = (Join-Path $ProjectRoot "scripts\cosyvoice3_synth.py")
+        "COSYVOICE3_WORKER_ENABLED" = "true"
+        "COSYVOICE3_WORKER_SCRIPT" = (Join-Path $ProjectRoot "scripts\cosyvoice3_worker.py")
+        "COSYVOICE3_SEED" = "7327"
         "COSYVOICE3_PROMPT_AUDIO" = (Join-Path $RepoDir "asset\zero_shot_prompt.wav")
         "COSYVOICE3_DEVICE" = "cpu"
         "COSYVOICE3_TIMEOUT_SECONDS" = "120"

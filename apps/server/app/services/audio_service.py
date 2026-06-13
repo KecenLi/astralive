@@ -26,6 +26,12 @@ class AudioService:
     async def transcribe(self, audio_bytes: bytes, metadata: dict | None = None) -> ASRResult:
         return await self.asr_provider.transcribe(audio_bytes, metadata)
 
+    async def prewarm(self) -> None:
+        for provider in (self.asr_provider, self.tts_provider):
+            prewarm = getattr(provider, "prewarm", None)
+            if prewarm:
+                await prewarm()
+
     async def respond_realtime_audio(
         self, audio_bytes: bytes, metadata: dict | None = None
     ) -> RealtimeTurnResult:

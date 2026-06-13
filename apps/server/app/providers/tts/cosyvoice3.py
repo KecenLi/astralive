@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import contextlib
 import json
 import os
 import sys
@@ -20,10 +21,6 @@ class CosyVoice3TTSProvider(TTSProvider):
     async def synthesize(self, data: TTSInput) -> TTSResult:
         if not data.text.strip():
             return TTSResult(mime="audio/wav", encoding="wav", raw={"provider": "cosyvoice3"})
-
-        script = Path(self.settings.cosyvoice3_script)
-        if not script.exists():
-            raise RuntimeError(f"CosyVoice3 synthesis script not found: {script}")
 
         repo_dir = Path(self.settings.cosyvoice3_repo_dir)
         model_dir = Path(self.settings.cosyvoice3_model_dir)
@@ -46,6 +43,7 @@ class CosyVoice3TTSProvider(TTSProvider):
             "prompt_audio": self.settings.cosyvoice3_prompt_audio,
             "prompt_text": self.settings.cosyvoice3_prompt_text,
             "device": self.settings.cosyvoice3_device,
+            "seed": self.settings.cosyvoice3_seed,
         }
         input_path.write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
 
@@ -75,13 +73,26 @@ class CosyVoice3TTSProvider(TTSProvider):
         request = json.loads(input_path.read_text(encoding="utf-8"))
         await self._worker.synthesize(request, output_path)
 
+    async def close(self) -> None:
+        if self._worker:
+            await self._worker.close()
+            self._worker = None
+
+    async def prewarm(self) -> None:
+        if not self.settings.cosyvoice3_worker_enabled:
+            return
+        if self._worker is None:
+            self._worker = _CosyVoice3Worker(self.settings)
+        await self._worker.ensure_started()
+
     async def _run_synth_script(self, input_path: Path, output_path: Path) -> None:
         python = self.settings.cosyvoice3_python or sys.executable
+        script = _resolve_script_path(self.settings.cosyvoice3_script, "cosyvoice3_synth.py")
         env = os.environ.copy()
         env.setdefault("PYTHONIOENCODING", "utf-8")
         process = await asyncio.create_subprocess_exec(
             python,
-            str(self.settings.cosyvoice3_script),
+            str(script),
             "--input",
             str(input_path),
             "--output",
@@ -156,9 +167,7 @@ class _CosyVoice3Worker:
         if self.process and self.process.returncode is None:
             return self.process
 
-        script = Path(self.settings.cosyvoice3_worker_script)
-        if not script.exists():
-            raise RuntimeError(f"CosyVoice3 worker script not found: {script}")
+        script = _resolve_script_path(self.settings.cosyvoice3_worker_script, "cosyvoice3_worker.py")
         python = self.settings.cosyvoice3_python or sys.executable
         self.settings.logs_dir.mkdir(parents=True, exist_ok=True)
         log_path = self.settings.logs_dir / "cosyvoice3-worker.err.log"
@@ -181,6 +190,10 @@ class _CosyVoice3Worker:
         )
         return self.process
 
+    async def ensure_started(self) -> None:
+        async with self.lock:
+            await self._ensure_process()
+
     def _terminate(self) -> None:
         if self.process and self.process.returncode is None:
             self.process.kill()
@@ -188,6 +201,47 @@ class _CosyVoice3Worker:
         if self.stderr_file:
             self.stderr_file.close()
             self.stderr_file = None
+
+    async def close(self) -> None:
+        process = self.process
+        self.process = None
+        if process and process.returncode is None:
+            if process.stdin:
+                process.stdin.close()
+                with contextlib.suppress(Exception):
+                    await process.stdin.wait_closed()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=1.5)
+            except TimeoutError:
+                process.kill()
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(process.wait(), timeout=1.5)
+        if self.stderr_file:
+            self.stderr_file.close()
+            self.stderr_file = None
+
+
+def _resolve_script_path(configured: str, fallback_name: str) -> Path:
+    configured_path = Path(configured)
+    candidates = [configured_path]
+    if getattr(sys, "frozen", False):
+        executable = Path(sys.executable).resolve()
+        candidates.extend(
+            [
+                executable.parent / "scripts" / fallback_name,
+                executable.parent.parent / "scripts" / fallback_name,
+            ]
+        )
+    candidates.extend(
+        [
+            Path.cwd() / "scripts" / fallback_name,
+            Path(__file__).resolve().parents[5] / "scripts" / fallback_name,
+        ]
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise RuntimeError(f"CosyVoice3 script not found: {configured_path}")
 
 
 def _wav_metadata(path: Path) -> tuple[int, int, int | None]:

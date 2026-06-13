@@ -109,11 +109,14 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
 
     send_lock = asyncio.Lock()
     response_task: asyncio.Task[None] | None = None
+    prewarm_task: asyncio.Task[None] | None = None
     audio_runtime = AudioRuntimeState()
     visual_runtime = VisualRuntimeState()
 
     await _send(websocket, make_event("server.session.ready", session_id, _session_payload(session, settings)), send_lock)
     await _send_cost(websocket, session, send_lock)
+    if settings.audio_prewarm_enabled:
+        prewarm_task = asyncio.create_task(_prewarm_audio(audio, session_id))
 
     try:
         while True:
@@ -167,9 +170,23 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
     except WebSocketDisconnect:
         if response_task and not response_task.done():
             response_task.cancel()
+        if prewarm_task and not prewarm_task.done():
+            prewarm_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await prewarm_task
         await _close_audio_runtime(audio_runtime)
         _cancel_visual_runtime(visual_runtime)
         logger.info("websocket disconnected: %s", session_id)
+
+
+async def _prewarm_audio(audio: AudioService, session_id: str) -> None:
+    try:
+        await audio.prewarm()
+        logger.info("audio providers prewarmed: %s", session_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001
+        logger.exception("audio provider prewarm failed: %s", session_id)
 
 
 async def _handle_event(
@@ -1003,6 +1020,7 @@ async def _recover_realtime_stream_failure(
         await _send_realtime_failure_notice(
             websocket,
             session,
+            audio,
             avatar,
             settings,
             started,
@@ -1029,6 +1047,7 @@ async def _recover_realtime_stream_failure(
         await _send_realtime_failure_notice(
             websocket,
             session,
+            audio,
             avatar,
             settings,
             started,
@@ -1042,6 +1061,7 @@ async def _recover_realtime_stream_failure(
         await _send_realtime_failure_notice(
             websocket,
             session,
+            audio,
             avatar,
             settings,
             started,
@@ -1056,6 +1076,7 @@ async def _recover_realtime_stream_failure(
         await _send_realtime_failure_notice(
             websocket,
             session,
+            audio,
             avatar,
             settings,
             started,
@@ -1124,6 +1145,7 @@ async def _run_recovered_dialogue_response(
         await _send_realtime_failure_notice(
             websocket,
             session,
+            audio,
             avatar,
             settings,
             started,
@@ -1136,6 +1158,7 @@ async def _run_recovered_dialogue_response(
 async def _send_realtime_failure_notice(
     websocket: WebSocket,
     session: SessionState,
+    audio: AudioService,
     avatar: AvatarService,
     settings: Settings,
     started: float,
@@ -1157,18 +1180,39 @@ async def _send_realtime_failure_notice(
     )
     await _send(
         websocket,
-        make_event("assistant.text.final", session.session_id, {"text": message, "audio_expected": False}),
-        send_lock,
-    )
-    await _send(
-        websocket,
         make_event(
-            "assistant.audio.done",
+            "assistant.text.final",
             session.session_id,
-            {"source": "realtime", "chunks": 0, "fallback_text": message},
+            {"text": message, "audio_expected": settings.tts_provider != "mock"},
         ),
         send_lock,
     )
+    if settings.tts_provider != "mock":
+        try:
+            tts_result = await audio.synthesize(message, "concerned")
+            session.cost_meter.tts_calls += 1
+            await _send_tts_audio(websocket, session, [tts_result], "notice", send_lock, fallback_text=message)
+        except Exception as tts_exc:  # noqa: BLE001
+            logger.exception("fixed notice tts failed")
+            await _send(
+                websocket,
+                make_event(
+                    "assistant.audio.done",
+                    session.session_id,
+                    {"source": "notice", "chunks": 0, "fallback_text": message, "error": str(tts_exc)},
+                ),
+                send_lock,
+            )
+    else:
+        await _send(
+            websocket,
+            make_event(
+                "assistant.audio.done",
+                session.session_id,
+                {"source": "notice", "chunks": 0, "fallback_text": message},
+            ),
+            send_lock,
+        )
     await _send(
         websocket,
         avatar.state_event(session.session_id, "listening", "concerned", message),
@@ -1709,7 +1753,7 @@ def _session_payload(session: SessionState, settings: Settings) -> dict:
         "output_sample_rate": settings.audio_output_sample_rate,
         "channels": settings.audio_channels,
         "server_tts": settings.tts_provider != "mock",
-        "server_realtime_audio": settings.realtime_provider != "none",
+        "server_realtime_audio": settings.realtime_provider != "none" or settings.asr_provider != "mock",
         "realtime_input_idle_timeout_seconds": settings.realtime_input_idle_timeout_seconds,
     }
     return payload

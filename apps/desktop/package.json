@@ -41,6 +41,15 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "../../scripts",
+        "to": "scripts",
+        "filter": [
+          "cosyvoice3_synth.py",
+          "cosyvoice3_worker.py",
+          "local_whisper_worker.py"
+        ]
       }
     ],
     "win": {

@@ -1,5 +1,6 @@
 from app.config import Settings
 from app.providers.asr.google_genai import GoogleGenAIASRProvider
+from app.providers.asr.local_whisper import LocalWhisperASRProvider
 from app.providers.asr.mock import MockASRProvider
 from app.providers.asr.openai_compatible import OpenAICompatibleASRProvider
 from app.providers.llm.mock import MockLLMProvider
@@ -28,6 +29,8 @@ class ProviderRegistry:
             return GoogleGenAIASRProvider(self.settings, mode="gemini")
         if self.settings.asr_provider == "openai_compatible":
             return OpenAICompatibleASRProvider(self.settings)
+        if self.settings.asr_provider == "local_whisper":
+            return LocalWhisperASRProvider(self.settings)
         return MockASRProvider()
 
     def vision(self):

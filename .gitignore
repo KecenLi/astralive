@@ -33,6 +33,7 @@ data/cache/
 data/logs/
 data/sqlite/
 data/api-hold/
+apps/server/data/
 *.db
 *.sqlite
 *.sqlite3

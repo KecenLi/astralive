@@ -89,3 +89,14 @@
 - Real API smoke after ASR fix passed with Vertex ASR/LLM, concurrent screen frames, and CosyVoice3 TTS. Observed latency was still high: ASR final about `16.1s`, text final about `19.2s`, audio done about `76.1s`.
 - CosyVoice3 now has a persistent worker (`scripts/cosyvoice3_worker.py`) so repeated local TTS calls reuse the loaded model. First call can still be slow; subsequent calls should be measured separately before judging local TTS viability.
 - External voice pipeline references checked: RealtimeSTT (`https://github.com/KoljaB/RealtimeSTT`), FunASR (`https://github.com/modelscope/FunASR`), SenseVoice (`https://github.com/FunAudioLLM/SenseVoice`), sherpa-onnx (`https://github.com/k2-fsa/sherpa-onnx`), Open-LLM-VTuber (`https://github.com/Open-LLM-VTuber/Open-LLM-VTuber`). Practical conclusion: keep MODVII provider-swappable, prefer local or near-region ASR for wake/VAD final turns, and avoid Gemini Live as the only speech endpoint.
+
+## 2026-06-14 Local ASR / Packaged CosyVoice3 Round Notes
+
+- Local config switched to `ASR_PROVIDER=local_whisper`, `REALTIME_PROVIDER=none`, `TTS_PROVIDER=cosyvoice3`. `.env` stays local and must not be committed.
+- Packaged TTS root cause fixed: Electron now ships `resources/scripts/cosyvoice3_worker.py`, `cosyvoice3_synth.py`, and `local_whisper_worker.py`; server providers resolve scripts from packaged resources before failing.
+- Local ASR worker added with `openai-whisper` plus `imageio-ffmpeg` fallback. Current smoke on `data\cache\modvii-test-speech.wav`: `local_whisper` base model returned text in about `2.7-2.9s` standalone; in two-round WebSocket soak, ASR final after audio-final was about `0.40-0.57s` after prewarm.
+- CosyVoice3 voice is fixed through `COSYVOICE3_SEED=7327`; provider sends the seed to both one-shot and worker scripts.
+- Server fixed realtime failure notices now use the configured TTS provider instead of silent text-only notices when `TTS_PROVIDER` is not `mock`.
+- Audio provider prewarm is enabled by `AUDIO_PREWARM_ENABLED=true`; WebSocket session ready starts local ASR/TTS workers in the background without playing any prompt.
+- Current local TTS limitation is CPU inference speed, not missing script or API latency. Two-round local soak passed with no errors, but CosyVoice3 audio done after audio-final still took about `38-45s` hot on this machine. For fast spoken replies, next round should either move CosyVoice3 to GPU if available or add a faster local TTS route while keeping CosyVoice3 as high-quality mode.
+- Validation before push this round: backend pytest/ruff/py_compile, `verify-local-asr.ps1`, `verify-local-tts.ps1`, `verify-real-realtime-soak.ps1` with local providers, `scripts/package.ps1 -SkipLive2D`, and packaged `verify-desktop-interaction.mjs`.

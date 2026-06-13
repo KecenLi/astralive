@@ -2,6 +2,7 @@ import argparse
 import contextlib
 import json
 import os
+import random
 import sys
 from pathlib import Path
 
@@ -30,8 +31,20 @@ def synthesize(request: dict, model, torch, torchaudio) -> dict:
     output_path = Path(request["output"]).resolve()
     prompt_audio = Path(request["prompt_audio"]).resolve()
     prompt_text = str(request.get("prompt_text") or "")
+    seed = int(request.get("seed") or 7327)
     if not prompt_audio.exists():
         raise FileNotFoundError(f"Prompt audio not found: {prompt_audio}")
+
+    random.seed(seed)
+    try:
+        import numpy as np
+
+        np.random.seed(seed)
+    except Exception:
+        pass
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
     with contextlib.redirect_stdout(sys.stderr):
         chunks = [

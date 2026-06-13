@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     openai_compatible_asr_api_key: str = ""
     openai_compatible_asr_model: str = ""
     openai_compatible_asr_endpoint_path: str = "/audio/transcriptions"
+
+    local_asr_python: str = ""
+    local_asr_worker_script: str = str(PROJECT_ROOT / "scripts" / "local_whisper_worker.py")
+    local_asr_model: str = "base"
+    local_asr_device: str = "cpu"
+    local_asr_timeout_seconds: float = 120.0
     openai_compatible_tts_base_url: str = ""
     openai_compatible_tts_api_key: str = ""
     openai_compatible_tts_model: str = ""
@@ -63,6 +69,7 @@ class Settings(BaseSettings):
     cosyvoice3_script: str = str(PROJECT_ROOT / "scripts" / "cosyvoice3_synth.py")
     cosyvoice3_worker_enabled: bool = True
     cosyvoice3_worker_script: str = str(PROJECT_ROOT / "scripts" / "cosyvoice3_worker.py")
+    cosyvoice3_seed: int = 7327
     cosyvoice3_prompt_audio: str = ""
     cosyvoice3_prompt_text: str = (
         "You are MODVII, a warm and lively bilingual desktop companion.<|endofprompt|>"
@@ -81,6 +88,7 @@ class Settings(BaseSettings):
     audio_turn_max_bytes: int = 2097152
     audio_transcription_language: str = "zh-CN"
     audio_route: str = "asr_first"
+    audio_prewarm_enabled: bool = True
     realtime_input_idle_timeout_seconds: float = 8.0
     realtime_turn_timeout_seconds: float = 8.0
     realtime_recovery_asr_timeout_seconds: float = 6.0
