@@ -2,6 +2,7 @@ import { MessageCircle, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { describeLive2DError, Live2DAvatarController } from "../../features/avatar/avatarController";
+import { useDesktopSettings } from "../../hooks/useDesktopSettings";
 import { AvatarExpression, AvatarMode } from "../../lib/events";
 import { LIVE2D_MODEL_URL } from "../../lib/env";
 
@@ -28,17 +29,22 @@ function speak(text: string) {
 }
 
 export function DesktopPet() {
+  const { settings } = useDesktopSettings();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const controllerRef = useRef<Live2DAvatarController | null>(null);
   const bubbleTimerRef = useRef<number | null>(null);
+  const initialLayoutRef = useRef(settings.avatarLayout.pet);
   const [ready, setReady] = useState(false);
   const [index, setIndex] = useState(0);
   const [bubbleVisible, setBubbleVisible] = useState(false);
+  const [proactive, setProactive] = useState<{ text: string; prompt: string } | null>(null);
   const state = petStates[index % petStates.length];
   const label = useMemo(() => `${state.subtitle} 点击互动`, [state.subtitle]);
   const bubbleText = useMemo(
-    () => `${state.subtitle} ${ready ? "Live2D 已就绪" : "备用形象"}，拖动顶部区域可移动。`,
-    [ready, state.subtitle],
+    () =>
+      proactive?.text ||
+      `${state.subtitle} ${ready ? "Live2D 已就绪" : "备用形象"}，拖动顶部区域可移动。`,
+    [proactive?.text, ready, state.subtitle],
   );
 
   useEffect(() => {
@@ -55,6 +61,23 @@ export function DesktopPet() {
   }, []);
 
   useEffect(() => {
+    return window.modvii?.pet.onNotify?.((payload) => {
+      const next = {
+        text: payload.text || "我有个小想法，点我聊一下。",
+        prompt: payload.prompt || "",
+      };
+      setProactive(next);
+      setBubbleVisible(true);
+      if (bubbleTimerRef.current !== null) window.clearTimeout(bubbleTimerRef.current);
+      bubbleTimerRef.current = window.setTimeout(() => {
+        setBubbleVisible(false);
+        bubbleTimerRef.current = null;
+      }, 9000);
+      speak(next.text);
+    }) ?? (() => undefined);
+  }, []);
+
+  useEffect(() => {
     if (!canvasRef.current || !LIVE2D_MODEL_URL) return;
     let disposed = false;
     const controller = new Live2DAvatarController();
@@ -62,7 +85,7 @@ export function DesktopPet() {
 
     async function mount() {
       try {
-        await controller.mount(canvasRef.current as HTMLCanvasElement, LIVE2D_MODEL_URL);
+        await controller.mount(canvasRef.current as HTMLCanvasElement, LIVE2D_MODEL_URL, initialLayoutRef.current);
         if (!disposed) setReady(true);
       } catch (error) {
         console.warn(`Desktop pet Live2D failed to load; using fallback. ${describeLive2DError(error)}`);
@@ -80,6 +103,10 @@ export function DesktopPet() {
   }, []);
 
   useEffect(() => {
+    controllerRef.current?.setFitOptions(settings.avatarLayout.pet);
+  }, [settings.avatarLayout.pet]);
+
+  useEffect(() => {
     controllerRef.current?.setState({
       mode: state.mode,
       expression: state.expression,
@@ -90,6 +117,13 @@ export function DesktopPet() {
   }, [state]);
 
   function interact() {
+    if (proactive) {
+      const payload = proactive;
+      setProactive(null);
+      setBubbleVisible(false);
+      void window.modvii?.pet.acceptProactive?.(payload);
+      return;
+    }
     const next = (index + 1) % petStates.length;
     setIndex(next);
     setBubbleVisible(true);

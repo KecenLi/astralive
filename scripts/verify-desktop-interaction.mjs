@@ -21,6 +21,9 @@ const testAudioSourcePath = process.env.MODVII_TEST_AUDIO_FILE
   : fs.existsSync(defaultTestAudioSourcePath)
     ? defaultTestAudioSourcePath
     : "";
+const fakeNoiseLevel = Math.max(0, Math.min(0.08, readNumberEnv("MODVII_FAKE_NOISE_LEVEL", 0.012)));
+const fakeNoiseLeadSeconds = Math.max(0, Math.min(4, readNumberEnv("MODVII_FAKE_NOISE_LEAD_SECONDS", 0.8)));
+const fakeNoiseTailSeconds = Math.max(0.5, Math.min(8, readNumberEnv("MODVII_FAKE_NOISE_TAIL_SECONDS", 2.8)));
 const audioOnly = process.env.MODVII_AUDIO_ONLY === "1";
 const wakeAutoListenOnly = process.env.MODVII_WAKE_AUTO_LISTEN_ONLY === "1";
 const debugPort = Number(process.env.MODVII_REMOTE_DEBUGGING_PORT || 19323);
@@ -35,6 +38,10 @@ const report = {
   startedAt: new Date().toISOString(),
   steps: [],
   screenshots: [],
+  screenshotDetails: [],
+  menuChecks: [],
+  live2dScaleChecks: [],
+  concurrencyChecks: [],
   audioEvents: [],
   errors: [],
 };
@@ -51,6 +58,30 @@ fs.writeFileSync(
       autostartEnabled: false,
       captureMode: "low_fps",
       petEnabled: true,
+      voice: {
+        vadProvider: "ten",
+        sendMode: "streaming_chunks",
+        route: "asr_first",
+        inputGain: 1.2,
+        tenThreshold: 0.56,
+        tenRmsFloor: 0.006,
+        tenDebounceOn: 3,
+        tenDebounceOff: 24,
+        silenceAfterSpeechMs: 850,
+        minSpeechMs: 260,
+        preRollMs: 520,
+        initialSilenceMs: 10000,
+        maxTurnMs: 24000,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+      proactiveChat: {
+        enabled: false,
+        minIntervalMinutes: 6,
+        maxIntervalMinutes: 15,
+        petBubbleFirst: true,
+      },
     },
     null,
     2,
@@ -62,6 +93,7 @@ prepareFakeAudio(fakeAudioPath, testAudioSourcePath);
 let appProcess = null;
 let main = null;
 let pet = null;
+let screenshotsDisabled = false;
 
 async function mainFlow() {
 try {
@@ -102,8 +134,12 @@ try {
   await screenshot(main, "main-ready");
   step("main-rendered", "pass", { body: await bodyExcerpt(main) });
 
+  await verifyDesktopMenu(main);
+  await screenshot(main, "desktop-menu");
+
   await verifyLive2DReady();
   await screenshot(main, "live2d-ready");
+  await verifyLive2DScaling();
   if (wakeAutoListenOnly) {
     await verifyWakeButtonAutoRealtime(main);
     return;
@@ -130,6 +166,16 @@ try {
     15_000,
   );
   step("keyword-listen-button-click", "pass", { panel: await main.evaluate(`document.querySelector(".mic-panel")?.innerText || ""`) });
+  await clickByButtonText(main, "监听");
+  await waitForEval(
+    main,
+    `(() => {
+      const text = document.querySelector(".mic-panel")?.innerText || "";
+      return !text.includes("监听唤醒词") && !text.includes("TEN VAD: streaming") && !text.includes("live streaming");
+    })()`,
+    12_000,
+  );
+  step("keyword-listen-button-toggle-off", "pass", { panel: await main.evaluate(`document.querySelector(".mic-panel")?.innerText || ""`) });
 
   await fillTextInput(main, `小七 介绍一下你现在的状态`);
   await submitTextInput(main);
@@ -158,7 +204,7 @@ try {
   await screenshot(main, "screen-capture");
   step("screen-capture-clicks", "pass", { body: await bodyExcerpt(main) });
 
-  await verifyFakeMicRealtime(main);
+  await verifyScreenCaptureVoiceConcurrency(main);
 
   const hiddenState = await togglePetFromMain(false);
   const shownState = await togglePetFromMain(true);
@@ -272,6 +318,208 @@ async function verifyWakeButtonAutoRealtime(page) {
   });
 }
 
+async function verifyDesktopMenu(page) {
+  const check = await page.evaluate(`(() => {
+    const topActions = document.querySelector(".top-actions");
+    const topRect = topActions?.getBoundingClientRect();
+    const buttons = [...document.querySelectorAll(".top-actions button")].map((button) => {
+      const rect = button.getBoundingClientRect();
+      const text = (button.innerText || button.title || "").replace(/\\s+/g, " ").trim();
+      return {
+        text,
+        title: button.title || "",
+        disabled: Boolean(button.disabled),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+        visible: rect.width > 0 && rect.height > 0,
+        overflows: button.scrollWidth > Math.ceil(button.clientWidth) || button.scrollHeight > Math.ceil(button.clientHeight),
+      };
+    });
+    return {
+      visible: Boolean(topActions && topRect && topRect.width > 0 && topRect.height > 0),
+      width: topRect ? Math.round(topRect.width) : 0,
+      height: topRect ? Math.round(topRect.height) : 0,
+      buttons,
+      bodyWidth: document.body.scrollWidth,
+      viewportWidth: window.innerWidth,
+      horizontalOverflow: document.body.scrollWidth > window.innerWidth + 2,
+    };
+  })()`);
+  const labels = check.buttons.map((button) => button.text);
+  const hasListen = labels.some((label) => label.includes("监听"));
+  const missing = ["睡眠", "桌宠"].filter((label) => !labels.some((value) => value.includes(label)));
+  const badButtons = check.buttons.filter((button) => !button.visible || button.overflows);
+  report.menuChecks.push(check);
+  if (!check.visible || !hasListen || missing.length > 0 || badButtons.length > 0 || check.horizontalOverflow) {
+    step("desktop-menu-controls", "fail", { check, missing, badButtons });
+    throw new Error(`Desktop menu controls failed validation. missing=${missing.join(",") || "none"}`);
+  }
+  step("desktop-menu-controls", "pass", check);
+}
+
+async function verifyLive2DScaling() {
+  const before = {
+    main: await collectLive2DMetrics(main, ".live2d-layer canvas"),
+    pet: await collectLive2DMetrics(pet, ".pet-avatar canvas"),
+  };
+  await setPageBounds(main, 1040, 720);
+  await setPageBounds(pet, 300, 430);
+  await delay(900);
+  await waitForEval(main, canvasHasVisiblePixelsExpression(".live2d-layer canvas"), 10_000);
+  await waitForEval(pet, canvasHasVisiblePixelsExpression(".pet-avatar canvas"), 10_000);
+  const compact = {
+    main: await collectLive2DMetrics(main, ".live2d-layer canvas"),
+    pet: await collectLive2DMetrics(pet, ".pet-avatar canvas"),
+  };
+  await screenshot(main, "live2d-scale-main-compact");
+  await screenshot(pet, "live2d-scale-pet-compact");
+
+  await setPageBounds(main, 1280, 860);
+  await setPageBounds(pet, 340, 500);
+  await delay(900);
+  await waitForEval(main, canvasHasVisiblePixelsExpression(".live2d-layer canvas"), 10_000);
+  await waitForEval(pet, canvasHasVisiblePixelsExpression(".pet-avatar canvas"), 10_000);
+  const restored = {
+    main: await collectLive2DMetrics(main, ".live2d-layer canvas"),
+    pet: await collectLive2DMetrics(pet, ".pet-avatar canvas"),
+  };
+  const check = {
+    before,
+    compact,
+    restored,
+    mainChanged:
+      Math.abs(before.main.parent.width - compact.main.parent.width) > 16 ||
+      Math.abs(before.main.parent.height - compact.main.parent.height) > 16,
+    petChanged:
+      Math.abs(before.pet.parent.width - compact.pet.parent.width) > 16 ||
+      Math.abs(before.pet.parent.height - compact.pet.parent.height) > 16,
+  };
+  report.live2dScaleChecks.push(check);
+  const allMetrics = [before.main, before.pet, compact.main, compact.pet, restored.main, restored.pet];
+  const invisible = allMetrics.filter((metric) => metric.visiblePixels <= 80 || metric.canvas.width <= 0 || metric.canvas.height <= 0);
+  if (invisible.length > 0 || !check.mainChanged || !check.petChanged) {
+    step("live2d-scale", "fail", { check, invisible });
+    throw new Error("Live2D scaling validation failed.");
+  }
+  step("live2d-scale", "pass", check);
+}
+
+async function collectLive2DMetrics(page, selector) {
+  return page.evaluate(`(() => {
+    const canvas = document.querySelector(${JSON.stringify(selector)});
+    const parent = canvas?.parentElement;
+    const canvasRect = canvas?.getBoundingClientRect();
+    const parentRect = parent?.getBoundingClientRect();
+    const stats = ${canvasVisiblePixelStatsExpression(selector)};
+    return {
+      selector: ${JSON.stringify(selector)},
+      viewport: { width: window.innerWidth, height: window.innerHeight, devicePixelRatio: window.devicePixelRatio },
+      parent: {
+        width: parentRect ? Math.round(parentRect.width) : 0,
+        height: parentRect ? Math.round(parentRect.height) : 0,
+      },
+      canvas: {
+        width: canvas ? canvas.width : 0,
+        height: canvas ? canvas.height : 0,
+        cssWidth: canvasRect ? Math.round(canvasRect.width) : 0,
+        cssHeight: canvasRect ? Math.round(canvasRect.height) : 0,
+        className: canvas?.className || "",
+      },
+      visiblePixels: stats.visible,
+    };
+  })()`);
+}
+
+async function setPageBounds(page, width, height) {
+  try {
+    const current = await page.send("Browser.getWindowForTarget");
+    if (!current?.windowId) throw new Error("Browser.getWindowForTarget returned no windowId");
+    await page.send("Browser.setWindowBounds", {
+      windowId: current.windowId,
+      bounds: { windowState: "normal", width, height },
+    });
+    return;
+  } catch (error) {
+    step("window-bounds-fallback", "warn", {
+      width,
+      height,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    await page.send("Emulation.setDeviceMetricsOverride", {
+      width,
+      height,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+  }
+}
+
+async function verifyScreenCaptureVoiceConcurrency(page) {
+  const check = {
+    startedAt: new Date().toISOString(),
+    screenFrames: [],
+  };
+  try {
+    const beforeAssistantCount = await assistantMessageCount(page);
+    await ensureScreenReady(page);
+    await selectScreenModeContinuous(page);
+    await clickByTitle(page, "授权麦克风");
+    await waitForEval(page, `document.querySelector(".mic-panel")?.innerText.includes("ready")`, 12_000);
+    await clickLiveAudio(page);
+    await waitForEval(
+      page,
+      `(() => {
+        const text = document.querySelector(".mic-panel")?.innerText || "";
+        return text.includes("streaming") || text.includes("等待语音") || text.includes("检测到语音");
+      })()`,
+      12_000,
+    );
+    for (let index = 0; index < 3; index += 1) {
+      await clickByTitle(page, "上传屏幕帧");
+      await delay(650);
+      check.screenFrames.push({
+        index,
+        panel: await page.evaluate(`document.querySelector(".screen-panel")?.innerText || ""`),
+      });
+    }
+    await screenshot(page, "screen-voice-concurrent-active");
+    if (await isLiveAudioStreaming(page)) {
+      await clickLiveAudio(page);
+    }
+    await waitForEval(
+      page,
+      `(() => [...document.querySelectorAll(".message-assistant")].length > ${beforeAssistantCount})()`,
+      45_000,
+    );
+    check.finishedAt = new Date().toISOString();
+    check.micPanel = await page.evaluate(`document.querySelector(".mic-panel")?.innerText || ""`);
+    check.screenPanel = await page.evaluate(`document.querySelector(".screen-panel")?.innerText || ""`);
+    check.lastFrameInfo = await page.evaluate(`([...document.querySelectorAll(".screen-panel .metric-list div")].find((row) => row.querySelector("dt")?.textContent?.trim() === "最近帧")?.querySelector("dd")?.textContent || "")`);
+    report.concurrencyChecks.push(check);
+    await screenshot(page, "screen-voice-concurrent-done");
+    step("screen-voice-concurrency", "pass", check);
+  } catch (error) {
+    check.error = error instanceof Error ? error.message : String(error);
+    check.micPanel = await page.evaluate(`document.querySelector(".mic-panel")?.innerText || ""`).catch(() => "");
+    check.screenPanel = await page.evaluate(`document.querySelector(".screen-panel")?.innerText || ""`).catch(() => "");
+    report.concurrencyChecks.push(check);
+    await screenshot(page, "screen-voice-concurrency-failed");
+    step("screen-voice-concurrency", "fail", check);
+    throw error;
+  }
+}
+
+async function assistantMessageCount(page) {
+  return page.evaluate(`(() => [...document.querySelectorAll(".message-assistant")].length)()`);
+}
+
+async function isLiveAudioStreaming(page) {
+  return page.evaluate(`(() => {
+    const text = document.querySelector(".mic-panel")?.innerText || "";
+    return text.includes("streaming") || text.includes("等待语音") || text.includes("检测到语音");
+  })()`);
+}
+
 async function waitForTarget(predicate, timeoutMs = 35_000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -324,7 +572,7 @@ class CdpPage {
     await this.send("Runtime.enable");
   }
 
-  send(method, params = {}) {
+  send(method, params = {}, timeoutMs = 30_000) {
     const id = this.nextId++;
     this.socket.send(JSON.stringify({ id, method, params }));
     return new Promise((resolve, reject) => {
@@ -332,7 +580,7 @@ class CdpPage {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`CDP command timed out: ${method}`));
-      }, 30_000);
+      }, timeoutMs);
       this.pending.get(id).timeout = timeout;
     });
   }
@@ -457,9 +705,11 @@ async function fillTextInput(page, text) {
       setter.call(input, ${JSON.stringify(text)});
       if (input._valueTracker) input._valueTracker.setValue(previousValue);
       input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: ${JSON.stringify(text)} }));
+      input.dispatchEvent(new Event("input", { bubbles: true }));
       input.dispatchEvent(new Event("change", { bubbles: true }));
     })()`);
     step("text-input-cdp-fallback", "warn", { before: value, text });
+    await delay(150);
   }
   await waitForEval(page, `document.querySelector(".mic-panel input")?.value.includes(${JSON.stringify(text)})`, 3000);
 }
@@ -530,8 +780,9 @@ async function ensureScreenReady(page) {
 
 async function clickLiveAudio(page) {
   const expression = `[...document.querySelectorAll("button")].find((button) => {
+    if (button === document.querySelector(".mic-panel .toolbar button:nth-of-type(4)")) return true;
     const title = button.title || "";
-    return title.includes("实时语音") || button.className.includes("active");
+    return title.includes("实时语音");
   })`;
   await clickRect(page, await rectFor(page, expression));
 }
@@ -636,12 +887,19 @@ function canvasHasVisiblePixelsExpression(selector) {
 }
 
 async function screenshot(page, name) {
+  if (screenshotsDisabled) return;
   try {
-    const result = await page.send("Page.captureScreenshot", { format: "png", fromSurface: true });
+    const result = await page.send("Page.captureScreenshot", { format: "png", fromSurface: true }, 5000);
     const file = path.join(screenshotDir, `${name}.png`);
     fs.writeFileSync(file, Buffer.from(result.data, "base64"));
+    const bytes = fs.statSync(file).size;
     report.screenshots.push(file);
+    report.screenshotDetails.push({ name, file, bytes, ts: new Date().toISOString() });
+    if (bytes < 1024) {
+      step("screenshot-size", "warn", { name, file, bytes });
+    }
   } catch (error) {
+    screenshotsDisabled = true;
     step("screenshot", "warn", {
       name,
       error: error instanceof Error ? error.message : String(error),
@@ -721,29 +979,36 @@ function makePcmSineBase64(sampleRate, durationSeconds) {
 }
 
 function prepareFakeAudio(target, source) {
+  const noise = {
+    level: fakeNoiseLevel,
+    leadSeconds: fakeNoiseLeadSeconds,
+    tailSeconds: fakeNoiseTailSeconds,
+  };
   if (source) {
     if (!fs.existsSync(source)) throw new Error(`MODVII_TEST_AUDIO_FILE does not exist: ${source}`);
-    const padded = copyWavWithTrailingSilence(source, target, 2.0);
-    if (!padded) fs.copyFileSync(source, target);
+    const rendered = copyWavWithNoiseBed(source, target, noise);
+    if (!rendered) fs.copyFileSync(source, target);
     report.fakeAudio = {
-      mode: padded ? "file-padded-silence" : "file",
+      mode: rendered ? "file-noise-bed" : "file",
       source,
       target,
       bytes: fs.statSync(target).size,
+      noise: rendered ? noise : null,
     };
     return;
   }
 
-  writeFakeAudio(target);
+  writeFakeAudio(target, noise);
   report.fakeAudio = {
-    mode: "generated-tone",
+    mode: "generated-speechlike-noise-bed",
     source: null,
     target,
     bytes: fs.statSync(target).size,
+    noise,
   };
 }
 
-function copyWavWithTrailingSilence(source, target, silenceSeconds) {
+function copyWavWithNoiseBed(source, target, noise) {
   const input = fs.readFileSync(source);
   if (input.length < 44 || input.toString("ascii", 0, 4) !== "RIFF" || input.toString("ascii", 8, 12) !== "WAVE") {
     return false;
@@ -775,25 +1040,46 @@ function copyWavWithTrailingSilence(source, target, silenceSeconds) {
     return false;
   }
 
-  const silenceBytes = Math.ceil(format.sampleRate * format.channels * 2 * silenceSeconds);
-  const silence = Buffer.alloc(silenceBytes);
-  const output = Buffer.concat([input.slice(0, dataChunk.start + dataChunk.size), silence]);
+  const rng = makeDeterministicNoise(0x4d4f4437);
+  const leadSamples = Math.ceil(format.sampleRate * format.channels * noise.leadSeconds);
+  const tailSamples = Math.ceil(format.sampleRate * format.channels * noise.tailSeconds);
+  const leadNoise = makeNoisePcm16Buffer(leadSamples, noise.level, rng);
+  const mixedSource = mixPcm16WithNoise(input.slice(dataChunk.start, dataChunk.start + dataChunk.size), noise.level, rng);
+  const tailNoise = makeNoisePcm16Buffer(tailSamples, noise.level, rng);
+  const outputData = Buffer.concat([leadNoise, mixedSource, tailNoise]);
+  const output = Buffer.concat([input.slice(0, dataChunk.start), outputData]);
   output.writeUInt32LE(output.length - 8, 4);
-  output.writeUInt32LE(dataChunk.size + silence.length, dataChunk.offset + 4);
+  output.writeUInt32LE(outputData.length, dataChunk.offset + 4);
   fs.writeFileSync(target, output);
   return true;
 }
 
-function writeFakeAudio(file) {
+function writeFakeAudio(file, noise) {
   const sampleRate = 48000;
-  const toneSeconds = 1.4;
-  const silenceSeconds = 2.0;
-  const samples = Math.floor(sampleRate * (toneSeconds + silenceSeconds));
+  const speechSeconds = 2.0;
+  const samples = Math.floor(sampleRate * (noise.leadSeconds + speechSeconds + noise.tailSeconds));
   const data = Buffer.alloc(samples * 2);
+  const rng = makeDeterministicNoise(0x51495837);
   for (let i = 0; i < samples; i += 1) {
-    const inTone = i < sampleRate * toneSeconds;
-    const value = inTone ? Math.sin((2 * Math.PI * 520 * i) / sampleRate) * 0.42 : 0;
-    data.writeInt16LE(Math.round(value * 32767), i * 2);
+    const time = i / sampleRate;
+    const local = time - noise.leadSeconds;
+    const inSpeech = local >= 0 && local < speechSeconds;
+    const noiseValue = rng() * noise.level;
+    let speechValue = 0;
+    if (inSpeech) {
+      const attack = Math.min(1, local / 0.08);
+      const release = Math.min(1, (speechSeconds - local) / 0.16);
+      const envelope = Math.sin(Math.PI * Math.min(attack, release) * 0.5);
+      const syllable = 0.6 + 0.4 * Math.max(0, Math.sin(2 * Math.PI * 3.7 * local));
+      const wobble = Math.sin(2 * Math.PI * 4.2 * local) * 22;
+      speechValue =
+        envelope *
+        syllable *
+        (Math.sin((2 * Math.PI * (210 + wobble) * i) / sampleRate) * 0.18 +
+          Math.sin((2 * Math.PI * 420 * i) / sampleRate) * 0.1 +
+          Math.sin((2 * Math.PI * 720 * i) / sampleRate) * 0.045);
+    }
+    data.writeInt16LE(floatToInt16(noiseValue + speechValue), i * 2);
   }
   const header = Buffer.alloc(44);
   header.write("RIFF", 0);
@@ -810,6 +1096,48 @@ function writeFakeAudio(file) {
   header.write("data", 36);
   header.writeUInt32LE(data.length, 40);
   fs.writeFileSync(file, Buffer.concat([header, data]));
+}
+
+function makeDeterministicNoise(seed) {
+  let state = seed >>> 0;
+  return () => {
+    state ^= state << 13;
+    state >>>= 0;
+    state ^= state >>> 17;
+    state >>>= 0;
+    state ^= state << 5;
+    state >>>= 0;
+    return (state / 0xffffffff) * 2 - 1;
+  };
+}
+
+function makeNoisePcm16Buffer(sampleCount, level, rng) {
+  const buffer = Buffer.alloc(sampleCount * 2);
+  for (let index = 0; index < sampleCount; index += 1) {
+    buffer.writeInt16LE(floatToInt16(rng() * level), index * 2);
+  }
+  return buffer;
+}
+
+function mixPcm16WithNoise(input, level, rng) {
+  const output = Buffer.alloc(input.length - (input.length % 2));
+  for (let offset = 0; offset < output.length; offset += 2) {
+    output.writeInt16LE(clampInt16(input.readInt16LE(offset) + Math.round(rng() * level * 32767)), offset);
+  }
+  return output;
+}
+
+function floatToInt16(value) {
+  return clampInt16(Math.round(Math.max(-1, Math.min(1, value)) * 32767));
+}
+
+function clampInt16(value) {
+  return Math.max(-32768, Math.min(32767, value));
+}
+
+function readNumberEnv(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) ? value : fallback;
 }
 
 await mainFlow();

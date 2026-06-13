@@ -1,4 +1,6 @@
 import { AvatarExpression, AvatarMode } from "../../lib/events";
+import { AvatarLayoutSettings } from "../../lib/desktopSettings";
+import { computeAvatarFit } from "./avatarFit";
 
 export interface AvatarController {
   setState: (state: {
@@ -9,6 +11,7 @@ export interface AvatarController {
     lipSync: boolean;
     lipSyncLevel?: number;
   }) => void;
+  setFitOptions?: (options: Partial<AvatarLayoutSettings>) => void;
   dispose: () => void;
 }
 
@@ -37,10 +40,14 @@ export class Live2DAvatarController implements AvatarController {
   private targetMouthOpen = 0;
   private mouthOpen = 0;
   private resizeCleanup: (() => void) | null = null;
+  private fitOptions: Partial<AvatarLayoutSettings> = {};
+  private baseWidth = 0;
+  private baseHeight = 0;
 
   private static cubism4CoreLoaded = false;
 
-  async mount(canvas: HTMLCanvasElement, modelUrl: string) {
+  async mount(canvas: HTMLCanvasElement, modelUrl: string, fitOptions: Partial<AvatarLayoutSettings> = {}) {
+    this.fitOptions = fitOptions;
     const PIXI = await import("pixi.js");
     (window as unknown as { PIXI?: unknown }).PIXI = PIXI;
     patchPixiUrlResolve(PIXI);
@@ -62,6 +69,7 @@ export class Live2DAvatarController implements AvatarController {
       autoStart: true,
     });
     this.model = await Live2DModel.from(modelUrl);
+    this.captureBaseDimensions();
     const stage = (this.app as { stage?: { addChild: (model: unknown) => void } }).stage;
     stage?.addChild(this.model);
     this.initializePartVisibility();
@@ -76,6 +84,12 @@ export class Live2DAvatarController implements AvatarController {
     this.targetMouthOpen = state.lipSync ? Math.min(1, Math.max(0, state.lipSyncLevel ?? 0.18)) : 0;
     this.applyExpression(state.expression);
     this.applyMotion(state.mode, state.motion, state.subtitle);
+  }
+
+  setFitOptions(options: Partial<AvatarLayoutSettings>) {
+    this.fitOptions = options;
+    const view = (this.app as { view?: HTMLCanvasElement } | null)?.view;
+    if (view) this.fitModel(view);
   }
 
   dispose() {
@@ -111,20 +125,35 @@ export class Live2DAvatarController implements AvatarController {
       x?: number;
       y?: number;
     } | null;
-    if (!model?.width || !model.height) return;
+    if (!model) return;
+    if (!this.baseWidth || !this.baseHeight) {
+      this.captureBaseDimensions();
+    }
+    if (!this.baseWidth || !this.baseHeight) return;
     const parent = canvas.parentElement ?? canvas;
     const parentWidth = parent.clientWidth || canvas.clientWidth || 1;
     const parentHeight = parent.clientHeight || canvas.clientHeight || 1;
     const isPet = parent.classList.contains("pet-avatar");
-    const widthFill = isPet ? 0.94 : 0.84;
-    const heightFill = isPet ? 1.08 : 1.02;
-    const yRatio = isPet ? 0.54 : 0.52;
-    const scale = Math.min((parentWidth * widthFill) / model.width, (parentHeight * heightFill) / model.height);
-    model.scale?.set(scale);
+    const fit = computeAvatarFit({
+      mode: isPet ? "pet" : "main",
+      parentWidth,
+      parentHeight,
+      modelWidth: this.baseWidth,
+      modelHeight: this.baseHeight,
+      layout: this.fitOptions,
+    });
+    model.scale?.set(fit.scale);
     model.anchor?.set(0.5, 0.5);
     model.alpha = 1;
-    model.x = parentWidth / 2;
-    model.y = parentHeight * yRatio;
+    model.x = fit.x;
+    model.y = fit.y;
+  }
+
+  private captureBaseDimensions() {
+    const model = this.model as { width?: number; height?: number; scale?: { set: (value: number) => void } } | null;
+    if (!model?.width || !model.height) return;
+    this.baseWidth = model.width;
+    this.baseHeight = model.height;
   }
 
   private installResizeHandler(canvas: HTMLCanvasElement) {

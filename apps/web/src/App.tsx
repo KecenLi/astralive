@@ -1,4 +1,4 @@
-import { Activity, Bot, Moon, Play } from "lucide-react";
+import { Activity, Bot, Moon, Play, Settings } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAppStore } from "./app/store";
@@ -11,8 +11,10 @@ import { DevicePermissionWizard } from "./components/DevicePermissionWizard/Devi
 import { DebugPanel } from "./components/DebugPanel/DebugPanel";
 import { MicPanel } from "./components/MicPanel/MicPanel";
 import { ScreenCapturePanel } from "./components/ScreenCapturePanel/ScreenCapturePanel";
+import { SettingsPanel } from "./components/SettingsPanel/SettingsPanel";
 import { assistantAudioPlayer } from "./features/media/pcmPlayer";
 import { shouldStopRealtimeAudioOnError } from "./features/realtime/serverErrorActions";
+import { useDesktopSettings } from "./hooks/useDesktopSettings";
 import { API_BASE_URL, APP_MODE } from "./lib/env";
 import {
   AudioCapabilities,
@@ -25,6 +27,12 @@ import {
   FramePayload,
 } from "./lib/events";
 import { wsClient } from "./lib/wsClient";
+
+interface SendUserTextOptions {
+  keepConversation?: boolean;
+  proactive?: boolean;
+  visibleText?: string;
+}
 
 interface ServerEventEffects {
   stopRealtimeAudio?: () => void;
@@ -156,6 +164,8 @@ function MainApp() {
   const [voiceResponsePending, setVoiceResponsePending] = useState(false);
   const [conversationMode, setConversationMode] = useState(false);
   const [sessionRestartSignal, setSessionRestartSignal] = useState(0);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const { settings: desktopSettings, patchSettings } = useDesktopSettings();
   const audioTurnActiveRef = useRef(false);
   const voiceResponsePendingRef = useRef(false);
   const conversationModeRef = useRef(false);
@@ -163,6 +173,7 @@ function MainApp() {
   const assistantAudioDoneRef = useRef(false);
   const restartListenTimerRef = useRef(0);
   const reconnectTimerRef = useRef(0);
+  const proactiveTimerRef = useRef(0);
   const reconnectAttemptsRef = useRef(0);
 
   const providerLabel = useMemo(
@@ -359,7 +370,7 @@ function MainApp() {
     });
   }, []);
 
-  const sendUserText = useCallback((text: string, options: { keepConversation?: boolean } = {}) => {
+  const sendUserText = useCallback((text: string, options: SendUserTextOptions = {}) => {
     const actions = useAppStore.getState();
     if (!actions.sessionId) return;
     cancelSpeech();
@@ -374,9 +385,72 @@ function MainApp() {
       setAudioStopSignal((value) => value + 1);
     }
     actions.setUserSpeechDraft("");
-    actions.addMessage("user", text);
-    wsClient.send(createEvent("client.user.text", actions.sessionId, { text }));
+    if (options.proactive) {
+      actions.addMessage("system", options.visibleText || "小七主动发起了一个话题。");
+    } else {
+      actions.addMessage("user", text);
+    }
+    wsClient.send(createEvent("client.user.text", actions.sessionId, { text, proactive: Boolean(options.proactive) }));
   }, [setConversationActive]);
+
+  useEffect(() => {
+    return window.modvii?.pet.onProactiveAccepted?.((payload) => {
+      const prompt =
+        payload.prompt ||
+        "请以 MODVII 小七的身份主动开启一个简短自然的话题，语气轻快，最多两句话。";
+      sendUserText(prompt, {
+        proactive: true,
+        visibleText: payload.text || "桌宠小七接入了一个主动话题。",
+      });
+    }) ?? (() => undefined);
+  }, [sendUserText]);
+
+  useEffect(() => {
+    window.clearTimeout(proactiveTimerRef.current);
+    const proactive = desktopSettings.proactiveChat;
+    if (!proactive.enabled) return () => undefined;
+
+    const schedule = () => {
+      const minMs = proactive.minIntervalMinutes * 60_000;
+      const maxMs = proactive.maxIntervalMinutes * 60_000;
+      const delayMs = minMs + Math.random() * Math.max(0, maxMs - minMs);
+      proactiveTimerRef.current = window.setTimeout(() => {
+        const latest = useAppStore.getState();
+        const busy =
+          latest.connection !== "connected" ||
+          !latest.sessionId ||
+          conversationModeRef.current ||
+          liveAudioActive ||
+          voiceResponsePendingRef.current ||
+          assistantAudioPlayer.isActive() ||
+          latest.status === "thinking" ||
+          latest.status === "speaking";
+
+        if (!busy) {
+          const payload = {
+            text: "我有个小想法，点我聊一下。",
+            prompt:
+              "请以 MODVII 小七的身份主动开启一个简短自然的话题，结合当前上下文但不要假装看到不存在的信息，最多两句话。",
+          };
+          if (proactive.petBubbleFirst && window.modvii?.pet.notify) {
+            void window.modvii.pet.notify(payload).catch(() => {
+              sendUserText(payload.prompt, { proactive: true, visibleText: payload.text });
+            });
+          } else {
+            sendUserText(payload.prompt, { proactive: true, visibleText: payload.text });
+          }
+        }
+        schedule();
+      }, delayMs);
+    };
+
+    schedule();
+    return () => window.clearTimeout(proactiveTimerRef.current);
+  }, [
+    desktopSettings.proactiveChat,
+    liveAudioActive,
+    sendUserText,
+  ]);
 
   const sendAudioChunk = useCallback((payload: AudioChunkPayload) => {
     const actions = useAppStore.getState();
@@ -402,6 +476,7 @@ function MainApp() {
     return () => {
       window.clearTimeout(restartListenTimerRef.current);
       window.clearTimeout(reconnectTimerRef.current);
+      window.clearTimeout(proactiveTimerRef.current);
     };
   }, []);
 
@@ -439,6 +514,10 @@ function MainApp() {
             <Bot size={18} />
             桌宠
           </button>
+          <button className="tool-button subtle" type="button" onClick={() => setSettingsOpen(true)}>
+            <Settings size={18} />
+            设置
+          </button>
         </div>
       </header>
 
@@ -459,6 +538,7 @@ function MainApp() {
             autoStartSignal={deviceStartSignal}
             wakeListenSignal={wakeListenSignal}
             keywordListenSignal={keywordListenSignal}
+            settings={desktopSettings.voice}
             onWake={wake}
             onUserText={sendUserText}
             onAudioChunk={sendAudioChunk}
@@ -469,11 +549,23 @@ function MainApp() {
           <DebugPanel />
         </aside>
         <section className="main-stage">
-          <AvatarStage onInterrupt={interrupt} />
+          <AvatarStage onInterrupt={interrupt} layout={desktopSettings.avatarLayout.main} />
         </section>
       </div>
 
       <ConversationPanel />
+      <SettingsPanel
+        open={settingsOpen}
+        settings={desktopSettings}
+        onClose={() => setSettingsOpen(false)}
+        onPatch={(patch) => {
+          void patchSettings(patch).catch((error) => {
+            useAppStore
+              .getState()
+              .addMessage("system", error instanceof Error ? error.message : "设置保存失败。");
+          });
+        }}
+      />
     </main>
   );
 }

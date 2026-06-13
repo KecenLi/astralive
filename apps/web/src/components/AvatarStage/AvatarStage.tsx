@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { useAppStore } from "../../app/store";
 import { describeLive2DError, Live2DAvatarController } from "../../features/avatar/avatarController";
+import { AvatarLayoutSettings } from "../../lib/desktopSettings";
 import { LIVE2D_MODEL_URL } from "../../lib/env";
 
 const expressionLabel: Record<string, string> = {
@@ -16,13 +17,20 @@ const expressionLabel: Record<string, string> = {
   sleepy: "休眠",
 };
 
-export function AvatarStage({ onInterrupt }: { onInterrupt: () => void }) {
+export function AvatarStage({
+  onInterrupt,
+  layout,
+}: {
+  onInterrupt: () => void;
+  layout?: Partial<AvatarLayoutSettings>;
+}) {
   const avatar = useAppStore((state) => state.avatar);
   const status = useAppStore((state) => state.status);
   const lipSyncLevel = avatar.lip_sync_level ?? 0;
   const isSpeaking = avatar.mode === "speaking" || avatar.lip_sync || lipSyncLevel > 0.02;
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const controllerRef = useRef<Live2DAvatarController | null>(null);
+  const initialLayoutRef = useRef(layout);
   const [isLive2DReady, setIsLive2DReady] = useState(false);
 
   useEffect(() => {
@@ -34,7 +42,7 @@ export function AvatarStage({ onInterrupt }: { onInterrupt: () => void }) {
 
     async function mountLive2D() {
       try {
-        await controller.mount(canvasRef.current as HTMLCanvasElement, LIVE2D_MODEL_URL);
+        await controller.mount(canvasRef.current as HTMLCanvasElement, LIVE2D_MODEL_URL, initialLayoutRef.current);
         if (!disposed) setIsLive2DReady(true);
       } catch (error) {
         console.warn(`Live2D model failed to load; using fallback avatar. ${describeLive2DError(error)}`);
@@ -51,6 +59,10 @@ export function AvatarStage({ onInterrupt }: { onInterrupt: () => void }) {
       setIsLive2DReady(false);
     };
   }, []);
+
+  useEffect(() => {
+    controllerRef.current?.setFitOptions(layout ?? {});
+  }, [layout]);
 
   useEffect(() => {
     controllerRef.current?.setState({

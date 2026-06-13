@@ -8,10 +8,12 @@ import {
   encodePcm16,
   LIVE_INPUT_SAMPLE_RATE,
   PcmRecorder,
+  scalePcm16Buffer,
 } from "../../features/media/pcmRecorder";
 import { TenVadRecorder } from "../../features/media/tenVadRecorder";
 import { LiveAudioGate, LiveAudioGateDecision } from "../../features/media/voiceActivity";
 import { getSpeechRecognition, SpeechRecognition } from "../../features/wakeword/speechRecognition";
+import { DEFAULT_VOICE_SETTINGS, VoiceSettings } from "../../lib/desktopSettings";
 import { extractWakeRequest } from "../../features/wakeword/wakePhrase";
 import { AudioChunkPayload, createId } from "../../lib/events";
 
@@ -19,6 +21,7 @@ interface MicPanelProps {
   autoStartSignal: number;
   wakeListenSignal: number;
   keywordListenSignal: number;
+  settings?: VoiceSettings;
   onWake: () => boolean | void;
   onUserText: (text: string, options?: { keepConversation?: boolean }) => void;
   onAudioChunk: (payload: AudioChunkPayload) => boolean;
@@ -26,13 +29,6 @@ interface MicPanelProps {
   stopSignal: number;
 }
 
-const MIC_AUDIO_CONSTRAINTS: MediaTrackConstraints = {
-  echoCancellation: true,
-  noiseSuppression: true,
-  autoGainControl: true,
-  channelCount: 1,
-  sampleRate: 48000,
-};
 const AUDIO_SEND_CHUNK_BYTES = 120_000;
 
 function publicAssetBase(path: string) {
@@ -55,6 +51,7 @@ export function MicPanel({
   autoStartSignal,
   wakeListenSignal,
   keywordListenSignal,
+  settings: voiceSettings = DEFAULT_VOICE_SETTINGS,
   onWake,
   onUserText,
   onAudioChunk,
@@ -76,6 +73,7 @@ export function MicPanel({
   const startLiveAudioRef = useRef<() => Promise<void>>(async () => undefined);
   const startWakeRecognitionRef = useRef<() => void>(() => undefined);
   const audioSentRef = useRef(false);
+  const traceIdRef = useRef("");
   const startingRef = useRef(false);
   const recognitionWantedRef = useRef(false);
   const recognitionRestartTimerRef = useRef(0);
@@ -160,7 +158,13 @@ export function MicPanel({
     try {
       stopMic();
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: MIC_AUDIO_CONSTRAINTS,
+        audio: {
+          echoCancellation: voiceSettings.echoCancellation,
+          noiseSuppression: voiceSettings.noiseSuppression,
+          autoGainControl: voiceSettings.autoGainControl,
+          channelCount: 1,
+          sampleRate: 48000,
+        },
         video: false,
       });
       streamRef.current = stream;
@@ -184,9 +188,25 @@ export function MicPanel({
       setMicState(error instanceof Error ? error.message : "麦克风不可用");
       return null;
     }
-  }, [stopMic]);
+  }, [stopMic, voiceSettings.autoGainControl, voiceSettings.echoCancellation, voiceSettings.noiseSuppression]);
 
-  const sendAudioChunk = useCallback((buffer: ArrayBuffer, isFinal: boolean) => {
+  const audioMetadata = useCallback(
+    (extra: Record<string, unknown> = {}) => {
+      if (!traceIdRef.current) traceIdRef.current = createId("turn");
+      return {
+        source: "browser_pcm",
+        trace_id: traceIdRef.current,
+        send_mode: voiceSettings.sendMode,
+        vad_provider: voiceSettings.vadProvider,
+        route: voiceSettings.route,
+        client_sent_at: Date.now(),
+        ...extra,
+      };
+    },
+    [voiceSettings.route, voiceSettings.sendMode, voiceSettings.vadProvider],
+  );
+
+  const sendAudioChunk = useCallback((buffer: ArrayBuffer, isFinal: boolean, metadata: Record<string, unknown> = {}) => {
     if (!sessionId) return false;
     const payload: AudioChunkPayload = {
       chunk_id: createId("aud"),
@@ -196,10 +216,10 @@ export function MicPanel({
       encoding: "pcm_s16le",
       data_base64: buffer.byteLength > 0 ? arrayBufferToBase64(buffer) : "",
       is_final: isFinal,
-      metadata: { source: "browser_pcm" },
+      metadata: audioMetadata(metadata),
     };
     return onAudioChunk(payload);
-  }, [onAudioChunk, sessionId]);
+  }, [audioMetadata, onAudioChunk, sessionId]);
 
   const sendAudioTurn = useCallback((buffer: ArrayBuffer) => {
     let sentAudio = false;
@@ -244,6 +264,7 @@ export function MicPanel({
         if (!sent) setMicState("WebSocket 未连接");
       }
       audioSentRef.current = false;
+      traceIdRef.current = "";
       if (hadRecorder || hadTenVad || hadSileroVad) {
         setMicState("ready");
       }
@@ -273,25 +294,62 @@ export function MicPanel({
     }
 
     audioSentRef.current = false;
-    try {
+    if (voiceSettings.vadProvider === "ten") try {
       const tenRecorder = new TenVadRecorder({
-        threshold: 0.62,
-        rmsFloor: 0.006,
-        debounceOn: 3,
-        debounceOff: 72,
-        preRollMs: 480,
-        initialSilenceMs: 10_000,
-        maxTurnMs: 24_000,
-        minSpeechMs: 360,
+        threshold: voiceSettings.tenThreshold,
+        rmsFloor: voiceSettings.tenRmsFloor,
+        debounceOn: voiceSettings.tenDebounceOn,
+        debounceOff: voiceSettings.tenDebounceOff,
+        preRollMs: voiceSettings.preRollMs,
+        initialSilenceMs: voiceSettings.initialSilenceMs,
+        maxTurnMs: voiceSettings.maxTurnMs,
+        minSpeechMs: voiceSettings.minSpeechMs,
+        inputGain: voiceSettings.inputGain,
+        streamChunks: voiceSettings.sendMode === "streaming_chunks",
         onSpeechStart: () => {
+          traceIdRef.current = createId("turn");
           setMicState("TEN VAD: 检测到语音");
-          console.warn("MODVII mic TEN VAD speech start");
+          console.warn(`MODVII mic TEN VAD speech start ${JSON.stringify({
+            traceId: traceIdRef.current,
+            sendMode: voiceSettings.sendMode,
+            route: voiceSettings.route,
+          })}`);
+        },
+        onSpeechChunk: (pcm) => {
+          let sentChunks = 0;
+          for (const chunk of splitPcm16Buffer(pcm)) {
+            const sent = sendAudioChunk(chunk, false, { source: "ten_vad_stream" });
+            if (!sent) {
+              setMicState("WebSocket 未连接");
+              return;
+            }
+            sentChunks += 1;
+            audioSentRef.current = true;
+          }
+          if (sentChunks > 0) setMicState("TEN VAD: streaming");
         },
         onSpeechEnd: (pcm, stats) => {
           if (!tenVadRecorderRef.current) return;
-          const result = sendAudioTurn(pcm);
+          const result =
+            voiceSettings.sendMode === "streaming_chunks" && audioSentRef.current
+              ? {
+                  sentAudio: true,
+                  sentFinal: sendAudioChunk(new ArrayBuffer(0), true, {
+                    source: "ten_vad_stream",
+                    vad_stats: stats,
+                  }),
+                  sentChunks: 0,
+                  totalBytes: pcm.byteLength,
+                }
+              : sendAudioTurn(pcm);
           audioSentRef.current = audioSentRef.current || result.sentAudio;
-          console.warn(`MODVII mic TEN VAD speech end ${JSON.stringify({ ...stats, ...result })}`);
+          console.warn(`MODVII mic TEN VAD speech end ${JSON.stringify({
+            traceId: traceIdRef.current,
+            sendMode: voiceSettings.sendMode,
+            route: voiceSettings.route,
+            ...stats,
+            ...result,
+          })}`);
           if (!result.sentAudio || !result.sentFinal) {
             setMicState("WebSocket 未连接");
           } else {
@@ -327,18 +385,18 @@ export function MicPanel({
       console.warn("MODVII mic TEN VAD unavailable; falling back to Silero", error);
     }
 
-    try {
+    if (voiceSettings.vadProvider !== "rms") try {
       const vad = await MicVAD.new({
         model: "v5",
         baseAssetPath: publicAssetBase("vendor/vad/"),
         onnxWASMBasePath: publicAssetBase("vendor/onnxruntime/"),
         startOnLoad: false,
         processorType: "ScriptProcessor",
-        positiveSpeechThreshold: 0.35,
-        negativeSpeechThreshold: 0.22,
-        redemptionMs: 1300,
-        preSpeechPadMs: 700,
-        minSpeechMs: 280,
+        positiveSpeechThreshold: voiceSettings.sileroPositiveThreshold,
+        negativeSpeechThreshold: voiceSettings.sileroNegativeThreshold,
+        redemptionMs: voiceSettings.silenceAfterSpeechMs,
+        preSpeechPadMs: voiceSettings.preRollMs,
+        minSpeechMs: voiceSettings.minSpeechMs,
         submitUserSpeechOnPause: true,
         getStream: async () => stream,
         pauseStream: async () => undefined,
@@ -352,7 +410,7 @@ export function MicPanel({
         },
         onSpeechEnd: (audio) => {
           if (!sileroVadRef.current) return;
-          const pcm = encodePcm16(audio);
+          const pcm = scalePcm16Buffer(encodePcm16(audio), voiceSettings.inputGain);
           const result = pcm.byteLength > 0
             ? sendAudioTurn(pcm)
             : { sentAudio: false, sentFinal: false, sentChunks: 0, totalBytes: 0 };
@@ -389,18 +447,19 @@ export function MicPanel({
 
     audioGateRef.current = new LiveAudioGate({
       sampleRate: LIVE_INPUT_SAMPLE_RATE,
-      startThreshold: 0.006,
-      continueThreshold: 0.0035,
+      startThreshold: Math.max(0.002, voiceSettings.tenRmsFloor),
+      continueThreshold: Math.max(0.0015, voiceSettings.tenRmsFloor * 0.6),
       minContinueThreshold: 0.0015,
       noiseMargin: 0.0025,
       peakDropRatio: 0.2,
-      initialSilenceMs: 10000,
-      silenceAfterSpeechMs: 1300,
-      maxTurnMs: 22000,
+      initialSilenceMs: voiceSettings.initialSilenceMs,
+      silenceAfterSpeechMs: voiceSettings.silenceAfterSpeechMs,
+      maxTurnMs: voiceSettings.maxTurnMs,
     });
     audioSentRef.current = false;
     const recorder = new PcmRecorder({
       outputSampleRate: LIVE_INPUT_SAMPLE_RATE,
+      inputGain: voiceSettings.inputGain,
       onChunk: (chunk) => {
         const gate = audioGateRef.current;
         const decision: LiveAudioGateDecision = gate

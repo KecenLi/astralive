@@ -61,6 +61,8 @@ class Settings(BaseSettings):
     cosyvoice3_repo_dir: str = str(PROJECT_ROOT / "third_party" / "CosyVoice")
     cosyvoice3_model_dir: str = str(PROJECT_ROOT / "models" / "Fun-CosyVoice3-0.5B")
     cosyvoice3_script: str = str(PROJECT_ROOT / "scripts" / "cosyvoice3_synth.py")
+    cosyvoice3_worker_enabled: bool = True
+    cosyvoice3_worker_script: str = str(PROJECT_ROOT / "scripts" / "cosyvoice3_worker.py")
     cosyvoice3_prompt_audio: str = ""
     cosyvoice3_prompt_text: str = (
         "You are MODVII, a warm and lively bilingual desktop companion.<|endofprompt|>"
@@ -78,6 +80,7 @@ class Settings(BaseSettings):
     audio_chunk_max_bytes: int = 262144
     audio_turn_max_bytes: int = 2097152
     audio_transcription_language: str = "zh-CN"
+    audio_route: str = "asr_first"
     realtime_input_idle_timeout_seconds: float = 8.0
     realtime_turn_timeout_seconds: float = 8.0
     realtime_recovery_asr_timeout_seconds: float = 6.0

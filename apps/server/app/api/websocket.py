@@ -317,7 +317,7 @@ async def _handle_event(
             await _send_error(websocket, session.session_id, "invalid_audio_chunk", str(exc), send_lock)
             return response_task
         session.cost_meter.bytes_uploaded += len(audio_bytes)
-        if audio.has_realtime and audio.can_stream_realtime:
+        if audio.has_realtime and audio.can_stream_realtime and not _prefer_asr_first(payload, settings):
             return await _handle_realtime_audio_chunk(
                 websocket,
                 session,
@@ -355,7 +355,7 @@ async def _handle_event(
             return response_task
 
         _cancel_task(response_task)
-        if audio.has_realtime:
+        if audio.has_realtime and not _prefer_asr_first(payload, settings):
             if not _is_realtime_pcm(payload, settings):
                 await _send_error(
                     websocket,
@@ -382,6 +382,27 @@ async def _handle_event(
             task.add_done_callback(_log_task_exception)
             return task
 
+        trace_id = _audio_trace_id(payload)
+        await _send(
+            websocket,
+            avatar.state_event(session.session_id, "thinking", "curious", "正在识别语音。"),
+            send_lock,
+        )
+        await _send(
+            websocket,
+            make_event(
+                "debug.log",
+                session.session_id,
+                {
+                    "message": "Audio turn using ASR-first route.",
+                    "trace_id": trace_id,
+                    "bytes": len(turn_audio),
+                    "send_mode": payload.metadata.get("send_mode"),
+                    "vad_provider": payload.metadata.get("vad_provider"),
+                },
+            ),
+            send_lock,
+        )
         asr_result = await audio.transcribe(turn_audio, _audio_metadata(payload))
         session.cost_meter.asr_calls += 1
         await _send(
@@ -389,7 +410,7 @@ async def _handle_event(
             make_event(
                 "asr.transcript.final",
                 session.session_id,
-                {"text": asr_result.text, "confidence": asr_result.confidence},
+                {"text": asr_result.text, "confidence": asr_result.confidence, "trace_id": trace_id},
             ),
             send_lock,
         )
@@ -1382,7 +1403,7 @@ def _visual_provider_cooldown_seconds(detail: str, failure_count: int) -> float:
         or "quota" in lowered
         or "rate limit" in lowered
     ):
-        return 60.0
+        return min(300.0, 90.0 * max(1, failure_count))
     if "timeout" in lowered or "timed out" in lowered:
         return min(30.0, 8.0 * max(1, failure_count))
     return min(30.0, 4.0 * (2 ** min(max(0, failure_count - 1), 3)))
@@ -1631,6 +1652,16 @@ async def _send_error(
 
 def _audio_metadata(payload: AudioChunkPayload) -> dict:
     return payload.model_dump(exclude={"data_base64"})
+
+
+def _audio_trace_id(payload: AudioChunkPayload) -> str:
+    trace_id = payload.metadata.get("trace_id")
+    return str(trace_id) if trace_id else ""
+
+
+def _prefer_asr_first(payload: AudioChunkPayload, settings: Settings) -> bool:
+    route = str(payload.metadata.get("route") or settings.audio_route or "asr_first").lower()
+    return route != "live_first"
 
 
 def _is_realtime_pcm(payload: AudioChunkPayload, settings: Settings) -> bool:

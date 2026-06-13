@@ -44,6 +44,28 @@ export function encodePcm16(input: Float32Array) {
   return buffer;
 }
 
+export function applyFloatGain(input: Float32Array, gain = 1) {
+  if (gain === 1) return input;
+  const output = new Float32Array(input.length);
+  for (let index = 0; index < input.length; index += 1) {
+    output[index] = Math.max(-1, Math.min(1, (input[index] ?? 0) * gain));
+  }
+  return output;
+}
+
+export function scalePcm16Buffer(buffer: ArrayBuffer, gain = 1) {
+  if (gain === 1 || buffer.byteLength === 0) return buffer;
+  const view = new DataView(buffer);
+  const output = new ArrayBuffer(buffer.byteLength);
+  const outputView = new DataView(output);
+  for (let offset = 0; offset + 1 < buffer.byteLength; offset += 2) {
+    const sample = view.getInt16(offset, true);
+    const scaled = Math.max(-32768, Math.min(32767, Math.round(sample * gain)));
+    outputView.setInt16(offset, scaled, true);
+  }
+  return output;
+}
+
 export function arrayBufferToBase64(buffer: ArrayBuffer) {
   const bytes = new Uint8Array(buffer);
   const chunkSize = 0x8000;
@@ -59,6 +81,7 @@ interface PcmRecorderOptions {
   onChunk: (chunk: ArrayBuffer) => void;
   onError?: (error: Error) => void;
   outputSampleRate?: number;
+  inputGain?: number;
 }
 
 export class PcmRecorder {
@@ -97,7 +120,7 @@ export class PcmRecorder {
           audioContext.sampleRate,
           this.options.outputSampleRate ?? LIVE_INPUT_SAMPLE_RATE,
         );
-        this.options.onChunk(encodePcm16(downsampled));
+        this.options.onChunk(encodePcm16(applyFloatGain(downsampled, this.options.inputGain ?? 1)));
       } catch (error) {
         this.options.onError?.(error instanceof Error ? error : new Error(String(error)));
       }

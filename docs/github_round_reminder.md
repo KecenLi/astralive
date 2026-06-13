@@ -1,5 +1,13 @@
 # GitHub Round Reminder
 
+## Current Repository
+
+- Local project root: `D:\assist ai`
+- Remote: `origin` -> `https://github.com/KecenLi/astralive.git`
+- Target branch: `main`
+- Local docs note: `.gitignore` ignores `README.md` and `docs/` for private/local records, but `docs/github_round_reminder.md` is already tracked. Check `git ls-files` and `git status -sb` before assuming a Markdown change will be pushed.
+- Do not force-add ignored local records, API logs, Live2D assets, installers, `.env`, ADC files, or tokens unless the user explicitly asks for that exact publication.
+
 每轮工作结束前，Agent 需要执行：
 
 1. 检查 `git status -sb`，确认没有意外文件或敏感配置进入待提交范围。
@@ -15,6 +23,22 @@
 - If a round has multiple independent tracks, Agent 0 should proactively delegate bounded side work to subagents, especially GitHub/source research, UI-only work, test triage, packaging smoke checks, or documentation updates.
 - Delegated work must have explicit file ownership or a read-only question. Subagents must not revert user changes or main-agent changes, and their results must be reviewed before integration.
 - Every round that uses subagents should record which agent did what, what files changed, and any residual risk before pushing.
+
+## Subagent Usage Rules
+
+- Use subagents only for bounded work that can be reviewed independently: source research, GitHub issue/PR inspection, UI-only passes, test log triage, packaging smoke checks, or documentation updates.
+- Do not delegate final integration ownership, secret handling, commit creation, push decisions, or broad refactors that can conflict with another active worker.
+- Every delegation must state the objective, allowed files or read-only scope, expected output, validation command if any, and the rule to not revert user or other-worker changes.
+- The main worker must review subagent output before using it, reconcile conflicts, and document any files changed by subagents in the round notes.
+- If no subagent is used, no extra record is needed beyond final response; if a subagent is used, record name/scope/result before pushing.
+
+## Push Checklist
+
+- Run `git status -sb` and inspect `git diff --stat`.
+- Run relevant checks for touched areas; for documentation-only rounds, spell out that no code tests were needed.
+- Run `scripts\guard-public-tree.ps1` before publishing any round that touched assets, secrets, docs, installers, or config.
+- Push only after tests pass or after documenting a deliberate skip approved by the user.
+- Final response must say branch, commit, push state, changed files, and verification result.
 
 ## 2026-06-14 Round Notes
 
@@ -57,3 +81,11 @@
 - Current desktop log finding: microphone VAD did send final audio, but Gemini Live timed out waiting for streaming response and the Vertex fallback then hit HTTP 429 / resource exhausted. The fix must make provider failure fast and visible instead of leaving the app silent.
 - This round uses subagent `Noether` for UI/desktop-pet-only work. Agent 0 keeps ownership of MicPanel state, backend visual cooldown, tests, packaging, commit, and push.
 - GitHub comparison sources checked this round include Open-LLM-VTuber, RealtimeSTT, Silero VAD, openWakeWord, LLM-Live2D-Desktop-Assitant, and waifu-companion. MODVII should follow their proven effort level: local wake/VAD gating, provider fallback/cooldown, transparent pet mode, clickable avatar interactions, model/expression mapping, and explicit fallback states.
+
+## 2026-06-14 Real Noise / ASR-First Round Notes
+
+- The desktop interaction verifier now uses a continuous noise bed: silence regions are low-level deterministic noise, not zeroes. Current verified noise fixture: `file-noise-bed`, level `0.012`, lead `0.8s`, tail `2.8s`.
+- Real API smoke before ASR fix failed because `ASR_PROVIDER=vertex_ai` routed 16k PCM into Gemini Live ASR and timed out. MODVII now defaults PCM ASR to batch transcription: PCM -> WAV -> Vertex/Gemini `generateContent`; Live ASR is only explicit `metadata.asr_mode=live`.
+- Real API smoke after ASR fix passed with Vertex ASR/LLM, concurrent screen frames, and CosyVoice3 TTS. Observed latency was still high: ASR final about `16.1s`, text final about `19.2s`, audio done about `76.1s`.
+- CosyVoice3 now has a persistent worker (`scripts/cosyvoice3_worker.py`) so repeated local TTS calls reuse the loaded model. First call can still be slow; subsequent calls should be measured separately before judging local TTS viability.
+- External voice pipeline references checked: RealtimeSTT (`https://github.com/KoljaB/RealtimeSTT`), FunASR (`https://github.com/modelscope/FunASR`), SenseVoice (`https://github.com/FunAudioLLM/SenseVoice`), sherpa-onnx (`https://github.com/k2-fsa/sherpa-onnx`), Open-LLM-VTuber (`https://github.com/Open-LLM-VTuber/Open-LLM-VTuber`). Practical conclusion: keep MODVII provider-swappable, prefer local or near-region ASR for wake/VAD final turns, and avoid Gemini Live as the only speech endpoint.

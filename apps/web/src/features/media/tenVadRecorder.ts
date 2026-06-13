@@ -1,7 +1,7 @@
 import { createVoiceDetector } from "defuss-vad/tenvad-web";
 import type { VoiceDetector, VoiceDetectorResult } from "defuss-vad/types";
 
-import { downsampleBuffer, LIVE_INPUT_SAMPLE_RATE } from "./pcmRecorder";
+import { applyFloatGain, downsampleBuffer, LIVE_INPUT_SAMPLE_RATE } from "./pcmRecorder";
 
 const FRAME_SAMPLES = 256;
 const DEFAULT_PRE_ROLL_MS = 320;
@@ -11,6 +11,7 @@ const DEFAULT_MIN_SPEECH_MS = 260;
 
 interface TenVadRecorderOptions {
   onSpeechStart?: () => void;
+  onSpeechChunk?: (audio: ArrayBuffer) => void;
   onSpeechEnd: (audio: ArrayBuffer, stats: TenVadTurnStats) => void;
   onVADMisfire?: (stats: TenVadTurnStats) => void;
   onNoSpeechTimeout?: () => void;
@@ -24,6 +25,8 @@ interface TenVadRecorderOptions {
   initialSilenceMs?: number;
   maxTurnMs?: number;
   minSpeechMs?: number;
+  inputGain?: number;
+  streamChunks?: boolean;
 }
 
 export interface TenVadTurnStats {
@@ -78,6 +81,8 @@ export class TenVadRecorder {
   private lastVoiceAt = 0;
   private preRoll: Int16Array[] = [];
   private segment: Int16Array[] = [];
+  private streamedAudio = false;
+  private speechSampleCount = 0;
   private frames = 0;
   private speechFrames = 0;
   private peakProbability = 0;
@@ -169,7 +174,7 @@ export class TenVadRecorder {
     while (offset + FRAME_SAMPLES <= combined.length && this.active) {
       const floatFrame = combined.slice(offset, offset + FRAME_SAMPLES);
       offset += FRAME_SAMPLES;
-      await this.processFrame(detector, floatToInt16Frame(floatFrame));
+      await this.processFrame(detector, floatToInt16Frame(applyFloatGain(floatFrame, this.options.inputGain ?? 1)));
     }
     this.residual = combined.slice(offset);
   }
@@ -184,7 +189,15 @@ export class TenVadRecorder {
       if (result.onVoiceStart) {
         this.speechStarted = true;
         this.lastVoiceAt = now;
-        this.segment = [...this.preRoll, frame];
+        const initialFrames = [...this.preRoll, frame];
+        this.speechSampleCount = initialFrames.reduce((sum, item) => sum + item.length, 0);
+        if (this.options.streamChunks && this.options.onSpeechChunk) {
+          this.options.onSpeechChunk(concatInt16Frames(initialFrames));
+          this.segment = [];
+          this.streamedAudio = true;
+        } else {
+          this.segment = initialFrames;
+        }
         this.preRoll = [];
         this.options.onSpeechStart?.();
         return;
@@ -196,12 +209,18 @@ export class TenVadRecorder {
       return;
     }
 
-    this.segment.push(frame);
+    this.speechSampleCount += frame.length;
+    if (this.options.streamChunks && this.options.onSpeechChunk) {
+      this.options.onSpeechChunk(concatInt16Frames([frame]));
+      this.streamedAudio = true;
+    } else {
+      this.segment.push(frame);
+    }
     if (result.isVoiceStable || result.isVoice) {
       this.lastVoiceAt = now;
     }
 
-    const durationMs = (this.segment.length * FRAME_SAMPLES / LIVE_INPUT_SAMPLE_RATE) * 1000;
+    const durationMs = (this.speechSampleCount / LIVE_INPUT_SAMPLE_RATE) * 1000;
     if (result.onVoiceEnd) {
       this.finishTurn("ten_vad_end", durationMs);
       return;
@@ -213,7 +232,7 @@ export class TenVadRecorder {
 
   private finishTurn(reason: TenVadTurnStats["reason"], durationMs: number) {
     const stats = this.stats(reason, durationMs);
-    const audio = concatInt16Frames(this.segment);
+    const audio = this.streamedAudio ? new ArrayBuffer(0) : concatInt16Frames(this.segment);
     this.resetTurn();
     if (durationMs < this.minSpeechMs) {
       this.options.onVADMisfire?.(stats);
@@ -256,6 +275,8 @@ export class TenVadRecorder {
     this.lastVoiceAt = 0;
     this.preRoll = [];
     this.segment = [];
+    this.streamedAudio = false;
+    this.speechSampleCount = 0;
     this.frames = 0;
     this.speechFrames = 0;
     this.peakProbability = 0;

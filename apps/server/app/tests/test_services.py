@@ -400,6 +400,45 @@ class StubGenAIClient:
         self.models = StubGenAIModels(mime)
 
 
+class StubTextGenAIModels:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def generate_content(self, **kwargs):
+        self.calls.append(kwargs)
+        return {"candidates": [{"content": {"parts": [{"text": "小七听到了"}]}}]}
+
+
+class StubTextGenAIClient:
+    def __init__(self) -> None:
+        self.models = StubTextGenAIModels()
+
+
+async def test_google_genai_asr_batches_pcm_as_wav_by_default() -> None:
+    settings = Settings(asr_provider="vertex_ai", vertex_ai_asr_model="gemini-live", vertex_ai_llm_model="gemini-batch")
+    client = StubTextGenAIClient()
+    provider = GoogleGenAIASRProvider(settings, mode="vertex_ai", client=client)
+
+    async def fail_live(*_args, **_kwargs):
+        raise AssertionError("default ASR-first PCM should not use Live ASR")
+
+    provider._transcribe_live = fail_live  # type: ignore[method-assign]
+    result = await provider.transcribe(
+        b"\x01\x00" * 320,
+        metadata={"mime": "audio/pcm;rate=16000", "encoding": "pcm_s16le", "sample_rate": 16000, "channels": 1},
+    )
+
+    assert result.text == "小七听到了"
+    assert result.raw["model"] == "gemini-batch"
+    assert result.raw["mime"] == "audio/wav"
+    call = client.models.calls[0]
+    assert call["model"] == "gemini-batch"
+    audio_part = call["contents"][1]
+    inline_data = getattr(audio_part, "inline_data", None) or getattr(audio_part, "inlineData", None)
+    assert getattr(inline_data, "mime_type", None) == "audio/wav"
+    assert getattr(inline_data, "data", b"").startswith(b"RIFF")
+
+
 async def test_google_genai_tts_extracts_inline_audio() -> None:
     settings = Settings(tts_provider="vertex_ai")
     client = StubGenAIClient()
@@ -459,6 +498,7 @@ with wave.open(args.output, "wb") as wav:
         data_dir=tmp_path / "data",
         cosyvoice3_python=sys.executable,
         cosyvoice3_script=str(script),
+        cosyvoice3_worker_enabled=False,
         cosyvoice3_repo_dir=str(repo_dir),
         cosyvoice3_model_dir=str(model_dir),
     )

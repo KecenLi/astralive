@@ -1,4 +1,4 @@
-import { app, BrowserWindow, desktopCapturer, ipcMain, screen, session } from "electron";
+import { app, BrowserWindow, desktopCapturer, ipcMain, Menu, screen, session } from "electron";
 import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
@@ -11,6 +11,50 @@ interface DesktopSettings {
   autostartEnabled?: boolean;
   captureMode?: "low_fps" | "continuous";
   petEnabled?: boolean;
+  avatarLayout?: {
+    main?: AvatarLayoutSettings;
+    pet?: AvatarLayoutSettings;
+  };
+  voice?: VoiceSettings;
+  proactiveChat?: ProactiveChatSettings;
+}
+
+interface AvatarLayoutSettings {
+  scale?: number;
+  offsetX?: number;
+  offsetY?: number;
+  maxHeightPx?: number;
+  widthFill?: number;
+  heightFill?: number;
+  yRatio?: number;
+}
+
+interface VoiceSettings {
+  vadProvider?: "ten" | "silero" | "rms";
+  sendMode?: "streaming_chunks" | "buffered_turn";
+  route?: "asr_first" | "live_first";
+  inputGain?: number;
+  tenThreshold?: number;
+  tenRmsFloor?: number;
+  tenDebounceOn?: number;
+  tenDebounceOff?: number;
+  sileroPositiveThreshold?: number;
+  sileroNegativeThreshold?: number;
+  silenceAfterSpeechMs?: number;
+  minSpeechMs?: number;
+  preRollMs?: number;
+  initialSilenceMs?: number;
+  maxTurnMs?: number;
+  echoCancellation?: boolean;
+  noiseSuppression?: boolean;
+  autoGainControl?: boolean;
+}
+
+interface ProactiveChatSettings {
+  enabled?: boolean;
+  minIntervalMinutes?: number;
+  maxIntervalMinutes?: number;
+  petBubbleFirst?: boolean;
 }
 
 let mainWindow: BrowserWindow | null = null;
@@ -64,10 +108,81 @@ function settingsPath() {
 
 function readSettings(): DesktopSettings {
   try {
-    return JSON.parse(fs.readFileSync(settingsPath(), "utf8")) as DesktopSettings;
+    return normalizeSettings(JSON.parse(fs.readFileSync(settingsPath(), "utf8")) as DesktopSettings);
   } catch {
-    return {};
+    return normalizeSettings({});
   }
+}
+
+function clampNumber(value: unknown, fallback: number, min: number, max: number) {
+  const numberValue = typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  return Math.min(max, Math.max(min, numberValue));
+}
+
+function boolValue(value: unknown, fallback: boolean) {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function avatarDefaults(mode: "main" | "pet"): Required<AvatarLayoutSettings> {
+  return mode === "pet"
+    ? { scale: 0.96, offsetX: 0, offsetY: 6, maxHeightPx: 470, widthFill: 0.92, heightFill: 0.98, yRatio: 0.54 }
+    : { scale: 0.86, offsetX: 0, offsetY: 24, maxHeightPx: 760, widthFill: 0.7, heightFill: 0.88, yRatio: 0.54 };
+}
+
+function normalizeAvatarLayout(value: AvatarLayoutSettings | undefined, mode: "main" | "pet") {
+  const defaults = avatarDefaults(mode);
+  return {
+    scale: clampNumber(value?.scale, defaults.scale, 0.15, 2.25),
+    offsetX: clampNumber(value?.offsetX, defaults.offsetX, -900, 900),
+    offsetY: clampNumber(value?.offsetY, defaults.offsetY, -900, 900),
+    maxHeightPx: clampNumber(value?.maxHeightPx, defaults.maxHeightPx, 180, 1600),
+    widthFill: clampNumber(value?.widthFill, defaults.widthFill, 0.2, 1.25),
+    heightFill: clampNumber(value?.heightFill, defaults.heightFill, 0.2, 1.25),
+    yRatio: clampNumber(value?.yRatio, defaults.yRatio, 0.05, 0.95),
+  };
+}
+
+function normalizeSettings(value: DesktopSettings): Required<DesktopSettings> {
+  const voice = value.voice ?? {};
+  const proactive = value.proactiveChat ?? {};
+  const minIntervalMinutes = clampNumber(proactive.minIntervalMinutes, 6, 0.05, 240);
+  return {
+    firstRunComplete: boolValue(value.firstRunComplete, false),
+    autostartAsked: boolValue(value.autostartAsked, false),
+    autostartEnabled: boolValue(value.autostartEnabled, false),
+    captureMode: value.captureMode === "continuous" ? "continuous" : "low_fps",
+    petEnabled: boolValue(value.petEnabled, true),
+    avatarLayout: {
+      main: normalizeAvatarLayout(value.avatarLayout?.main, "main"),
+      pet: normalizeAvatarLayout(value.avatarLayout?.pet, "pet"),
+    },
+    voice: {
+      vadProvider: voice.vadProvider === "silero" || voice.vadProvider === "rms" ? voice.vadProvider : "ten",
+      sendMode: voice.sendMode === "buffered_turn" ? "buffered_turn" : "streaming_chunks",
+      route: voice.route === "live_first" ? "live_first" : "asr_first",
+      inputGain: clampNumber(voice.inputGain, 1.15, 0.2, 4),
+      tenThreshold: clampNumber(voice.tenThreshold, 0.58, 0.05, 0.95),
+      tenRmsFloor: clampNumber(voice.tenRmsFloor, 0.0045, 0.0005, 0.05),
+      tenDebounceOn: Math.round(clampNumber(voice.tenDebounceOn, 3, 1, 12)),
+      tenDebounceOff: Math.round(clampNumber(voice.tenDebounceOff, 34, 8, 120)),
+      sileroPositiveThreshold: clampNumber(voice.sileroPositiveThreshold, 0.32, 0.05, 0.95),
+      sileroNegativeThreshold: clampNumber(voice.sileroNegativeThreshold, 0.2, 0.01, 0.9),
+      silenceAfterSpeechMs: Math.round(clampNumber(voice.silenceAfterSpeechMs, 950, 250, 3000)),
+      minSpeechMs: Math.round(clampNumber(voice.minSpeechMs, 280, 120, 2000)),
+      preRollMs: Math.round(clampNumber(voice.preRollMs, 520, 0, 1600)),
+      initialSilenceMs: Math.round(clampNumber(voice.initialSilenceMs, 10000, 1500, 30000)),
+      maxTurnMs: Math.round(clampNumber(voice.maxTurnMs, 24000, 5000, 60000)),
+      echoCancellation: boolValue(voice.echoCancellation, true),
+      noiseSuppression: boolValue(voice.noiseSuppression, true),
+      autoGainControl: boolValue(voice.autoGainControl, true),
+    },
+    proactiveChat: {
+      enabled: boolValue(proactive.enabled, true),
+      minIntervalMinutes,
+      maxIntervalMinutes: clampNumber(proactive.maxIntervalMinutes, 15, minIntervalMinutes, 480),
+      petBubbleFirst: boolValue(proactive.petBubbleFirst, true),
+    },
+  };
 }
 
 function parseDotenv(filePath: string): Record<string, string> {
@@ -136,9 +251,21 @@ function findDotenvFile() {
 }
 
 function writeSettings(patch: Partial<DesktopSettings>): DesktopSettings {
-  const next = { ...readSettings(), ...patch };
+  const current = readSettings();
+  const next = normalizeSettings({
+    ...current,
+    ...patch,
+    avatarLayout: {
+      main: { ...current.avatarLayout?.main, ...patch.avatarLayout?.main },
+      pet: { ...current.avatarLayout?.pet, ...patch.avatarLayout?.pet },
+    },
+    voice: { ...current.voice, ...patch.voice },
+    proactiveChat: { ...current.proactiveChat, ...patch.proactiveChat },
+  });
   fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
   fs.writeFileSync(settingsPath(), JSON.stringify(next, null, 2), "utf8");
+  mainWindow?.webContents.send("settings:changed", next);
+  petWindow?.webContents.send("settings:changed", next);
   return next;
 }
 
@@ -274,6 +401,7 @@ async function createWindow() {
     minWidth: 960,
     minHeight: 680,
     title: "MODVII",
+    autoHideMenuBar: true,
     backgroundColor: "#edf0eb",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -282,6 +410,8 @@ async function createWindow() {
       sandbox: false,
     },
   });
+  mainWindow.setMenu(null);
+  mainWindow.setMenuBarVisibility(false);
   mainWindow.webContents.on("did-fail-load", (_event, code, description, validatedUrl) => {
     log("Renderer load failed", { code, description, validatedUrl });
   });
@@ -383,7 +513,9 @@ async function writeRendererSmokeReport() {
             rootChildren: root ? root.childElementCount : -1,
             bodyText: document.body.innerText.slice(0, 1000),
             scripts: Array.from(document.scripts).map((script) => script.src),
-            stylesheets: Array.from(document.styleSheets).length
+            stylesheets: Array.from(document.styleSheets).length,
+            menuBarVisible: ${mainWindow ? "false" : "null"},
+            applicationMenuPresent: ${Menu.getApplicationMenu() ? "true" : "false"}
           });
         }, 1200);
       })
@@ -449,6 +581,21 @@ function registerIpc() {
     writeSettings({ petEnabled: true });
     return { visible: true };
   });
+  ipcMain.handle("pet:notify", async (_event, payload: { text?: string; prompt?: string }) => {
+    await createPetWindow();
+    petWindow?.webContents.send("pet:notify", {
+      text: payload?.text || "我有个小想法，点我聊一下。",
+      prompt: payload?.prompt || "",
+    });
+    return { visible: Boolean(petWindow && !petWindow.isDestroyed() && petWindow.isVisible()) };
+  });
+  ipcMain.handle("pet:acceptProactive", (_event, payload: { text?: string; prompt?: string }) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show();
+      mainWindow.webContents.send("pet:proactiveAccepted", payload);
+    }
+    return true;
+  });
 }
 
 const gotLock = app.requestSingleInstanceLock();
@@ -469,6 +616,7 @@ if (!gotLock) {
   });
 
   app.whenReady().then(async () => {
+    Menu.setApplicationMenu(null);
     log("App ready", {
       packaged: app.isPackaged,
       version: app.getVersion(),

@@ -1,3 +1,9 @@
+import {
+  DesktopSettings,
+  DesktopSettingsPatch,
+  normalizeDesktopSettings,
+} from "./desktopSettings";
+
 export interface DesktopScreenSource {
   id: string;
   name: string;
@@ -8,14 +14,6 @@ export interface DesktopPermissionResult {
   camera: boolean;
   screen: boolean;
   errors: Record<string, string>;
-}
-
-export interface DesktopSettings {
-  firstRunComplete?: boolean;
-  autostartAsked?: boolean;
-  autostartEnabled?: boolean;
-  captureMode?: "low_fps" | "continuous";
-  petEnabled?: boolean;
 }
 
 export interface ModviiDesktopBridge {
@@ -32,13 +30,18 @@ export interface ModviiDesktopBridge {
   };
   settings: {
     get: () => Promise<DesktopSettings>;
-    set: (settings: Partial<DesktopSettings>) => Promise<DesktopSettings>;
+    set: (settings: DesktopSettingsPatch) => Promise<DesktopSettings>;
+    onChanged?: (handler: (settings: DesktopSettings) => void) => () => void;
   };
   pet: {
     getState: () => Promise<{ visible: boolean }>;
     show: () => Promise<{ visible: boolean }>;
     hide: () => Promise<{ visible: boolean }>;
     toggle: () => Promise<{ visible: boolean }>;
+    notify?: (payload: { text?: string; prompt?: string }) => Promise<{ visible: boolean }>;
+    acceptProactive?: (payload: { text?: string; prompt?: string }) => Promise<boolean>;
+    onNotify?: (handler: (payload: { text?: string; prompt?: string }) => void) => () => void;
+    onProactiveAccepted?: (handler: (payload: { text?: string; prompt?: string }) => void) => () => void;
   };
 }
 
@@ -53,11 +56,15 @@ export function isDesktopRuntime() {
 }
 
 export async function getDesktopSettings(): Promise<DesktopSettings> {
-  if (!window.modvii) return {};
-  return window.modvii.settings.get();
+  if (!window.modvii) return normalizeDesktopSettings({});
+  return normalizeDesktopSettings(await window.modvii.settings.get());
 }
 
-export async function setDesktopSettings(settings: Partial<DesktopSettings>) {
-  if (!window.modvii) return settings;
-  return window.modvii.settings.set(settings);
+export async function setDesktopSettings(settings: DesktopSettingsPatch) {
+  if (!window.modvii) return normalizeDesktopSettings(settings as Partial<DesktopSettings>);
+  return normalizeDesktopSettings(await window.modvii.settings.set(settings));
+}
+
+export function onDesktopSettingsChanged(handler: (settings: DesktopSettings) => void) {
+  return window.modvii?.settings.onChanged?.((settings) => handler(normalizeDesktopSettings(settings))) ?? (() => undefined);
 }

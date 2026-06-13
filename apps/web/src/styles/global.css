@@ -587,7 +587,7 @@ select {
   padding: 8px;
   overflow: hidden;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 6px;
 }
 
@@ -620,6 +620,14 @@ select {
   overflow-wrap: anywhere;
 }
 
+.conversation-panel .visual-summary {
+  order: 3;
+}
+
+.conversation-panel .message-list {
+  order: 2;
+}
+
 .message-list {
   min-height: 0;
   overflow: auto;
@@ -631,6 +639,103 @@ select {
   border: 2px solid #808080;
   border-color: #404040 #ffffff #ffffff #404040;
   box-shadow: inset 1px 1px 0 #808080;
+}
+
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.settings-window {
+  width: min(880px, calc(100vw - 36px));
+  max-height: min(760px, calc(100vh - 36px));
+  overflow: hidden;
+  background: #d4d0c8;
+  border: 2px solid #808080;
+  border-color: #ffffff #404040 #404040 #ffffff;
+  box-shadow:
+    inset 1px 1px 0 #f7f7f7,
+    4px 4px 0 rgba(0, 0, 0, 0.35);
+}
+
+.settings-title {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 6px 4px 9px;
+  background: linear-gradient(90deg, #0a246a 0%, #3a6ea5 100%);
+  border-bottom: 2px solid #404040;
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.settings-title span,
+.settings-group legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.settings-grid {
+  max-height: calc(min(760px, 100vh - 36px) - 38px);
+  overflow: auto;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 10px;
+}
+
+.settings-group {
+  min-width: 0;
+  margin: 0;
+  padding: 10px;
+  border: 2px solid #808080;
+  border-color: #ffffff #808080 #808080 #ffffff;
+  background: #eeeeee;
+}
+
+.settings-group legend {
+  padding: 0 4px;
+  font-weight: 700;
+}
+
+.settings-group label {
+  min-height: 32px;
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+  font-size: 13px;
+}
+
+.settings-group input[type="number"],
+.settings-group select {
+  width: 100%;
+  min-height: 28px;
+  border: 2px solid #808080;
+  border-color: #404040 #ffffff #ffffff #404040;
+  border-radius: 0;
+  background: #ffffff;
+  color: #111111;
+  padding: 0 6px;
+  box-shadow: inset 1px 1px 0 #808080;
+}
+
+.settings-group .check-row {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.settings-group .check-row input {
+  width: auto;
 }
 
 .message {

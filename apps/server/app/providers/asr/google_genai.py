@@ -1,5 +1,7 @@
 import asyncio
+import io
 import time
+import wave
 from typing import Any, Literal
 
 from app.config import Settings
@@ -29,7 +31,9 @@ class GoogleGenAIASRProvider(ASRProvider):
         mime = _normalize_audio_mime(
             str(metadata.get("mime") or f"audio/pcm;rate={self.settings.audio_input_sample_rate}")
         )
-        if _is_live_pcm_mime(mime, self.settings.audio_input_sample_rate):
+        if str(metadata.get("asr_mode") or "").lower() == "live" and _is_live_pcm_mime(
+            mime, self.settings.audio_input_sample_rate
+        ):
             return await self._transcribe_live(audio_bytes, mime)
         return await asyncio.to_thread(self._transcribe_sync, audio_bytes, {**metadata, "mime": mime})
 
@@ -45,6 +49,12 @@ class GoogleGenAIASRProvider(ASRProvider):
         mime = _normalize_audio_mime(
             str(metadata.get("mime") or f"audio/pcm;rate={self.settings.audio_input_sample_rate}")
         )
+        upload_bytes = audio_bytes
+        if _is_pcm_mime(mime):
+            sample_rate = _sample_rate_from_mime(mime) or int(metadata.get("sample_rate") or self.settings.audio_input_sample_rate)
+            channels = int(metadata.get("channels") or self.settings.audio_channels)
+            upload_bytes = _pcm16_to_wav(audio_bytes, sample_rate, channels)
+            mime = "audio/wav"
         prompt = (
             "请将这段音频转写为原语言文本。只返回转写内容，不要添加解释。"
             f"如果听不清，请返回空字符串。语言优先按 {self.settings.audio_transcription_language} 处理。"
@@ -53,7 +63,7 @@ class GoogleGenAIASRProvider(ASRProvider):
             model=self.batch_model,
             contents=[
                 types.Part.from_text(text=prompt),
-                types.Part.from_bytes(data=audio_bytes, mime_type=mime),
+                types.Part.from_bytes(data=upload_bytes, mime_type=mime),
             ],
         )
         text = _extract_text(response).strip()
@@ -157,3 +167,29 @@ def _normalize_audio_mime(mime: str) -> str:
 def _is_live_pcm_mime(mime: str, sample_rate: int) -> bool:
     normalized = mime.lower().replace(" ", "")
     return normalized.startswith("audio/pcm") and f"rate={sample_rate}" in normalized
+
+
+def _is_pcm_mime(mime: str) -> bool:
+    normalized = mime.lower().replace(" ", "")
+    return normalized.startswith("audio/pcm")
+
+
+def _sample_rate_from_mime(mime: str) -> int | None:
+    normalized = mime.lower().replace(" ", "")
+    if "rate=" not in normalized:
+        return None
+    raw = normalized.split("rate=", 1)[1].split(";", 1)[0]
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _pcm16_to_wav(audio_bytes: bytes, sample_rate: int, channels: int) -> bytes:
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav_file:
+        wav_file.setnchannels(max(1, channels))
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(max(8000, sample_rate))
+        wav_file.writeframes(audio_bytes)
+    return buffer.getvalue()

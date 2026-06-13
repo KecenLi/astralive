@@ -70,6 +70,7 @@ COSYVOICE3_TIMEOUT_SECONDS=120
 
 - 后端 provider: `apps/server/app/providers/tts/cosyvoice3.py`
 - 合成桥接脚本: `scripts/cosyvoice3_synth.py`
+- 常驻合成 worker: `scripts/cosyvoice3_worker.py`
 - 切换方式: `TTS_PROVIDER=cosyvoice3`
 - 输出格式: `audio/wav`
 - 前端播放: WebAudio 解码 WAV 后计算音量包络，驱动 Live2D `ParamMouthOpenY`
@@ -79,4 +80,5 @@ COSYVOICE3_TIMEOUT_SECONDS=120
 - 模型、CosyVoice 仓库、venv 都在 `.gitignore` 内，不进入公开仓库。
 - 官方 `CosyVoice-ttsfrd` 是可选资源；不安装时官方说明会使用 wetext。
 - 当前机器的 RTX 5080 Laptop 是 `sm_120`，CosyVoice requirements 固定的 PyTorch 2.3.1 CUDA 轮子不支持该架构，所以默认 `COSYVOICE3_DEVICE=cpu`。要用 GPU，需要先换成支持该架构的 PyTorch/CUDA 组合，再改成 `COSYVOICE3_DEVICE=cuda`。
-- 首次合成会慢，后续如需实时低延迟，应把 `cosyvoice3_synth.py` 升级为常驻本地 TTS 服务，避免每轮重新加载模型。
+- 默认 `COSYVOICE3_WORKER_ENABLED=true` 会启动常驻 worker，避免每轮重新加载模型。第一次合成仍会包含模型加载时间；第二轮以后应明显快于旧的单次脚本模式。
+- 如果 worker 异常，可临时设 `COSYVOICE3_WORKER_ENABLED=false` 回到旧的单次桥接脚本，便于排查环境问题。
