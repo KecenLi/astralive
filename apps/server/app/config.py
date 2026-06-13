@@ -70,6 +70,7 @@ class Settings(BaseSettings):
     audio_transcription_language: str = "zh-CN"
     realtime_input_idle_timeout_seconds: float = 8.0
     realtime_turn_timeout_seconds: float = 30.0
+    realtime_recovery_asr_timeout_seconds: float = 12.0
 
     wake_word: str = "小七"
     persona_prompt: str = (

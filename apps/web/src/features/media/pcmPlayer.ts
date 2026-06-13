@@ -69,7 +69,9 @@ export class AssistantAudioPlayer {
   private nextStartTime = 0;
   private sources = new Set<AudioBufferSourceNode>();
   private encodedAudio = new Set<HTMLAudioElement>();
+  private pendingPlays = 0;
   private lipSyncSink: LipSyncSink | null = null;
+  private idleCallback: (() => void) | null = null;
   private lipSyncTimers = new Set<number>();
   private encodedLipSyncTimers = new Map<HTMLAudioElement, number>();
 
@@ -78,17 +80,34 @@ export class AssistantAudioPlayer {
     this.reportLipSync(0);
   }
 
+  setIdleCallback(callback: (() => void) | null) {
+    this.idleCallback = callback;
+  }
+
+  isActive() {
+    return this.hasActiveAudio();
+  }
+
   async play(payload: AssistantAudioPayload) {
     if (!payload.data_base64) return;
-    if (
-      payload.encoding === "pcm_s16le" ||
-      payload.mime.startsWith("audio/pcm") ||
-      payload.mime.startsWith("audio/l16")
-    ) {
-      await this.playPcm(payload);
-      return;
+    this.pendingPlays += 1;
+    try {
+      if (
+        payload.encoding === "pcm_s16le" ||
+        payload.mime.startsWith("audio/pcm") ||
+        payload.mime.startsWith("audio/l16")
+      ) {
+        await this.playPcm(payload);
+        return;
+      }
+      await this.playEncoded(payload);
+    } finally {
+      this.pendingPlays = Math.max(0, this.pendingPlays - 1);
+      if (!this.hasActiveAudio()) {
+        this.reportLipSync(0);
+        this.idleCallback?.();
+      }
     }
-    await this.playEncoded(payload);
   }
 
   reset() {
@@ -100,6 +119,7 @@ export class AssistantAudioPlayer {
       }
     });
     this.sources.clear();
+    this.pendingPlays = 0;
     this.clearLipSyncTimers();
     this.encodedAudio.forEach((audio) => {
       audio.pause();
@@ -134,6 +154,7 @@ export class AssistantAudioPlayer {
       this.sources.delete(source);
       if (!this.hasActiveAudio()) {
         this.reportLipSync(0);
+        this.idleCallback?.();
       }
     };
     this.sources.add(source);
@@ -167,6 +188,7 @@ export class AssistantAudioPlayer {
       this.sources.delete(source);
       if (!this.hasActiveAudio()) {
         this.reportLipSync(0);
+        this.idleCallback?.();
       }
     };
     this.sources.add(source);
@@ -191,6 +213,7 @@ export class AssistantAudioPlayer {
       this.stopEncodedLipSync(audio);
       if (!this.hasActiveAudio()) {
         this.reportLipSync(0);
+        this.idleCallback?.();
       }
     };
     this.encodedAudio.add(audio);
@@ -264,7 +287,7 @@ export class AssistantAudioPlayer {
   }
 
   private hasActiveAudio() {
-    return this.sources.size > 0 || this.encodedAudio.size > 0;
+    return this.pendingPlays > 0 || this.sources.size > 0 || this.encodedAudio.size > 0;
   }
 
   private reportLipSync(level: number) {

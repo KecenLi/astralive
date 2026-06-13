@@ -243,14 +243,14 @@ export function MicPanel({
     audioSentRef.current = false;
     try {
       const tenRecorder = new TenVadRecorder({
-        threshold: 0.72,
-        rmsFloor: 0.012,
-        debounceOn: 4,
-        debounceOff: 42,
-        preRollMs: 320,
+        threshold: 0.62,
+        rmsFloor: 0.006,
+        debounceOn: 3,
+        debounceOff: 72,
+        preRollMs: 480,
         initialSilenceMs: 10_000,
         maxTurnMs: 24_000,
-        minSpeechMs: 260,
+        minSpeechMs: 360,
         onSpeechStart: () => {
           setMicState("TEN VAD: 检测到语音");
           console.warn("MODVII mic TEN VAD speech start");

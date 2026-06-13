@@ -191,6 +191,20 @@ async def _handle_event(
         return None
 
     if event.type == "client.media.frame":
+        if _should_defer_visual_frame(session, audio_runtime):
+            await _send(
+                websocket,
+                make_event(
+                    "debug.log",
+                    session.session_id,
+                    {
+                        "message": "Visual frame skipped while a voice response is in progress.",
+                        "status": session.status,
+                    },
+                ),
+                send_lock,
+            )
+            return response_task
         frame = FramePayload.model_validate(event.payload)
         result, from_cache = await vision.analyze_frame(
             session,
@@ -546,9 +560,20 @@ async def _run_dialogue_response(
     send_lock: asyncio.Lock,
 ) -> None:
     try:
+        session.status = "thinking"
+        session.response_in_progress = True
+        await _send(
+            websocket,
+            avatar.state_event(session.session_id, "thinking", "thinking", "正在组织回答。"),
+            send_lock,
+        )
+        await _send(
+            websocket,
+            make_event("server.session.state", session.session_id, _session_payload(session, settings)),
+            send_lock,
+        )
         result = await dialogue.reply(session, user_text)
         session.status = "speaking"
-        session.response_in_progress = True
         await _send(
             websocket,
             avatar.state_event(session.session_id, "thinking", result.emotion, "正在组织回答。"),
@@ -868,8 +893,24 @@ async def _recover_realtime_stream_failure(
     )
     try:
         asr_audio, asr_metadata = _fallback_asr_payload(fallback_audio, fallback_metadata, settings)
-        asr_result = await audio.transcribe(asr_audio, asr_metadata)
+        asr_result = await asyncio.wait_for(
+            audio.transcribe(asr_audio, asr_metadata),
+            timeout=settings.realtime_recovery_asr_timeout_seconds,
+        )
         session.cost_meter.asr_calls += 1
+    except asyncio.TimeoutError as exc:
+        logger.exception("realtime fallback ASR timed out")
+        await _send_realtime_failure_notice(
+            websocket,
+            session,
+            avatar,
+            settings,
+            started,
+            send_lock,
+            "我听到你说话了，但备用识别超时了。请再说一次，或者先用文本输入。",
+            exc,
+        )
+        return True
     except Exception as exc:  # noqa: BLE001
         logger.exception("realtime fallback ASR failed")
         await _send_realtime_failure_notice(
@@ -1039,6 +1080,15 @@ def _pcm16_to_wav(audio_bytes: bytes, sample_rate: int, channels: int) -> bytes:
         wav_file.setframerate(sample_rate)
         wav_file.writeframes(audio_bytes)
     return buffer.getvalue()
+
+
+def _should_defer_visual_frame(session: SessionState, audio_runtime: AudioRuntimeState) -> bool:
+    return (
+        session.response_in_progress
+        or session.status in {"thinking", "speaking"}
+        or audio_runtime.stream is not None
+        or bool(audio_runtime.receive_task and not audio_runtime.receive_task.done())
+    )
 
 
 async def _run_realtime_audio_response(

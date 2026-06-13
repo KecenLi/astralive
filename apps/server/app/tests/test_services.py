@@ -638,6 +638,18 @@ class TimeoutRealtimeStream(OrderSensitiveRealtimeStream):
         yield RealtimeStreamEvent(input_text="late", turn_complete=True)
 
 
+class SlowAsrStreamingAudioService(StubStreamingAudioService):
+    async def transcribe(self, audio_bytes: bytes, metadata: dict | None = None) -> ASRResult:
+        self.transcribe_calls.append((audio_bytes, metadata))
+        await asyncio.sleep(60)
+        return ASRResult(text="late", confidence=0.1, is_final=True)
+
+
+class RaisingVisionService:
+    async def analyze_frame(self, *args, **kwargs):
+        raise AssertionError("vision should be deferred during voice response")
+
+
 class StubWebSocket:
     def __init__(self) -> None:
         self.events: list[dict] = []
@@ -904,6 +916,119 @@ async def test_realtime_stream_timeout_falls_back_to_batch_asr_dialogue() -> Non
     assert session.response_in_progress is False
     assert runtime.stream is None
     assert runtime.stream_buffer == bytearray()
+
+
+async def test_realtime_stream_timeout_recovery_asr_has_own_timeout() -> None:
+    stream = TimeoutRealtimeStream()
+    websocket = StubWebSocket()
+    runtime = AudioRuntimeState()
+    session = SessionState(session_id="test_session")
+    settings = Settings(
+        realtime_provider="mock",
+        llm_provider="mock",
+        tts_provider="mock",
+        realtime_turn_timeout_seconds=0.001,
+        realtime_recovery_asr_timeout_seconds=0.001,
+    )
+    send_lock = asyncio.Lock()
+    audio = SlowAsrStreamingAudioService(stream)
+    dialogue = DialogueService(ProviderRegistry(settings).llm(), settings)
+    avatar = AvatarService()
+    first_payload = AudioChunkPayload(
+        chunk_id="chunk_1",
+        mime="audio/pcm;rate=16000",
+        sample_rate=16000,
+        channels=1,
+        encoding="pcm_s16le",
+        data_base64="",
+        is_final=False,
+    )
+
+    await _handle_realtime_audio_chunk(
+        websocket,  # type: ignore[arg-type]
+        session,
+        audio,  # type: ignore[arg-type]
+        dialogue,
+        avatar,
+        settings,
+        runtime,
+        first_payload,
+        b"\x00\x00" * 160,
+        0.0,
+        send_lock,
+        None,
+    )
+    task = await _handle_realtime_audio_chunk(
+        websocket,  # type: ignore[arg-type]
+        session,
+        audio,  # type: ignore[arg-type]
+        dialogue,
+        avatar,
+        settings,
+        runtime,
+        first_payload.model_copy(update={"chunk_id": "chunk_final", "is_final": True}),
+        b"",
+        0.0,
+        send_lock,
+        None,
+    )
+    if task:
+        await asyncio.wait_for(task, timeout=1)
+
+    text_final_events = [event for event in websocket.events if event["type"] == "assistant.text.final"]
+    audio_done_events = [event for event in websocket.events if event["type"] == "assistant.audio.done"]
+
+    assert audio.transcribe_calls
+    assert "备用识别超时" in text_final_events[-1]["payload"]["text"]
+    assert audio_done_events[-1]["payload"]["chunks"] == 0
+    assert session.response_in_progress is False
+    assert session.status == "listening"
+    assert runtime.stream is None
+
+
+async def test_visual_frame_is_deferred_during_voice_response() -> None:
+    websocket = StubWebSocket()
+    runtime = AudioRuntimeState()
+    session = SessionState(session_id="test_session", response_in_progress=True, status="thinking")
+    settings = Settings(realtime_provider="mock", llm_provider="mock", tts_provider="mock")
+    send_lock = asyncio.Lock()
+    dialogue = DialogueService(ProviderRegistry(settings).llm(), settings)
+    avatar = AvatarService()
+    audio = StubStreamingAudioService(OrderSensitiveRealtimeStream())
+
+    task = await _handle_event(
+        websocket,  # type: ignore[arg-type]
+        EventEnvelope(
+            type="client.media.frame",
+            session_id=session.session_id,
+            payload=FramePayload(
+                frame_id="frame_deferred",
+                width=640,
+                height=360,
+                capture_reason="screen_low_fps",
+                scene_hash="deferred",
+                data_base64="abc123",
+            ).model_dump(),
+        ),
+        session,
+        RaisingVisionService(),  # type: ignore[arg-type]
+        dialogue,
+        audio,  # type: ignore[arg-type]
+        avatar,
+        WakeService(),
+        settings,
+        runtime,
+        0.0,
+        send_lock,
+        None,
+    )
+
+    assert task is None
+    assert any(
+        event["type"] == "debug.log" and "Visual frame skipped" in event["payload"]["message"]
+        for event in websocket.events
+    )
+    assert session.cost_meter.vision_calls == 0
 
 
 def test_realtime_tts_fallback_text_is_bounded() -> None:

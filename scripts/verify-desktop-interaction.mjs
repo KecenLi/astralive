@@ -201,7 +201,7 @@ async function verifyFakeMicRealtime(page) {
       page,
       `(() => {
         const text = document.querySelector(".mic-panel")?.innerText || "";
-        return text.includes("live streaming") || text.includes("等待语音");
+        return text.includes("live streaming") || text.includes("等待语音") || text.includes("检测到语音");
       })()`,
       12_000,
     );
@@ -680,9 +680,10 @@ function makePcmSineBase64(sampleRate, durationSeconds) {
 function prepareFakeAudio(target, source) {
   if (source) {
     if (!fs.existsSync(source)) throw new Error(`MODVII_TEST_AUDIO_FILE does not exist: ${source}`);
-    fs.copyFileSync(source, target);
+    const padded = copyWavWithTrailingSilence(source, target, 2.0);
+    if (!padded) fs.copyFileSync(source, target);
     report.fakeAudio = {
-      mode: "file",
+      mode: padded ? "file-padded-silence" : "file",
       source,
       target,
       bytes: fs.statSync(target).size,
@@ -699,10 +700,51 @@ function prepareFakeAudio(target, source) {
   };
 }
 
+function copyWavWithTrailingSilence(source, target, silenceSeconds) {
+  const input = fs.readFileSync(source);
+  if (input.length < 44 || input.toString("ascii", 0, 4) !== "RIFF" || input.toString("ascii", 8, 12) !== "WAVE") {
+    return false;
+  }
+
+  let offset = 12;
+  let format = null;
+  let dataChunk = null;
+  while (offset + 8 <= input.length) {
+    const id = input.toString("ascii", offset, offset + 4);
+    const size = input.readUInt32LE(offset + 4);
+    const start = offset + 8;
+    const end = start + size;
+    if (end > input.length) break;
+    if (id === "fmt " && size >= 16) {
+      format = {
+        channels: input.readUInt16LE(start + 2),
+        sampleRate: input.readUInt32LE(start + 4),
+        bitsPerSample: input.readUInt16LE(start + 14),
+      };
+    }
+    if (id === "data") {
+      dataChunk = { offset, start, size };
+      break;
+    }
+    offset = end + (size % 2);
+  }
+  if (!format || !dataChunk || format.bitsPerSample !== 16 || format.channels < 1 || format.sampleRate < 8000) {
+    return false;
+  }
+
+  const silenceBytes = Math.ceil(format.sampleRate * format.channels * 2 * silenceSeconds);
+  const silence = Buffer.alloc(silenceBytes);
+  const output = Buffer.concat([input.slice(0, dataChunk.start + dataChunk.size), silence]);
+  output.writeUInt32LE(output.length - 8, 4);
+  output.writeUInt32LE(dataChunk.size + silence.length, dataChunk.offset + 4);
+  fs.writeFileSync(target, output);
+  return true;
+}
+
 function writeFakeAudio(file) {
   const sampleRate = 48000;
   const toneSeconds = 1.4;
-  const silenceSeconds = 0.8;
+  const silenceSeconds = 2.0;
   const samples = Math.floor(sampleRate * (toneSeconds + silenceSeconds));
   const data = Buffer.alloc(samples * 2);
   for (let i = 0; i < samples; i += 1) {
