@@ -30,14 +30,28 @@ function speak(text: string) {
 export function DesktopPet() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const controllerRef = useRef<Live2DAvatarController | null>(null);
+  const bubbleTimerRef = useRef<number | null>(null);
   const [ready, setReady] = useState(false);
   const [index, setIndex] = useState(0);
+  const [bubbleVisible, setBubbleVisible] = useState(false);
   const state = petStates[index % petStates.length];
   const label = useMemo(() => `${state.subtitle} 点击互动`, [state.subtitle]);
+  const bubbleText = useMemo(
+    () => `${state.subtitle} ${ready ? "Live2D 已就绪" : "备用形象"}，拖动顶部区域可移动。`,
+    [ready, state.subtitle],
+  );
 
   useEffect(() => {
     document.body.classList.add("pet-body");
-    return () => document.body.classList.remove("pet-body");
+    return () => {
+      document.body.classList.remove("pet-body");
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (bubbleTimerRef.current !== null) window.clearTimeout(bubbleTimerRef.current);
+    };
   }, []);
 
   useEffect(() => {
@@ -78,6 +92,12 @@ export function DesktopPet() {
   function interact() {
     const next = (index + 1) % petStates.length;
     setIndex(next);
+    setBubbleVisible(true);
+    if (bubbleTimerRef.current !== null) window.clearTimeout(bubbleTimerRef.current);
+    bubbleTimerRef.current = window.setTimeout(() => {
+      setBubbleVisible(false);
+      bubbleTimerRef.current = null;
+    }, 2600);
     speak(petStates[next].subtitle);
   }
 
@@ -101,10 +121,12 @@ export function DesktopPet() {
           <span className="avatar-mouth" />
         </span>
       </button>
-      <div className="pet-bubble" data-testid="pet-bubble">
-        <MessageCircle size={15} />
-        <span>{state.subtitle}</span>
-      </div>
+      {bubbleVisible && (
+        <div className="pet-bubble" data-testid="pet-bubble" aria-live="polite">
+          <MessageCircle size={15} />
+          <span>{bubbleText}</span>
+        </div>
+      )}
     </main>
   );
 }

@@ -762,6 +762,26 @@ class ControlledVisionProvider(VisionProvider):
         self.release.setdefault(frame_id, asyncio.Event()).set()
 
 
+class RateLimitedVisionProvider(VisionProvider):
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def analyze(self, data: VisionInput) -> VisionResult:
+        frame_id = str(data.metadata["frame_id"])
+        self.calls.append(frame_id)
+        raise RuntimeError("Vertex AI request failed with HTTP 429: RESOURCE_EXHAUSTED")
+
+
+async def wait_for_started_frame(provider: ControlledVisionProvider, frame_id: str) -> None:
+    for _ in range(100):
+        event = provider.started.get(frame_id)
+        if event is not None:
+            await asyncio.wait_for(event.wait(), timeout=1)
+            return
+        await asyncio.sleep(0.01)
+    pytest.fail(f"visual frame {frame_id} did not start")
+
+
 class StubWebSocket:
     def __init__(self) -> None:
         self.events: list[dict] = []
@@ -1270,14 +1290,14 @@ async def test_visual_scheduler_keeps_latest_pending_screen_frame() -> None:
             None,
         )
 
-    await asyncio.wait_for(provider.started["frame_1"].wait(), timeout=1)
+    await wait_for_started_frame(provider, "frame_1")
     assert "frame_2" not in provider.started
     assert len(visual_runtime.pending) == 1
     assert next(iter(visual_runtime.pending.values())).frame.frame_id == "frame_3"
 
     provider.release_frame("frame_1")
     await asyncio.sleep(0)
-    await asyncio.wait_for(provider.started["frame_3"].wait(), timeout=1)
+    await wait_for_started_frame(provider, "frame_3")
     frame_3_task = visual_runtime.task
     assert frame_3_task is not None
     provider.release_frame("frame_3")
@@ -1343,8 +1363,8 @@ async def test_visual_scheduler_can_run_screen_and_camera_in_parallel() -> None:
             None,
         )
 
-    await asyncio.wait_for(provider.started["screen_1"].wait(), timeout=1)
-    await asyncio.wait_for(provider.started["camera_1"].wait(), timeout=1)
+    await wait_for_started_frame(provider, "screen_1")
+    await wait_for_started_frame(provider, "camera_1")
     assert len(visual_runtime.active_tasks) == 2
 
     active_tasks = list(visual_runtime.active_tasks)
@@ -1363,6 +1383,67 @@ async def test_visual_scheduler_can_run_screen_and_camera_in_parallel() -> None:
 
     assert set(provider.calls) == {"screen_1", "camera_1"}
     assert len([event for event in websocket.events if event["type"] == "vision.summary"]) == 2
+
+
+async def test_visual_provider_429_cools_down_subsequent_frames() -> None:
+    websocket = StubWebSocket()
+    runtime = AudioRuntimeState()
+    visual_runtime = VisualRuntimeState()
+    session = SessionState(session_id="test_session", status="listening")
+    settings = Settings(realtime_provider="mock", llm_provider="mock", tts_provider="mock")
+    send_lock = asyncio.Lock()
+    provider = RateLimitedVisionProvider()
+    vision = VisionService(provider, settings)
+    dialogue = DialogueService(ProviderRegistry(settings).llm(), settings)
+    avatar = AvatarService()
+    audio = StubStreamingAudioService(OrderSensitiveRealtimeStream())
+
+    for frame_id in ("frame_429", "frame_skipped"):
+        await _handle_event(
+            websocket,  # type: ignore[arg-type]
+            EventEnvelope(
+                type="client.media.frame",
+                session_id=session.session_id,
+                payload=FramePayload(
+                    frame_id=frame_id,
+                    width=640,
+                    height=360,
+                    capture_reason="screen_low_fps",
+                    scene_hash=frame_id,
+                    data_base64="abc123",
+                ).model_dump(),
+            ),
+            session,
+            vision,
+            dialogue,
+            audio,  # type: ignore[arg-type]
+            avatar,
+            WakeService(),
+            settings,
+            runtime,
+            visual_runtime,
+            0.0,
+            send_lock,
+            None,
+        )
+        if visual_runtime.task:
+            await asyncio.wait_for(visual_runtime.task, timeout=1)
+
+    cooldown_logs = [
+        event
+        for event in websocket.events
+        if event["type"] == "debug.log" and "cooling down" in event["payload"]["message"]
+    ]
+    skipped_logs = [
+        event
+        for event in websocket.events
+        if event["type"] == "debug.log" and "provider is cooling down" in event["payload"]["message"]
+    ]
+    assert provider.calls == ["frame_429"]
+    assert visual_runtime.provider_failure_count == 1
+    assert visual_runtime.provider_cooldown_until > time.perf_counter()
+    assert cooldown_logs
+    assert skipped_logs
 
 
 def test_realtime_tts_fallback_text_is_bounded() -> None:

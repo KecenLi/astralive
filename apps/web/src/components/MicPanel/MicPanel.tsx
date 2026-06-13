@@ -18,8 +18,9 @@ import { AudioChunkPayload, createId } from "../../lib/events";
 interface MicPanelProps {
   autoStartSignal: number;
   wakeListenSignal: number;
-  onWake: () => void;
-  onUserText: (text: string) => void;
+  keywordListenSignal: number;
+  onWake: () => boolean | void;
+  onUserText: (text: string, options?: { keepConversation?: boolean }) => void;
   onAudioChunk: (payload: AudioChunkPayload) => boolean;
   onLiveStateChange?: (active: boolean) => void;
   stopSignal: number;
@@ -53,6 +54,7 @@ function splitPcm16Buffer(buffer: ArrayBuffer) {
 export function MicPanel({
   autoStartSignal,
   wakeListenSignal,
+  keywordListenSignal,
   onWake,
   onUserText,
   onAudioChunk,
@@ -72,8 +74,15 @@ export function MicPanel({
   const tenVadRecorderRef = useRef<TenVadRecorder | null>(null);
   const sileroVadRef = useRef<MicVAD | null>(null);
   const startLiveAudioRef = useRef<() => Promise<void>>(async () => undefined);
+  const startWakeRecognitionRef = useRef<() => void>(() => undefined);
   const audioSentRef = useRef(false);
   const startingRef = useRef(false);
+  const recognitionWantedRef = useRef(false);
+  const recognitionRestartTimerRef = useRef(0);
+  const pendingWakeTimerRef = useRef(0);
+  const pendingWakeRequestRef = useRef("");
+  const wakePendingRef = useRef(false);
+  const handledWakeTranscriptRef = useRef("");
   const rafRef = useRef(0);
   const wakeAtRef = useRef(0);
   const [recognitionActive, setRecognitionActive] = useState(false);
@@ -123,6 +132,29 @@ export function MicPanel({
     audioContextRef.current = null;
     setLevel(0);
   }, []);
+
+  function stopWakeRecognition() {
+    recognitionWantedRef.current = false;
+    wakePendingRef.current = false;
+    pendingWakeRequestRef.current = "";
+    window.clearTimeout(recognitionRestartTimerRef.current);
+    window.clearTimeout(pendingWakeTimerRef.current);
+    recognitionRestartTimerRef.current = 0;
+    pendingWakeTimerRef.current = 0;
+    const recognition = recognitionRef.current;
+    recognitionRef.current = null;
+    if (recognition) {
+      recognition.onresult = null;
+      recognition.onerror = null;
+      recognition.onend = null;
+      try {
+        recognition.stop();
+      } catch {
+        // Some browser implementations throw if stop() races with onend.
+      }
+    }
+    setRecognitionActive(false);
+  }
 
   const startMic = useCallback(async () => {
     try {
@@ -434,10 +466,18 @@ export function MicPanel({
   }, [liveStreaming, onLiveStateChange]);
 
   function startWakeRecognition() {
-    if (recognitionActive) return;
+    recognitionWantedRef.current = true;
+    if (recognitionRef.current || recognitionActive) return;
+    if (muted) {
+      setMicState("静音中，无法监听唤醒词");
+      return;
+    }
     const Recognition = getSpeechRecognition();
     if (!Recognition) {
-      setMicState("浏览器不支持 SpeechRecognition，可用文本模拟");
+      setMicState(realtimeReady ? "无本地关键词识别，改用直接语音监听" : "浏览器不支持 SpeechRecognition");
+      if (realtimeReady) {
+        void startLiveAudio();
+      }
       return;
     }
     const recognition = new Recognition();
@@ -445,27 +485,78 @@ export function MicPanel({
     recognition.continuous = true;
     recognition.interimResults = true;
     recognition.onresult = (event) => {
-      const transcript = Array.from(event.results)
+      const changedTranscript = Array.from(event.results)
         .slice(event.resultIndex)
         .map((result) => result[0]?.transcript ?? "")
         .join("");
+      const fullTranscript = Array.from(event.results)
+        .map((result) => result[0]?.transcript ?? "")
+        .join("");
       const now = Date.now();
-      const wakeRequest = extractWakeRequest(transcript, wakeWord);
-      if (wakeRequest.matched && now - wakeAtRef.current > 4000) {
+      const candidate = [changedTranscript, fullTranscript]
+        .map((value) => value.trim())
+        .find((value) => extractWakeRequest(value, wakeWord).matched);
+      if (!candidate) return;
+
+      const wakeRequest = extractWakeRequest(candidate, wakeWord);
+      const requestText = wakeRequest.requestText.trim();
+      const dedupeKey = `${candidate}|${requestText}`;
+      if (dedupeKey === handledWakeTranscriptRef.current) return;
+      if (!wakePendingRef.current && now - wakeAtRef.current < 1200) return;
+
+      if (!wakePendingRef.current) {
         wakeAtRef.current = now;
-        onWake();
-        if (wakeRequest.requestText) {
-          onUserText(wakeRequest.requestText);
-        } else {
+        const wakeSent = onWake();
+        if (wakeSent === false) {
+          setMicState("WebSocket 未连接，唤醒未发送");
+          return;
+        }
+        wakePendingRef.current = true;
+      }
+
+      if (requestText) {
+        pendingWakeRequestRef.current = requestText;
+      }
+      window.clearTimeout(pendingWakeTimerRef.current);
+      pendingWakeTimerRef.current = window.setTimeout(() => {
+        const finalRequest = pendingWakeRequestRef.current.trim();
+        handledWakeTranscriptRef.current = `${candidate}|${finalRequest}`;
+        wakePendingRef.current = false;
+        pendingWakeTimerRef.current = 0;
+        pendingWakeRequestRef.current = "";
+        stopWakeRecognition();
+        if (finalRequest) {
+          stopLiveAudio(false);
+          onUserText(finalRequest, { keepConversation: true });
+          return;
+        }
+        void startLiveAudio();
+      }, requestText ? 420 : 650);
+    };
+    recognition.onerror = (event) => {
+      const reason = (event as Event & { error?: string }).error ?? "unknown";
+      const terminalError = ["network", "not-allowed", "service-not-allowed", "language-not-supported"].includes(
+        reason,
+      );
+      if (terminalError) {
+        recognitionWantedRef.current = false;
+        setMicState(realtimeReady ? `关键词监听失败：${reason}，改用实时语音` : `关键词监听暂不可用：${reason}`);
+        if (realtimeReady && !muted) {
           window.setTimeout(() => {
             void startLiveAudio();
           }, 250);
         }
+        return;
       }
+      setMicState(`关键词监听暂不可用：${reason}`);
     };
-    recognition.onerror = () => setMicState("语音识别暂不可用");
     recognition.onend = () => {
+      recognitionRef.current = null;
       setRecognitionActive(false);
+      if (recognitionWantedRef.current && !muted) {
+        recognitionRestartTimerRef.current = window.setTimeout(() => startWakeRecognition(), 450);
+        return;
+      }
       setMicState("ready");
     };
     try {
@@ -476,8 +567,18 @@ export function MicPanel({
     }
     recognitionRef.current = recognition;
     setRecognitionActive(true);
-    setMicState("wake listening");
+    setMicState(`监听唤醒词：${wakeWord}`);
   }
+
+  function toggleWakeRecognition() {
+    if (recognitionActive || recognitionRef.current) {
+      stopWakeRecognition();
+      setMicState("ready");
+      return;
+    }
+    startWakeRecognition();
+  }
+  startWakeRecognitionRef.current = startWakeRecognition;
 
   function submitText() {
     const trimmed = text.trim();
@@ -486,7 +587,7 @@ export function MicPanel({
     if (wakeRequest.matched) {
       onWake();
       if (wakeRequest.requestText) {
-        onUserText(wakeRequest.requestText);
+        onUserText(wakeRequest.requestText, { keepConversation: true });
       } else {
         void startLiveAudio();
       }
@@ -498,7 +599,7 @@ export function MicPanel({
 
   useEffect(() => {
     return () => {
-      recognitionRef.current?.stop();
+      stopWakeRecognition();
       stopMic();
     };
   }, [stopMic]);
@@ -511,23 +612,30 @@ export function MicPanel({
 
   useEffect(() => {
     if (wakeListenSignal > 0) {
+      recognitionWantedRef.current = false;
       void startLiveAudioRef.current();
     }
   }, [wakeListenSignal]);
+
+  useEffect(() => {
+    if (keywordListenSignal > 0) {
+      void startMic().finally(() => startWakeRecognitionRef.current());
+    }
+  }, [keywordListenSignal, startMic]);
 
   useEffect(() => {
     streamRef.current?.getAudioTracks().forEach((track) => {
       track.enabled = !muted;
     });
     if (muted) {
-      recognitionRef.current?.stop();
+      stopWakeRecognition();
       stopLiveAudio(true);
     }
   }, [muted, stopLiveAudio]);
 
   useEffect(() => {
     if (stopSignal > 0) {
-      recognitionRef.current?.stop();
+      stopWakeRecognition();
       stopLiveAudio(false);
     }
   }, [stopSignal, stopLiveAudio]);
@@ -555,7 +663,12 @@ export function MicPanel({
         <button className="icon-button" type="button" title="切换静音" onClick={() => setMuted((value) => !value)}>
           {muted ? <MicOff size={18} /> : <Mic size={18} />}
         </button>
-        <button className="icon-button" type="button" title="监听唤醒词" onClick={startWakeRecognition}>
+        <button
+          className={`icon-button${recognitionActive ? " active" : ""}`}
+          type="button"
+          title={recognitionActive ? "停止关键词监听" : "监听唤醒词"}
+          onClick={toggleWakeRecognition}
+        >
           <Radio size={18} />
         </button>
         <button

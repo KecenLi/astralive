@@ -61,6 +61,9 @@ class VisualRuntimeState:
         self.latest_sequence_by_source: dict[str, int] = {}
         self.applied_sequence: int = 0
         self.dropped_pending_frames: int = 0
+        self.provider_cooldown_until: float = 0.0
+        self.provider_failure_count: int = 0
+        self.provider_cooldown_notice_at: float = 0.0
 
     @property
     def task(self) -> asyncio.Task[None] | None:
@@ -261,6 +264,25 @@ async def _handle_event(
                 ),
                 send_lock,
             )
+            return response_task
+        if _visual_provider_cooling_down(visual_runtime):
+            visual_runtime.pending.clear()
+            visual_runtime.dropped_pending_frames += 1
+            now = time.perf_counter()
+            if now - visual_runtime.provider_cooldown_notice_at > 10:
+                visual_runtime.provider_cooldown_notice_at = now
+                await _send(
+                    websocket,
+                    make_event(
+                        "debug.log",
+                        session.session_id,
+                        {
+                            "message": "Visual frame skipped while provider is cooling down.",
+                            "remaining_seconds": round(visual_runtime.provider_cooldown_until - now, 1),
+                        },
+                    ),
+                    send_lock,
+                )
             return response_task
         frame = FramePayload.model_validate(event.payload)
         _, dropped = visual_runtime.enqueue(
@@ -1195,6 +1217,10 @@ def _start_visual_tasks(
 ) -> None:
     if _should_defer_visual_frame(session, audio_runtime):
         return
+    if _visual_provider_cooling_down(visual_runtime):
+        visual_runtime.dropped_pending_frames += len(visual_runtime.pending)
+        visual_runtime.pending.clear()
+        return
 
     max_concurrency = max(1, settings.vision_max_concurrency)
     while visual_runtime.pending and len(visual_runtime.active_tasks) < max_concurrency:
@@ -1229,6 +1255,28 @@ async def _run_visual_frame_analysis(
     frame = job.frame
     try:
         result, from_cache = await vision.analyze_frame(session, frame, prompt=job.prompt, commit=False)
+        if _vision_result_failed(result):
+            cooldown_seconds = _mark_visual_provider_failure(visual_runtime, result)
+            await _send(
+                websocket,
+                make_event(
+                    "debug.log",
+                    session.session_id,
+                    {
+                        "message": "Visual provider failed; cooling down to protect voice response latency.",
+                        "frame_id": frame.frame_id,
+                        "source": job.source,
+                        "cooldown_seconds": round(cooldown_seconds, 1),
+                        "failure_count": visual_runtime.provider_failure_count,
+                        "detail": str(result.raw.get("error", ""))[:240],
+                    },
+                ),
+                send_lock,
+            )
+            await _send_cost(websocket, session, send_lock)
+            return
+        visual_runtime.provider_failure_count = 0
+        visual_runtime.provider_cooldown_until = 0.0
         result_age = time.perf_counter() - job.received_at
         latest_for_source = visual_runtime.latest_sequence_by_source.get(job.source, job.sequence)
         if (
@@ -1303,6 +1351,41 @@ async def _run_visual_frame_analysis(
         if current_task:
             visual_runtime.active_tasks.discard(current_task)
         _start_visual_tasks(websocket, session, vision, settings, audio_runtime, visual_runtime, send_lock)
+
+
+def _vision_result_failed(result: Any) -> bool:
+    raw = getattr(result, "raw", None)
+    return isinstance(raw, dict) and bool(raw.get("error"))
+
+
+def _mark_visual_provider_failure(visual_runtime: VisualRuntimeState, result: Any) -> float:
+    visual_runtime.provider_failure_count += 1
+    detail = ""
+    raw = getattr(result, "raw", None)
+    if isinstance(raw, dict):
+        detail = str(raw.get("error", ""))
+    cooldown_seconds = _visual_provider_cooldown_seconds(detail, visual_runtime.provider_failure_count)
+    visual_runtime.provider_cooldown_until = time.perf_counter() + cooldown_seconds
+    return cooldown_seconds
+
+
+def _visual_provider_cooling_down(visual_runtime: VisualRuntimeState) -> bool:
+    return visual_runtime.provider_cooldown_until > time.perf_counter()
+
+
+def _visual_provider_cooldown_seconds(detail: str, failure_count: int) -> float:
+    lowered = detail.lower()
+    if (
+        "429" in lowered
+        or "resource_exhausted" in lowered
+        or "resource exhausted" in lowered
+        or "quota" in lowered
+        or "rate limit" in lowered
+    ):
+        return 60.0
+    if "timeout" in lowered or "timed out" in lowered:
+        return min(30.0, 8.0 * max(1, failure_count))
+    return min(30.0, 4.0 * (2 ** min(max(0, failure_count - 1), 3)))
 
 
 def _cancel_visual_runtime(visual_runtime: VisualRuntimeState) -> None:

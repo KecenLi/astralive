@@ -37,7 +37,7 @@ class VertexAIClient:
             method="POST",
         )
         try:
-            with request.urlopen(req, timeout=60) as response:  # noqa: S310
+            with request.urlopen(req, timeout=self.settings.vertex_ai_request_timeout_seconds) as response:  # noqa: S310
                 return json.loads(response.read().decode("utf-8"))
         except error.HTTPError as exc:
             details = exc.read().decode("utf-8", errors="replace")

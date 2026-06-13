@@ -36,6 +36,7 @@ export class Live2DAvatarController implements AvatarController {
   private lipSync = false;
   private targetMouthOpen = 0;
   private mouthOpen = 0;
+  private resizeCleanup: (() => void) | null = null;
 
   private static cubism4CoreLoaded = false;
 
@@ -53,17 +54,21 @@ export class Live2DAvatarController implements AvatarController {
       resizeTo: canvas.parentElement ?? canvas,
       backgroundAlpha: 0,
       premultipliedAlpha: false,
+      preserveDrawingBuffer: true,
       antialias: true,
       autoDensity: true,
-      resolution: Math.min(window.devicePixelRatio || 1, 2),
+      powerPreference: "high-performance",
+      resolution: Math.min(Math.max(window.devicePixelRatio || 1, 1.5), 2.5),
       autoStart: true,
     });
     this.model = await Live2DModel.from(modelUrl);
-    this.initializePartVisibility();
-    this.fitModel(canvas);
     const stage = (this.app as { stage?: { addChild: (model: unknown) => void } }).stage;
     stage?.addChild(this.model);
+    this.initializePartVisibility();
+    this.fitModel(canvas);
+    this.installResizeHandler(canvas);
     this.addLipSyncTicker();
+    await this.waitForFirstPaint(canvas);
   }
 
   setState(state: Parameters<AvatarController["setState"]>[0]) {
@@ -74,6 +79,8 @@ export class Live2DAvatarController implements AvatarController {
   }
 
   dispose() {
+    this.resizeCleanup?.();
+    this.resizeCleanup = null;
     const destroy = (this.app as { destroy?: (removeView: boolean) => void } | null)?.destroy;
     destroy?.call(this.app, false);
     this.app = null;
@@ -106,12 +113,49 @@ export class Live2DAvatarController implements AvatarController {
     } | null;
     if (!model?.width || !model.height) return;
     const parent = canvas.parentElement ?? canvas;
-    const scale = Math.min((parent.clientWidth * 0.62) / model.width, (parent.clientHeight * 0.9) / model.height);
+    const parentWidth = parent.clientWidth || canvas.clientWidth || 1;
+    const parentHeight = parent.clientHeight || canvas.clientHeight || 1;
+    const isPet = parent.classList.contains("pet-avatar");
+    const widthFill = isPet ? 0.94 : 0.84;
+    const heightFill = isPet ? 1.08 : 1.02;
+    const yRatio = isPet ? 0.54 : 0.52;
+    const scale = Math.min((parentWidth * widthFill) / model.width, (parentHeight * heightFill) / model.height);
     model.scale?.set(scale);
     model.anchor?.set(0.5, 0.5);
     model.alpha = 1;
-    model.x = parent.clientWidth / 2;
-    model.y = parent.clientHeight * 0.56;
+    model.x = parentWidth / 2;
+    model.y = parentHeight * yRatio;
+  }
+
+  private installResizeHandler(canvas: HTMLCanvasElement) {
+    this.resizeCleanup?.();
+    const target = canvas.parentElement ?? canvas;
+    let frame = 0;
+    const scheduleFit = () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        this.fitModel(canvas);
+      });
+    };
+
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(scheduleFit);
+      observer.observe(target);
+      this.resizeCleanup = () => {
+        observer.disconnect();
+        if (frame) window.cancelAnimationFrame(frame);
+      };
+      scheduleFit();
+      return;
+    }
+
+    window.addEventListener("resize", scheduleFit);
+    this.resizeCleanup = () => {
+      window.removeEventListener("resize", scheduleFit);
+      if (frame) window.cancelAnimationFrame(frame);
+    };
+    scheduleFit();
   }
 
   private initializePartVisibility() {
@@ -174,6 +218,24 @@ export class Live2DAvatarController implements AvatarController {
       this.mouthOpen += (target - this.mouthOpen) * 0.35;
       this.setMouthOpen(this.mouthOpen);
     });
+  }
+
+  private renderOnce() {
+    const app = this.app as {
+      renderer?: { render?: (stage: unknown) => void };
+      stage?: unknown;
+    } | null;
+    if (app?.stage) app.renderer?.render?.(app.stage);
+  }
+
+  private async waitForFirstPaint(canvas: HTMLCanvasElement, timeoutMs = 3000) {
+    const started = performance.now();
+    while (performance.now() - started < timeoutMs) {
+      this.renderOnce();
+      if (canvasHasVisiblePixels(canvas)) return;
+      await new Promise((resolve) => window.requestAnimationFrame(resolve));
+    }
+    throw new Error("Live2D model loaded but did not render visible pixels.");
   }
 
   private applyExpression(expression: AvatarExpression) {
@@ -340,6 +402,25 @@ function patchPixiUrlResolve(PIXI: unknown) {
     pixi.utils.__modviiUrlResolvePatch = true;
   } catch {
     // Some Pixi builds expose url.resolve as a read-only accessor. The original resolver still works.
+  }
+}
+
+function canvasHasVisiblePixels(canvas: HTMLCanvasElement) {
+  if (canvas.width <= 0 || canvas.height <= 0) return false;
+  const sample = document.createElement("canvas");
+  sample.width = 64;
+  sample.height = 64;
+  const context = sample.getContext("2d", { willReadFrequently: true });
+  if (!context) return false;
+  try {
+    context.drawImage(canvas, 0, 0, sample.width, sample.height);
+    const data = context.getImageData(0, 0, sample.width, sample.height).data;
+    for (let index = 3; index < data.length; index += 4) {
+      if (data[index] > 16) return true;
+    }
+    return false;
+  } catch {
+    return false;
   }
 }
 

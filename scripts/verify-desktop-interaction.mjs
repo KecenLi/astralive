@@ -103,6 +103,7 @@ try {
   step("main-rendered", "pass", { body: await bodyExcerpt(main) });
 
   await verifyLive2DReady();
+  await screenshot(main, "live2d-ready");
   if (wakeAutoListenOnly) {
     await verifyWakeButtonAutoRealtime(main);
     return;
@@ -118,9 +119,17 @@ try {
     pet: await pet.evaluate(`document.querySelector(".pet-avatar canvas")?.className || ""`),
   });
 
-  await clickByButtonText(main, "唤醒");
-  await waitForEval(main, `document.body.innerText.includes("已听到唤醒词：小七")`);
-  step("wake-button-click", "pass");
+  await clickByButtonText(main, "监听小七");
+  await waitForEval(
+    main,
+    `document.body.innerText.includes("监听中") ||
+      document.querySelector(".mic-panel")?.innerText.includes("监听唤醒词") ||
+      document.querySelector(".mic-panel")?.innerText.includes("关键词") ||
+      document.querySelector(".mic-panel")?.innerText.includes("等待语音") ||
+      document.querySelector(".mic-panel")?.innerText.includes("streaming")`,
+    15_000,
+  );
+  step("keyword-listen-button-click", "pass", { panel: await main.evaluate(`document.querySelector(".mic-panel")?.innerText || ""`) });
 
   await fillTextInput(main, `小七 介绍一下你现在的状态`);
   await submitTextInput(main);
@@ -233,7 +242,7 @@ async function verifyFakeMicRealtime(page) {
 }
 
 async function verifyWakeButtonAutoRealtime(page) {
-  await clickByButtonText(page, "唤醒");
+  await clickByButtonText(page, "监听小七");
   try {
     await waitForEval(
       page,
@@ -558,6 +567,7 @@ async function verifyLive2DReady() {
       })()`,
       30_000,
     );
+    await waitForEval(main, canvasHasVisiblePixelsExpression(".live2d-layer canvas"), 15_000);
     await waitForEval(
       pet,
       `(() => {
@@ -570,11 +580,20 @@ async function verifyLive2DReady() {
       })()`,
       30_000,
     );
+    await waitForEval(pet, canvasHasVisiblePixelsExpression(".pet-avatar canvas"), 15_000);
   } catch (error) {
+    await screenshot(main, "live2d-diagnostics");
     step("live2d-diagnostics", "fail", {
       main: await main.evaluate(`({
         layer: document.querySelector(".live2d-layer")?.className || "",
         fallback: document.querySelector(".avatar-orbit")?.className || "",
+        fallbackStyle: (() => {
+          const fallback = document.querySelector(".avatar-orbit");
+          if (!fallback) return null;
+          const style = window.getComputedStyle(fallback);
+          return { opacity: style.opacity, visibility: style.visibility };
+        })(),
+        visiblePixels: ${canvasVisiblePixelStatsExpression(".live2d-layer canvas")},
         canvas: (() => {
           const canvas = document.querySelector(".live2d-layer canvas");
           return canvas ? { width: canvas.width, height: canvas.height, className: canvas.className } : null;
@@ -586,10 +605,34 @@ async function verifyLive2DReady() {
           return canvas ? { width: canvas.width, height: canvas.height, className: canvas.className } : null;
         })(),
         fallback: document.querySelector(".pet-fallback")?.className || "",
+        visiblePixels: ${canvasVisiblePixelStatsExpression(".pet-avatar canvas")},
       })`),
     });
     throw error;
   }
+}
+
+function canvasVisiblePixelStatsExpression(selector) {
+  return `(() => {
+    const canvas = document.querySelector(${JSON.stringify(selector)});
+    if (!canvas || canvas.width <= 0 || canvas.height <= 0) return { visible: 0, width: 0, height: 0 };
+    const sample = document.createElement("canvas");
+    sample.width = 64;
+    sample.height = 64;
+    const context = sample.getContext("2d", { willReadFrequently: true });
+    if (!context) return { visible: 0, width: canvas.width, height: canvas.height };
+    context.drawImage(canvas, 0, 0, sample.width, sample.height);
+    const data = context.getImageData(0, 0, sample.width, sample.height).data;
+    let visible = 0;
+    for (let index = 3; index < data.length; index += 4) {
+      if (data[index] > 16) visible += 1;
+    }
+    return { visible, width: canvas.width, height: canvas.height };
+  })()`;
+}
+
+function canvasHasVisiblePixelsExpression(selector) {
+  return `(${canvasVisiblePixelStatsExpression(selector)}).visible > 80`;
 }
 
 async function screenshot(page, name) {

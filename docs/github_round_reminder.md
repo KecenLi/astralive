@@ -9,6 +9,13 @@
 
 注意：不要提交 `.env`、令牌、ADC 文件、构建缓存或本地日志。
 
+## Multi-Agent Rule
+
+- Agent 0 owns coordination, integration, final verification, commit, and push.
+- If a round has multiple independent tracks, Agent 0 should proactively delegate bounded side work to subagents, especially GitHub/source research, UI-only work, test triage, packaging smoke checks, or documentation updates.
+- Delegated work must have explicit file ownership or a read-only question. Subagents must not revert user changes or main-agent changes, and their results must be reviewed before integration.
+- Every round that uses subagents should record which agent did what, what files changed, and any residual risk before pushing.
+
 ## 2026-06-14 Round Notes
 
 - Repository remote: `https://github.com/KecenLi/astralive.git`
@@ -44,3 +51,9 @@
 - The installer patches `Lisette.model3.json` with Pixi-compatible expression/motion groups and `ParamMouthOpenY` lip sync.
 - Live2D rendering now uses non-premultiplied alpha plus high-DPI Pixi settings so Lisette stays clear in transparent desktop-pet windows.
 - This round must push only code/scripts/config notes, not the Lisette asset files.
+
+## 2026-06-14 Voice Latency / UI Round Notes
+
+- Current desktop log finding: microphone VAD did send final audio, but Gemini Live timed out waiting for streaming response and the Vertex fallback then hit HTTP 429 / resource exhausted. The fix must make provider failure fast and visible instead of leaving the app silent.
+- This round uses subagent `Noether` for UI/desktop-pet-only work. Agent 0 keeps ownership of MicPanel state, backend visual cooldown, tests, packaging, commit, and push.
+- GitHub comparison sources checked this round include Open-LLM-VTuber, RealtimeSTT, Silero VAD, openWakeWord, LLM-Live2D-Desktop-Assitant, and waifu-companion. MODVII should follow their proven effort level: local wake/VAD gating, provider fallback/cooldown, transparent pet mode, clickable avatar interactions, model/expression mapping, and explicit fallback states.

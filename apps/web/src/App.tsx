@@ -150,6 +150,7 @@ function MainApp() {
   const store = useAppStore();
   const [audioStopSignal, setAudioStopSignal] = useState(0);
   const [wakeListenSignal, setWakeListenSignal] = useState(0);
+  const [keywordListenSignal, setKeywordListenSignal] = useState(0);
   const [deviceStartSignal, setDeviceStartSignal] = useState(0);
   const [liveAudioActive, setLiveAudioActive] = useState(false);
   const [voiceResponsePending, setVoiceResponsePending] = useState(false);
@@ -158,6 +159,7 @@ function MainApp() {
   const audioTurnActiveRef = useRef(false);
   const voiceResponsePendingRef = useRef(false);
   const conversationModeRef = useRef(false);
+  const listenModeRef = useRef<"keyword" | "live">("keyword");
   const assistantAudioDoneRef = useRef(false);
   const restartListenTimerRef = useRef(0);
   const reconnectTimerRef = useRef(0);
@@ -202,7 +204,11 @@ function MainApp() {
       const latest = useAppStore.getState();
       if (latest.connection !== "connected" || !latest.sessionId) return;
       console.warn(`MODVII mic rearm continuous listening: ${reason}`);
-      setWakeListenSignal((value) => value + 1);
+      if (listenModeRef.current === "keyword") {
+        setKeywordListenSignal((value) => value + 1);
+      } else {
+        setWakeListenSignal((value) => value + 1);
+      }
     }, 450);
   }, []);
 
@@ -321,11 +327,10 @@ function MainApp() {
   }, []);
 
   const wakeAndListen = useCallback(() => {
-    if (wake()) {
-      setConversationActive(true);
-      setWakeListenSignal((value) => value + 1);
-    }
-  }, [setConversationActive, wake]);
+    listenModeRef.current = "keyword";
+    setConversationActive(true);
+    setKeywordListenSignal((value) => value + 1);
+  }, [setConversationActive]);
 
   const sleep = useCallback(() => {
     setConversationActive(false);
@@ -354,7 +359,7 @@ function MainApp() {
     });
   }, []);
 
-  const sendUserText = useCallback((text: string) => {
+  const sendUserText = useCallback((text: string, options: { keepConversation?: boolean } = {}) => {
     const actions = useAppStore.getState();
     if (!actions.sessionId) return;
     cancelSpeech();
@@ -363,8 +368,11 @@ function MainApp() {
     assistantAudioDoneRef.current = false;
     voiceResponsePendingRef.current = false;
     setVoiceResponsePending(false);
-    setConversationActive(false);
-    setAudioStopSignal((value) => value + 1);
+    setConversationActive(Boolean(options.keepConversation));
+    if (!options.keepConversation) {
+      listenModeRef.current = "keyword";
+      setAudioStopSignal((value) => value + 1);
+    }
     actions.setUserSpeechDraft("");
     actions.addMessage("user", text);
     wsClient.send(createEvent("client.user.text", actions.sessionId, { text }));
@@ -402,6 +410,7 @@ function MainApp() {
   }
 
   const mediaUploadSuspended =
+    conversationMode ||
     liveAudioActive ||
     voiceResponsePending ||
     store.status === "thinking" ||
@@ -420,7 +429,7 @@ function MainApp() {
         <div className="top-actions">
           <button className="tool-button" type="button" onClick={wakeAndListen}>
             <Play size={18} />
-            {conversationMode ? "继续听" : "唤醒"}
+            {conversationMode ? "监听中" : "监听小七"}
           </button>
           <button className="tool-button subtle" type="button" onClick={sleep}>
             <Moon size={18} />
@@ -449,6 +458,7 @@ function MainApp() {
           <MicPanel
             autoStartSignal={deviceStartSignal}
             wakeListenSignal={wakeListenSignal}
+            keywordListenSignal={keywordListenSignal}
             onWake={wake}
             onUserText={sendUserText}
             onAudioChunk={sendAudioChunk}
