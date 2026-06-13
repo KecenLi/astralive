@@ -4,6 +4,7 @@ export interface AvatarController {
   setState: (state: {
     mode: AvatarMode;
     expression: AvatarExpression;
+    motion?: string;
     subtitle: string;
     lipSync: boolean;
     lipSyncLevel?: number;
@@ -64,7 +65,7 @@ export class Live2DAvatarController implements AvatarController {
     this.lipSync = state.lipSync;
     this.targetMouthOpen = state.lipSync ? Math.min(1, Math.max(0, state.lipSyncLevel ?? 0.18)) : 0;
     this.applyExpression(state.expression);
-    this.applyMotion(state.mode);
+    this.applyMotion(state.mode, state.motion, state.subtitle);
   }
 
   dispose() {
@@ -114,7 +115,7 @@ export class Live2DAvatarController implements AvatarController {
       const fallback = this.lipSync ? 0.12 + Math.abs(Math.sin(performance.now() / 120)) * 0.18 : 0;
       const target = this.lipSync ? Math.max(this.targetMouthOpen, fallback) : 0;
       this.mouthOpen += (target - this.mouthOpen) * 0.35;
-      this.setParameter("ParamMouthOpenY", this.mouthOpen);
+      this.setMouthOpen(this.mouthOpen);
     });
   }
 
@@ -130,19 +131,36 @@ export class Live2DAvatarController implements AvatarController {
     }
   }
 
-  private applyMotion(mode: AvatarMode) {
-    const mapped = motionName(mode);
-    if (mapped === this.lastMotion) return;
-    this.lastMotion = mapped;
+  private applyMotion(mode: AvatarMode, requestedMotion = "", subtitle = "") {
+    const mapped = motionSpec(requestedMotion, mode);
+    const key = `${mapped.groups.join("|")}:${mapped.index ?? "auto"}:${
+      mode === "speaking" ? subtitle.slice(0, 32) : ""
+    }`;
+    if (key === this.lastMotion) return;
+    this.lastMotion = key;
     const model = this.model as { motion?: (group: string, index?: number) => void } | null;
-    try {
-      model?.motion?.(mapped, 0);
-    } catch {
+    for (const group of mapped.groups) {
       try {
-        model?.motion?.("Idle", 0);
-      } catch {
+        if (typeof mapped.index === "number") {
+          model?.motion?.(group, mapped.index);
+        } else {
+          model?.motion?.(group);
+        }
         return;
+      } catch {
+        // Try the next common group alias for models with different naming.
       }
+    }
+    try {
+      model?.motion?.("Idle");
+    } catch {
+      return;
+    }
+  }
+
+  private setMouthOpen(value: number) {
+    for (const id of ["ParamMouthOpenY", "PARAM_MOUTH_OPEN_Y", "ParamMouthOpen", "PARAM_MOUTH_OPEN"]) {
+      this.setParameter(id, value);
     }
   }
 
@@ -278,15 +296,47 @@ function expressionName(expression: AvatarExpression) {
   return map[expression];
 }
 
-function motionName(mode: AvatarMode) {
-  const map: Partial<Record<AvatarMode, string>> = {
-    sleeping: "Idle",
-    idle: "Idle",
-    listening: "TapBody",
-    thinking: "TapBody",
-    speaking: "TapBody",
-    interrupted: "TapBody",
-    error: "TapBody",
+interface MotionSpec {
+  groups: string[];
+  index?: number;
+}
+
+function motionSpec(motion: string | undefined, mode: AvatarMode): MotionSpec {
+  const normalized = (motion || "").trim();
+  if (normalized) {
+    const parsed = parseExplicitMotion(normalized);
+    if (parsed) return parsed;
+  }
+
+  const map: Record<string, MotionSpec> = {
+    idle: { groups: ["Idle"] },
+    sleep: { groups: ["Idle"] },
+    sleeping: { groups: ["Idle"] },
+    listen: { groups: ["Tap", "Tap@Body", "Flick"] },
+    listening: { groups: ["Tap", "Tap@Body", "Flick"] },
+    think: { groups: ["Flick", "FlickDown", "Tap", "Tap@Body"] },
+    thinking: { groups: ["Flick", "FlickDown", "Tap", "Tap@Body"] },
+    talk: { groups: ["Tap", "Tap@Body", "Flick"] },
+    speaking: { groups: ["Tap", "Tap@Body", "Flick"] },
+    happy: { groups: ["Flick3", "Flick", "Tap"] },
+    curious: { groups: ["FlickRight", "Flick", "Tap"] },
+    surprised: { groups: ["FlickLeft", "FlickDown", "Flick"] },
+    concerned: { groups: ["Shake", "FlickDown", "Tap"] },
+    confused: { groups: ["Shake", "FlickDown", "Tap"] },
+    nod: { groups: ["Tap", "Tap@Body"] },
+    reject: { groups: ["Shake", "FlickDown"] },
+    interrupted: { groups: ["Shake", "FlickLeft", "Tap"] },
+    error: { groups: ["Shake", "FlickDown", "Tap"] },
   };
-  return map[mode] ?? "Idle";
+  return map[normalized] ?? map[mode] ?? { groups: ["Idle"] };
+}
+
+function parseExplicitMotion(motion: string): MotionSpec | null {
+  const parts = motion.split(":");
+  if (!parts[0]) return null;
+  const group = parts[0].trim();
+  if (!group) return null;
+  if (parts.length === 1 || !parts[1]) return { groups: [group] };
+  const index = Number(parts[1]);
+  return Number.isInteger(index) && index >= 0 ? { groups: [group], index } : { groups: [group] };
 }

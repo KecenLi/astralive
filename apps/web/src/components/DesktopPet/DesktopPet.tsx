@@ -8,13 +8,14 @@ import { LIVE2D_MODEL_URL } from "../../lib/env";
 const petStates: Array<{
   mode: AvatarMode;
   expression: AvatarExpression;
+  motion: string;
   subtitle: string;
 }> = [
-  { mode: "idle", expression: "happy", subtitle: "小七在。" },
-  { mode: "listening", expression: "curious", subtitle: "我听着。" },
-  { mode: "thinking", expression: "thinking", subtitle: "让我想想。" },
-  { mode: "speaking", expression: "surprised", subtitle: "收到。" },
-  { mode: "idle", expression: "neutral", subtitle: "需要我就叫小七。" },
+  { mode: "idle", expression: "happy", motion: "happy", subtitle: "小七在。" },
+  { mode: "listening", expression: "curious", motion: "curious", subtitle: "我听着。" },
+  { mode: "thinking", expression: "thinking", motion: "think", subtitle: "让我想想。" },
+  { mode: "speaking", expression: "surprised", motion: "surprised", subtitle: "收到。" },
+  { mode: "idle", expression: "neutral", motion: "idle", subtitle: "需要我就叫小七。" },
 ];
 
 function speak(text: string) {
@@ -68,6 +69,7 @@ export function DesktopPet() {
     controllerRef.current?.setState({
       mode: state.mode,
       expression: state.expression,
+      motion: state.motion,
       subtitle: state.subtitle,
       lipSync: state.mode === "speaking",
     });

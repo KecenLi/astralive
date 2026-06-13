@@ -7,6 +7,7 @@ import pytest
 
 from app.api.websocket import (
     AudioRuntimeState,
+    VisualRuntimeState,
     _handle_event,
     _handle_realtime_audio_chunk,
     _next_realtime_stream_event,
@@ -30,6 +31,7 @@ from app.contracts.model_io import (
 from app.core.session_state import SessionState
 from app.services.avatar_service import AvatarService
 from app.providers.asr.google_genai import GoogleGenAIASRProvider
+from app.providers.asr.openai_compatible import OpenAICompatibleASRProvider
 from app.providers.registry import ProviderRegistry
 from app.providers.llm.openai_compatible import OpenAICompatibleLLMProvider
 from app.providers.llm.base import LLMProvider
@@ -38,6 +40,7 @@ from app.providers.realtime.google_genai_live import GoogleGenAILiveProvider
 from app.providers.realtime.mock import MockRealtimeProvider
 from app.providers.tts.cosyvoice3 import CosyVoice3TTSProvider
 from app.providers.tts.google_genai import GoogleGenAITTSProvider
+from app.providers.tts.openai_compatible import OpenAICompatibleTTSProvider
 from app.providers.vision.openai_compatible import OpenAICompatibleVisionProvider
 from app.providers.vision.base import VisionProvider
 from app.providers.vision.vertex_ai import VertexAIVisionProvider
@@ -202,6 +205,87 @@ def test_gemini_vision_provider_uses_gemini_settings() -> None:
     assert provider.api_key == "test-key"
     assert provider.model == "gemini-3.5-flash"
     assert provider.base_url == "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+
+class StubRequestsResponse:
+    def __init__(
+        self,
+        *,
+        payload: dict | None = None,
+        content: bytes = b"",
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.payload = payload or {}
+        self.content = content
+        self.headers = headers or {}
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict:
+        return self.payload
+
+
+async def test_openai_compatible_asr_posts_audio_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict] = []
+
+    def fake_post(url: str, **kwargs) -> StubRequestsResponse:
+        calls.append({"url": url, **kwargs})
+        return StubRequestsResponse(payload={"text": "小七打开屏幕捕捉"})
+
+    monkeypatch.setattr("app.providers.asr.openai_compatible.requests.post", fake_post)
+    settings = Settings(
+        asr_provider="openai_compatible",
+        openai_compatible_asr_base_url="https://api.siliconflow.cn/v1",
+        openai_compatible_asr_api_key="test-key",
+        openai_compatible_asr_model="FunAudioLLM/SenseVoiceSmall",
+    )
+    provider = ProviderRegistry(settings).asr()
+
+    assert isinstance(provider, OpenAICompatibleASRProvider)
+    result = await provider.transcribe(
+        b"\x01\x00" * 320,
+        metadata={"encoding": "pcm_s16le", "sample_rate": 16000, "channels": 1},
+    )
+
+    assert result.text == "小七打开屏幕捕捉"
+    assert calls[0]["url"] == "https://api.siliconflow.cn/v1/audio/transcriptions"
+    assert calls[0]["headers"]["Authorization"] == "Bearer test-key"
+    assert calls[0]["data"]["model"] == "FunAudioLLM/SenseVoiceSmall"
+    filename, upload_bytes, content_type = calls[0]["files"]["file"]
+    assert filename == "audio.wav"
+    assert upload_bytes.startswith(b"RIFF")
+    assert content_type == "audio/wav"
+
+
+async def test_openai_compatible_tts_accepts_binary_audio(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict] = []
+
+    def fake_post(url: str, **kwargs) -> StubRequestsResponse:
+        calls.append({"url": url, **kwargs})
+        return StubRequestsResponse(content=b"mp3data", headers={"Content-Type": "audio/mpeg"})
+
+    monkeypatch.setattr("app.providers.tts.openai_compatible.requests.post", fake_post)
+    settings = Settings(
+        tts_provider="openai_compatible",
+        openai_compatible_tts_base_url="https://api.siliconflow.cn/v1",
+        openai_compatible_tts_api_key="test-key",
+        openai_compatible_tts_model="fishaudio/fish-speech-1.5",
+        openai_compatible_tts_voice="anna",
+        openai_compatible_tts_response_format="mp3",
+    )
+    provider = ProviderRegistry(settings).tts()
+
+    assert isinstance(provider, OpenAICompatibleTTSProvider)
+    result = await provider.synthesize(TTSInput(text="你好，我是小七。"))
+
+    assert result.audio_base64 == base64.b64encode(b"mp3data").decode("ascii")
+    assert result.mime == "audio/mpeg"
+    assert result.encoding == "mp3"
+    assert calls[0]["url"] == "https://api.siliconflow.cn/v1/audio/speech"
+    assert calls[0]["headers"]["Authorization"] == "Bearer test-key"
+    assert '"model": "fishaudio/fish-speech-1.5"' in calls[0]["data"]
+    assert '"voice": "anna"' in calls[0]["data"]
 
 
 class StubVertexAIClient:
@@ -650,6 +734,17 @@ class RaisingVisionService:
         raise AssertionError("vision should be deferred during voice response")
 
 
+class SlowVisionService:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def analyze_frame(self, session, frame, prompt):  # noqa: ANN001
+        self.started.set()
+        await self.release.wait()
+        return VisionResult(summary="slow visual summary", confidence=0.5), False
+
+
 class StubWebSocket:
     def __init__(self) -> None:
         self.events: list[dict] = []
@@ -989,6 +1084,7 @@ async def test_realtime_stream_timeout_recovery_asr_has_own_timeout() -> None:
 async def test_visual_frame_is_deferred_during_voice_response() -> None:
     websocket = StubWebSocket()
     runtime = AudioRuntimeState()
+    visual_runtime = VisualRuntimeState()
     session = SessionState(session_id="test_session", response_in_progress=True, status="thinking")
     settings = Settings(realtime_provider="mock", llm_provider="mock", tts_provider="mock")
     send_lock = asyncio.Lock()
@@ -1018,6 +1114,7 @@ async def test_visual_frame_is_deferred_during_voice_response() -> None:
         WakeService(),
         settings,
         runtime,
+        visual_runtime,
         0.0,
         send_lock,
         None,
@@ -1029,6 +1126,83 @@ async def test_visual_frame_is_deferred_during_voice_response() -> None:
         for event in websocket.events
     )
     assert session.cost_meter.vision_calls == 0
+
+
+async def test_visual_frame_analysis_does_not_block_realtime_audio() -> None:
+    websocket = StubWebSocket()
+    runtime = AudioRuntimeState()
+    visual_runtime = VisualRuntimeState()
+    session = SessionState(session_id="test_session", status="listening")
+    settings = Settings(realtime_provider="mock", llm_provider="mock", tts_provider="mock")
+    send_lock = asyncio.Lock()
+    dialogue = DialogueService(ProviderRegistry(settings).llm(), settings)
+    avatar = AvatarService()
+    audio = StubStreamingAudioService(OrderSensitiveRealtimeStream())
+    vision = SlowVisionService()
+
+    frame_task = await asyncio.wait_for(
+        _handle_event(
+            websocket,  # type: ignore[arg-type]
+            EventEnvelope(
+                type="client.media.frame",
+                session_id=session.session_id,
+                payload=FramePayload(
+                    frame_id="frame_background",
+                    width=640,
+                    height=360,
+                    capture_reason="screen_low_fps",
+                    scene_hash="background",
+                    data_base64="abc123",
+                ).model_dump(),
+            ),
+            session,
+            vision,  # type: ignore[arg-type]
+            dialogue,
+            audio,  # type: ignore[arg-type]
+            avatar,
+            WakeService(),
+            settings,
+            runtime,
+            visual_runtime,
+            0.0,
+            send_lock,
+            None,
+        ),
+        timeout=0.1,
+    )
+    assert frame_task is None
+    assert visual_runtime.task is not None
+    await asyncio.wait_for(vision.started.wait(), timeout=1)
+
+    first_payload = AudioChunkPayload(
+        chunk_id="chunk_1",
+        mime="audio/pcm;rate=16000",
+        sample_rate=16000,
+        channels=1,
+        encoding="pcm_s16le",
+        data_base64="",
+        is_final=False,
+    )
+    await _handle_realtime_audio_chunk(
+        websocket,  # type: ignore[arg-type]
+        session,
+        audio,  # type: ignore[arg-type]
+        dialogue,
+        avatar,
+        settings,
+        runtime,
+        first_payload,
+        b"\x00\x00" * 160,
+        0.0,
+        send_lock,
+        None,
+    )
+
+    assert runtime.stream is audio.stream
+    assert audio.stream.audio_sent is True
+    visual_runtime.task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await visual_runtime.task
 
 
 def test_realtime_tts_fallback_text_is_bounded() -> None:
@@ -1045,6 +1219,7 @@ async def test_user_text_closes_active_realtime_audio_stream() -> None:
     stream = OrderSensitiveRealtimeStream()
     websocket = StubWebSocket()
     runtime = AudioRuntimeState()
+    visual_runtime = VisualRuntimeState()
     session = SessionState(session_id="test_session")
     settings = Settings(realtime_provider="mock", llm_provider="mock", tts_provider="mock")
     send_lock = asyncio.Lock()
@@ -1089,6 +1264,7 @@ async def test_user_text_closes_active_realtime_audio_stream() -> None:
         WakeService(),
         settings,
         runtime,
+        visual_runtime,
         0.0,
         send_lock,
         None,
@@ -1107,6 +1283,7 @@ async def test_wake_closes_active_realtime_audio_stream() -> None:
     stream = OrderSensitiveRealtimeStream()
     websocket = StubWebSocket()
     runtime = AudioRuntimeState()
+    visual_runtime = VisualRuntimeState()
     session = SessionState(session_id="test_session")
     settings = Settings(realtime_provider="mock", llm_provider="mock")
     send_lock = asyncio.Lock()
@@ -1151,6 +1328,7 @@ async def test_wake_closes_active_realtime_audio_stream() -> None:
         WakeService(),
         settings,
         runtime,
+        visual_runtime,
         0.0,
         send_lock,
         None,

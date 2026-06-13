@@ -43,6 +43,11 @@ class AudioRuntimeState:
         self.input_finished_at: float = 0.0
 
 
+class VisualRuntimeState:
+    def __init__(self) -> None:
+        self.task: asyncio.Task[None] | None = None
+
+
 @router.websocket("/ws/session/{session_id}")
 async def session_websocket(websocket: WebSocket, session_id: str) -> None:
     await websocket.accept()
@@ -58,6 +63,7 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
     send_lock = asyncio.Lock()
     response_task: asyncio.Task[None] | None = None
     audio_runtime = AudioRuntimeState()
+    visual_runtime = VisualRuntimeState()
 
     await _send(websocket, make_event("server.session.ready", session_id, _session_payload(session, settings)), send_lock)
     await _send_cost(websocket, session, send_lock)
@@ -101,6 +107,7 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
                     wake,
                     settings,
                     audio_runtime,
+                    visual_runtime,
                     started,
                     send_lock,
                     response_task,
@@ -114,6 +121,7 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
         if response_task and not response_task.done():
             response_task.cancel()
         await _close_audio_runtime(audio_runtime)
+        _cancel_visual_runtime(visual_runtime)
         logger.info("websocket disconnected: %s", session_id)
 
 
@@ -128,6 +136,7 @@ async def _handle_event(
     wake: WakeService,
     settings: Settings,
     audio_runtime: AudioRuntimeState,
+    visual_runtime: VisualRuntimeState,
     started: float,
     send_lock: asyncio.Lock,
     response_task: asyncio.Task[None] | None,
@@ -139,6 +148,7 @@ async def _handle_event(
     if event.type == "client.wake.detected":
         _cancel_task(response_task)
         await _close_audio_runtime(audio_runtime)
+        _cancel_visual_runtime(visual_runtime)
         wake.wake(session)
         await _send(
             websocket,
@@ -156,6 +166,7 @@ async def _handle_event(
     if event.type == "client.wake.sleep":
         _cancel_task(response_task)
         await _close_audio_runtime(audio_runtime)
+        _cancel_visual_runtime(visual_runtime)
         wake.sleep(session)
         await _send(
             websocket,
@@ -173,6 +184,7 @@ async def _handle_event(
     if event.type in {"client.control.interrupt", "client.control.cancel_response"}:
         _cancel_task(response_task)
         await _close_audio_runtime(audio_runtime)
+        _cancel_visual_runtime(visual_runtime)
         session.status = "interrupted"
         session.response_in_progress = False
         session.interrupted_count += 1
@@ -205,33 +217,38 @@ async def _handle_event(
                 send_lock,
             )
             return response_task
+        if visual_runtime.task and not visual_runtime.task.done():
+            await _send(
+                websocket,
+                make_event(
+                    "debug.log",
+                    session.session_id,
+                    {
+                        "message": "Visual frame skipped while a previous visual analysis is in progress.",
+                        "status": session.status,
+                    },
+                ),
+                send_lock,
+            )
+            return response_task
         frame = FramePayload.model_validate(event.payload)
-        result, from_cache = await vision.analyze_frame(
-            session,
-            frame,
-            prompt=str(event.payload.get("prompt") or session.last_user_text or "请描述画面。"),
+        visual_runtime.task = asyncio.create_task(
+            _run_visual_frame_analysis(
+                websocket,
+                session,
+                vision,
+                settings,
+                audio_runtime,
+                frame,
+                str(event.payload.get("prompt") or session.last_user_text or "请描述画面。"),
+                send_lock,
+            )
         )
-        await _send(
-            websocket,
-            make_event(
-                "vision.summary",
-                session.session_id,
-                {
-                    "summary_id": f"vis_{int(time.time() * 1000)}",
-                    "frame_id": frame.frame_id,
-                    "summary": result.summary,
-                    "objects": [obj.model_dump() for obj in result.objects],
-                    "ocr_text": result.ocr_text,
-                    "confidence": result.confidence,
-                    "from_cache": from_cache,
-                },
-            ),
-            send_lock,
-        )
-        await _send_cost(websocket, session, send_lock)
+        visual_runtime.task.add_done_callback(_log_task_exception)
         return response_task
 
     if event.type == "client.media.audio_chunk":
+        _cancel_visual_runtime(visual_runtime)
         payload = AudioChunkPayload.model_validate(event.payload)
         try:
             audio_bytes = audio.decode_audio_chunk(payload)
@@ -331,6 +348,7 @@ async def _handle_event(
 
     if event.type in {"client.user.text", "client.user.speech.final"}:
         await _close_audio_runtime(audio_runtime)
+        _cancel_visual_runtime(visual_runtime)
         user_text = str(event.payload.get("text", "")).strip()
         return await _handle_user_text(
             websocket,
@@ -599,7 +617,14 @@ async def _run_dialogue_response(
         )
         await _send(
             websocket,
-            avatar.state_event(session.session_id, "speaking", result.emotion, result.text, "talk", True),
+            avatar.state_event(
+                session.session_id,
+                "speaking",
+                result.emotion,
+                result.text,
+                _motion_for_response_text(result.text, result.emotion),
+                True,
+            ),
             send_lock,
         )
         if settings.tts_provider != "mock" and result.should_speak:
@@ -684,7 +709,14 @@ async def _run_realtime_stream_receiver(
                     session.status = "speaking"
                     await _send(
                         websocket,
-                        avatar.state_event(session.session_id, "speaking", "neutral", "正在实时回应。", "talk", True),
+                        avatar.state_event(
+                            session.session_id,
+                            "speaking",
+                            "neutral",
+                            "正在实时回应。",
+                            _motion_for_response_text(event.output_text, "neutral"),
+                            True,
+                        ),
                         send_lock,
                     )
                 output_text += event.output_text
@@ -746,6 +778,18 @@ async def _run_realtime_stream_receiver(
             return
         fallback_audio_attempted = False
         if output_text:
+            await _send(
+                websocket,
+                avatar.state_event(
+                    session.session_id,
+                    "speaking",
+                    "neutral",
+                    output_text,
+                    _motion_for_response_text(output_text, "neutral"),
+                    True,
+                ),
+                send_lock,
+            )
             await _send(
                 websocket,
                 make_event(
@@ -1091,6 +1135,67 @@ def _should_defer_visual_frame(session: SessionState, audio_runtime: AudioRuntim
     )
 
 
+async def _run_visual_frame_analysis(
+    websocket: WebSocket,
+    session: SessionState,
+    vision: VisionService,
+    settings: Settings,
+    audio_runtime: AudioRuntimeState,
+    frame: FramePayload,
+    prompt: str,
+    send_lock: asyncio.Lock,
+) -> None:
+    try:
+        result, from_cache = await vision.analyze_frame(session, frame, prompt=prompt)
+        if _should_defer_visual_frame(session, audio_runtime):
+            await _send(
+                websocket,
+                make_event(
+                    "debug.log",
+                    session.session_id,
+                    {
+                        "message": "Visual summary retained but UI update deferred because voice is active.",
+                        "frame_id": frame.frame_id,
+                        "status": session.status,
+                    },
+                ),
+                send_lock,
+            )
+            await _send_cost(websocket, session, send_lock)
+            return
+
+        await _send(
+            websocket,
+            make_event(
+                "vision.summary",
+                session.session_id,
+                {
+                    "summary_id": f"vis_{int(time.time() * 1000)}",
+                    "frame_id": frame.frame_id,
+                    "summary": result.summary,
+                    "objects": [obj.model_dump() for obj in result.objects],
+                    "ocr_text": result.ocr_text,
+                    "confidence": result.confidence,
+                    "from_cache": from_cache,
+                },
+            ),
+            send_lock,
+        )
+        await _send_cost(websocket, session, send_lock)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("visual frame analysis failed")
+        await _send_error(websocket, session.session_id, "vision_error", str(exc), send_lock)
+
+
+def _cancel_visual_runtime(visual_runtime: VisualRuntimeState) -> None:
+    task = visual_runtime.task
+    visual_runtime.task = None
+    if task and not task.done():
+        task.cancel()
+
+
 async def _run_realtime_audio_response(
     websocket: WebSocket,
     session: SessionState,
@@ -1230,6 +1335,27 @@ def _realtime_tts_fallback_text(text: str) -> str:
     if len(normalized) <= REALTIME_TTS_FALLBACK_MAX_CHARS:
         return normalized
     return normalized[:REALTIME_TTS_FALLBACK_MAX_CHARS].rstrip() + "..."
+
+
+def _motion_for_response_text(text: str, emotion: str) -> str:
+    normalized = text.lower()
+    if emotion in {"happy"} or any(
+        keyword in normalized
+        for keyword in ("完成", "好了", "可以", "没问题", "收到", "当然", "ok", "done", "great")
+    ):
+        return "happy"
+    if emotion in {"concerned", "confused"} or any(
+        keyword in normalized
+        for keyword in ("抱歉", "失败", "错误", "超时", "不确定", "听不清", "无法", "不能")
+    ):
+        return "concerned"
+    if emotion == "surprised" or any(keyword in normalized for keyword in ("注意", "等等", "危险", "小心")):
+        return "surprised"
+    if emotion in {"curious", "thinking"} or any(
+        marker in normalized for marker in ("?", "？", "吗", "呢", "为什么", "怎么", "如何")
+    ):
+        return "curious"
+    return "talk"
 
 
 async def _send_tts_audio(

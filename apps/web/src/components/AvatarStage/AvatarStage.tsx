@@ -56,11 +56,12 @@ export function AvatarStage({ onInterrupt }: { onInterrupt: () => void }) {
     controllerRef.current?.setState({
       mode: avatar.mode,
       expression: avatar.expression,
+      motion: avatar.motion,
       subtitle: avatar.subtitle,
       lipSync: isSpeaking,
       lipSyncLevel,
     });
-  }, [avatar.expression, avatar.mode, avatar.subtitle, isSpeaking, lipSyncLevel]);
+  }, [avatar.expression, avatar.mode, avatar.motion, avatar.subtitle, isSpeaking, lipSyncLevel]);
 
   const mouthOpen = Math.max(0.08, Math.min(1, lipSyncLevel || (isSpeaking ? 0.35 : 0.08)));
 
