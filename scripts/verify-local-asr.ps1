@@ -20,6 +20,14 @@ if (-not (Test-Path $AudioPath)) {
 Import-DotEnvFile -Path (Join-Path $Root ".env")
 Import-DotEnvFile -Path (Join-Path $Root "apps\server\.env")
 
+$LocalAsrModelPath = [Environment]::GetEnvironmentVariable("LOCAL_ASR_MODEL_PATH", "Process")
+if ($LocalAsrModelPath -and -not (Test-Path $LocalAsrModelPath)) {
+    throw "LOCAL_ASR_MODEL_PATH is configured but the model file does not exist: $LocalAsrModelPath"
+}
+if ($LocalAsrModelPath) {
+    Write-Host "Using local Whisper model file: $LocalAsrModelPath"
+}
+
 $Uv = Resolve-Uv
 $Python = Resolve-Python
 if (-not $Uv -and -not $Python) {

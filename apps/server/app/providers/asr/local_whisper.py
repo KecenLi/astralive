@@ -138,14 +138,7 @@ class _LocalWhisperWorker:
         env = os.environ.copy()
         env.setdefault("PYTHONIOENCODING", "utf-8")
         self.process = await asyncio.create_subprocess_exec(
-            python,
-            str(script),
-            "--model",
-            self.settings.local_asr_model,
-            "--device",
-            self.settings.local_asr_device,
-            "--language",
-            self.settings.audio_transcription_language,
+            *_worker_command(self.settings, script, python),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=self.stderr_file,
@@ -205,6 +198,24 @@ def _resolve_script_path(configured: str, fallback_name: str) -> Path:
         if candidate.exists():
             return candidate
     raise RuntimeError(f"Local Whisper worker script not found: {configured_path}")
+
+
+def _worker_command(settings: Settings, script: Path, python: str) -> list[str]:
+    command = [
+        python,
+        str(script),
+        "--model",
+        settings.local_asr_model,
+        "--device",
+        settings.local_asr_device,
+        "--language",
+        settings.audio_transcription_language,
+    ]
+    if settings.local_asr_model_path.strip():
+        command.extend(["--model-path", settings.local_asr_model_path.strip()])
+    if settings.local_asr_download_root.strip():
+        command.extend(["--download-root", settings.local_asr_download_root.strip()])
+    return command
 
 
 def _pcm16_to_wav(audio_bytes: bytes, sample_rate: int, channels: int) -> bytes:

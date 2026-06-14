@@ -37,7 +37,7 @@ from app.contracts.model_io import (
 from app.core.session_state import SessionState
 from app.services.avatar_service import AvatarService
 from app.providers.asr.google_genai import GoogleGenAIASRProvider
-from app.providers.asr.local_whisper import LocalWhisperASRProvider
+from app.providers.asr.local_whisper import LocalWhisperASRProvider, _worker_command
 from app.providers.asr.openai_compatible import OpenAICompatibleASRProvider
 from app.providers.registry import ProviderRegistry
 from app.providers.llm.openai_compatible import OpenAICompatibleLLMProvider
@@ -558,6 +558,27 @@ async def test_local_whisper_asr_uses_worker_wav(tmp_path) -> None:
     assert result.text == "小七本地识别"
     assert result.raw["provider"] == "local_whisper"
     assert calls == [(calls[0][0], "zh-CN")]
+
+
+def test_local_whisper_worker_command_includes_model_path_and_download_root(tmp_path) -> None:
+    model_path = tmp_path / "large-v3.pt"
+    download_root = tmp_path / "whisper-cache"
+    settings = Settings(
+        local_asr_model="large-v3",
+        local_asr_model_path=str(model_path),
+        local_asr_download_root=str(download_root),
+        local_asr_device="cuda",
+        audio_transcription_language="zh-CN",
+    )
+
+    command = _worker_command(settings, tmp_path / "local_whisper_worker.py", "python.exe")
+
+    assert command[:2] == ["python.exe", str(tmp_path / "local_whisper_worker.py")]
+    assert command[command.index("--model") + 1] == "large-v3"
+    assert command[command.index("--model-path") + 1] == str(model_path)
+    assert command[command.index("--download-root") + 1] == str(download_root)
+    assert command[command.index("--device") + 1] == "cuda"
+    assert command[command.index("--language") + 1] == "zh-CN"
 
 
 async def test_audio_service_prewarm_calls_provider_hooks() -> None:

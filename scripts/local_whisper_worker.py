@@ -31,6 +31,8 @@ CHINESE_INITIAL_PROMPT = (
 def main() -> int:
     parser = argparse.ArgumentParser(description="MODVII persistent local Whisper ASR worker.")
     parser.add_argument("--model", default="base")
+    parser.add_argument("--model-path", default="")
+    parser.add_argument("--download-root", default="")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--language", default="")
     args = parser.parse_args()
@@ -45,7 +47,17 @@ def main() -> int:
     ensure_ffmpeg_on_path()
     import whisper
 
-    model = whisper.load_model(args.model, device=args.device)
+    model_target = args.model
+    download_root = args.download_root.strip() or None
+    model_path = args.model_path.strip()
+    if model_path:
+        resolved_model_path = Path(model_path).expanduser().resolve()
+        if not resolved_model_path.exists():
+            raise FileNotFoundError(f"Local Whisper model file not found: {resolved_model_path}")
+        model_target = str(resolved_model_path)
+        download_root = None
+
+    model = whisper.load_model(model_target, device=args.device, download_root=download_root)
     default_language = normalize_language(args.language)
 
     for line in sys.stdin:

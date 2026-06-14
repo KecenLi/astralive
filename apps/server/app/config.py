@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     local_asr_python: str = ""
     local_asr_worker_script: str = str(PROJECT_ROOT / "scripts" / "local_whisper_worker.py")
     local_asr_model: str = "base"
+    local_asr_model_path: str = ""
+    local_asr_download_root: str = ""
     local_asr_device: str = "cpu"
     local_asr_timeout_seconds: float = 120.0
     openai_compatible_tts_base_url: str = ""

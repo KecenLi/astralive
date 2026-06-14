@@ -2,7 +2,7 @@
 
 - Repository: https://github.com/KecenLi/astralive
 - Branch: main
-- Latest feature commit for this round: this commit, visual timeout/manual capture fix
+- Latest feature commit for this round: this commit, local Whisper large-v3 packaging integration
 - To check the current latest commit: `git rev-parse --short HEAD`
 - Reminder: after each implementation and test round, commit and push intentional source changes, then report the commit hash, latest packaged exe path, timestamp, and SHA256.
 
@@ -16,3 +16,13 @@
 - Latest installer: `D:\assist ai\dist\desktop\MODVII Setup 0.1.0.exe`, SHA256 `14AC05C97A32308D058088E747349962077BAE2759047243AEA6B10DCAF444BC`.
 - Warning: `D:\assist ai\dist\desktop\MODVII 0.1.0.exe` is still the old locked portable from 17:17 and should not be treated as latest until it is rebuilt after closing the app.
 - Validation before push this round: backend pytest/ruff, web vitest/build, local whisper worker py_compile, server exe health smoke. Desktop renderer smoke was skipped because it kills the user’s currently running MODVII process.
+
+## 2026-06-14 Local Whisper large-v3 / CUDA Round
+
+- Claude verified `LOCAL_ASR_MODEL=large-v3` on `LOCAL_ASR_DEVICE=cuda` with Chinese initial prompt and beam search; Agent 0 integrated the missing packaged-runtime path support.
+- `LOCAL_ASR_MODEL_PATH` is now honored by the backend and passed to `scripts/local_whisper_worker.py` as an explicit model file. This avoids bundling the 3GB `large-v3.pt` into Git or the portable exe.
+- Current local `.env` points to `C:\Users\YHT\.cache\whisper\large-v3.pt`; `.env` remains ignored and must not be committed.
+- Packaged behavior: Electron ships the worker script, while Whisper weights stay in the user cache or a configured model path. If the file is absent, the verifier and worker fail with a clear missing-model message instead of silently falling back.
+- Latest portable for this round: `D:\assist ai\dist\desktop\MODVII-0.1.0-asr-largev3-20260614-1754.exe`, SHA256 `DAA0E3B66A136361048CC38694319C908DC5BB4CF72A29C7B74719CDF4744E42`.
+- Latest packaged server exe SHA256: `92423D1E2ADDD911780E91A7F7A996316B951BBB2E6860ED2FE05D692E28AFB5`.
+- Validation before push this round: backend pytest/ruff, web vitest/build, local ASR large-v3 verifier, local whisper worker py_compile, server exe health smoke.
