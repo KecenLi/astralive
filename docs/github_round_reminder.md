@@ -125,3 +125,15 @@
 - Public tree guard now explicitly allows only the two already tracked safe docs: `docs/cosyvoice3_setup.md` and `docs/github_round_reminder.md`; all other ignored docs remain blocked from accidental publication.
 - Subagents used this round: none. Agent 0 owned backend/frontend/CosyVoice script changes, validation, commit, and push.
 - Validation before push this round: backend `ruff check app`, backend `pytest`, web `tsc -b`, web `vitest run`, local CosyVoice3 TTS, package smoke, desktop interaction smoke, and public-tree guard.
+
+## 2026-06-14 Visibility Scoring Round Notes
+
+- User priority: make existing hidden strengths visible for judging before adding more features. Four workstreams: cost savings narrative, vision self-check/focus request, memory visibility, bbox validation before overlay.
+- References registered locally: LiteLLM pricing table shape (MIT/non-enterprise), OpenLLMetry observability dimensions (Apache-2.0), google-gemini/cookbook bbox convention (Apache-2.0), Pipecat turn-state reference (BSD-2-Clause). No external source code copied.
+- Subagents used:
+  - Hume: plan/source-registration only. Edited `plans/modvii_visibility_scoring_plan.md` plus ignored local `docs/originality_log.md` and `docs/third_party_licenses.md`.
+  - Copernicus/Dirac: structured vision output, bbox parser/validation script, vision provider tests. Did not edit `websocket.py`.
+  - Ampere/Halley: frontend CostPanel narrative, memory/focus display, client visual metrics events. Did not edit backend.
+- Agent 0 owns final protocol integration: `client.metrics.visual_frame`, savings counters, `vision.need_focus`, session `visual_self_check_notice`, history count wiring, tests, package smoke, commit, and push.
+- Public commit should include safe source/tests/scripts/plan docs only. Ignored local docs remain local unless explicitly force-added by the user.
+- Validation before push this round: backend `ruff check app`, backend `pytest`, web `tsc -b`, web `vitest run`, `verify-vision-bbox.ps1 -Provider mock`, package smoke, desktop interaction smoke, and public-tree guard.

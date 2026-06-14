@@ -8,12 +8,13 @@ import {
   captureOptionsFor,
   captureReasonFor,
   getFrameIntervalMs,
+  sceneHashDistance,
   shouldSendSceneHash,
   VisualCaptureActivity,
   VisualCaptureMode,
 } from "../../features/media/frameSampler";
 import { requestScreenCapture, stopMediaStream } from "../../features/media/screenCapture";
-import { createEvent, FramePayload } from "../../lib/events";
+import { createEvent, FramePayload, VisualFrameMetricPayload } from "../../lib/events";
 import { wsClient } from "../../lib/wsClient";
 
 interface ScreenCapturePanelProps {
@@ -36,6 +37,14 @@ export function ScreenCapturePanel({ autoStartSignal, onFrameSent, suspendAutoUp
   const sessionId = useAppStore((state) => state.sessionId);
   const status = useAppStore((state) => state.status);
   const sceneChangeThreshold = useAppStore((state) => state.visualCapabilities.scene_change_threshold);
+
+  const sendVisualMetric = useCallback(
+    (payload: Omit<VisualFrameMetricPayload, "source">) => {
+      if (!sessionId) return;
+      wsClient.send(createEvent("client.metrics.visual_frame", sessionId, { source: "screen", ...payload }));
+    },
+    [sessionId],
+  );
 
   const stopScreen = useCallback(() => {
     stopMediaStream(streamRef.current);
@@ -84,6 +93,13 @@ export function ScreenCapturePanel({ autoStartSignal, onFrameSent, suspendAutoUp
           activity === "focus" ? "用户要求看清楚屏幕内容。" : "连续屏幕视觉上下文。",
           captureOptionsFor(mode, activity),
         );
+        const hashDistance = sceneHashDistance(lastSceneHashRef.current, frame.scene_hash);
+        sendVisualMetric({
+          event: "candidate",
+          capture_reason: reason,
+          frame_id: frame.frame_id,
+          ...(hashDistance === null ? {} : { scene_hash_distance: hashDistance }),
+        });
         if (
           !shouldSendSceneHash(
             lastSceneHashRef.current,
@@ -92,6 +108,12 @@ export function ScreenCapturePanel({ autoStartSignal, onFrameSent, suspendAutoUp
             sceneChangeThreshold,
           )
         ) {
+          sendVisualMetric({
+            event: "client_deduped",
+            capture_reason: reason,
+            frame_id: frame.frame_id,
+            ...(hashDistance === null ? {} : { scene_hash_distance: hashDistance }),
+          });
           setCaptureState("重复画面跳过");
           return;
         }
@@ -110,7 +132,7 @@ export function ScreenCapturePanel({ autoStartSignal, onFrameSent, suspendAutoUp
         captureInFlightRef.current = false;
       }
     },
-    [mode, onFrameSent, sceneChangeThreshold, sessionId],
+    [mode, onFrameSent, sceneChangeThreshold, sendVisualMetric, sessionId],
   );
 
   const focusScreen = useCallback(() => {
@@ -133,13 +155,22 @@ export function ScreenCapturePanel({ autoStartSignal, onFrameSent, suspendAutoUp
   }, [autoUpload, suspendAutoUpload]);
 
   useEffect(() => {
-    if (!autoUpload || suspendAutoUpload || !streamRef.current) return;
+    if (!autoUpload || !streamRef.current) return;
     let disposed = false;
     let timer = 0;
 
     async function tick() {
       const activity: VisualCaptureActivity =
         Date.now() < focusUntil ? "focus" : activityFromStatus(status);
+      const reason = captureReasonFor("screen", mode, activity);
+      if (suspendAutoUpload || status === "sleeping") {
+        sendVisualMetric({ event: "sleep_blocked", capture_reason: reason });
+        setCaptureState(status === "sleeping" ? "睡眠中，自动采样拦截" : "语音优先，暂停自动上传");
+        if (!disposed) {
+          timer = window.setTimeout(tick, getFrameIntervalMs(mode, activity));
+        }
+        return;
+      }
       await captureAndSend(activity);
       if (!disposed) {
         timer = window.setTimeout(tick, getFrameIntervalMs(mode, activity));
@@ -151,7 +182,7 @@ export function ScreenCapturePanel({ autoStartSignal, onFrameSent, suspendAutoUp
       disposed = true;
       window.clearTimeout(timer);
     };
-  }, [autoUpload, captureAndSend, focusUntil, mode, status, suspendAutoUpload]);
+  }, [autoUpload, captureAndSend, focusUntil, mode, sendVisualMetric, status, suspendAutoUpload]);
 
   return (
     <section className="panel screen-panel">

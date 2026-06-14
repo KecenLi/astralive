@@ -173,17 +173,21 @@ def _looks_like_price(value: Mapping[str, Any]) -> bool:
             "input_per_1m_tokens",
             "input_per_million",
             "input_usd_per_million",
+            "input_cost_per_token",
             "output",
             "output_per_1k",
             "output_per_1m_tokens",
             "output_per_million",
             "output_usd_per_million",
+            "output_cost_per_token",
             "prompt",
             "prompt_per_1k",
             "prompt_per_million",
+            "prompt_cost_per_token",
             "completion",
             "completion_per_1k",
             "completion_per_million",
+            "completion_cost_per_token",
         )
     )
 
@@ -220,6 +224,21 @@ def _price_rate(value: Mapping[str, Any], source: str) -> _PriceRate:
         input_per_million = input_per_1k * 1000
     if output_per_1k is not None:
         output_per_million = output_per_1k * 1000
+
+    input_per_token = _price_value(
+        value,
+        ("input_cost_per_token", "prompt_cost_per_token"),
+        default=None,
+    )
+    output_per_token = _price_value(
+        value,
+        ("output_cost_per_token", "completion_cost_per_token"),
+        default=None,
+    )
+    if input_per_token is not None:
+        input_per_million = input_per_token * 1_000_000
+    if output_per_token is not None:
+        output_per_million = output_per_token * 1_000_000
     return _PriceRate(
         input_per_million=max(0.0, input_per_million),
         output_per_million=max(0.0, output_per_million),

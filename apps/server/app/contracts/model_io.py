@@ -15,6 +15,7 @@ class VisionObject(BaseModel):
     label: str
     zh: str | None = None
     confidence: float | None = None
+    bbox: list[float] | None = None
 
 
 class VisionResult(BaseModel):
@@ -22,6 +23,8 @@ class VisionResult(BaseModel):
     objects: list[VisionObject] = Field(default_factory=list)
     ocr_text: list[str] = Field(default_factory=list)
     confidence: float = 0.0
+    need_focus: bool = False
+    focus_reason: str | None = None
     raw: dict = Field(default_factory=dict)
 
 

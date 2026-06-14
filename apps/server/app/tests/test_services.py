@@ -76,6 +76,33 @@ async def test_mock_vision_updates_cost() -> None:
     assert session.cost_meter.vision_calls == 1
 
 
+async def test_vision_cache_hit_exposes_saved_call_metrics() -> None:
+    settings = Settings(vision_provider="mock", llm_provider="mock")
+    session = SessionState(wake_word=settings.wake_word)
+    service = VisionService(ProviderRegistry(settings).vision(), settings)
+    frame = FramePayload(
+        frame_id="frame_cache_1",
+        width=640,
+        height=360,
+        capture_reason="screen_low_fps",
+        scene_hash="0" * 64,
+        data_base64="abc123",
+    )
+
+    _, first_from_cache = await service.analyze_frame(session, frame, "你看到了什么？")
+    _, second_from_cache = await service.analyze_frame(
+        session,
+        frame.model_copy(update={"frame_id": "frame_cache_2"}),
+        "你看到了什么？",
+    )
+
+    assert not first_from_cache
+    assert second_from_cache
+    assert session.cost_meter.vision_calls == 1
+    assert session.cost_meter.scene_cache_hits == 1
+    assert session.cost_meter.vision_calls_saved == 1
+
+
 class FailingVisionProvider(VisionProvider):
     async def analyze(self, data: VisionInput) -> VisionResult:
         raise RuntimeError("quota exhausted")
@@ -943,6 +970,11 @@ class ControlledVisionProvider(VisionProvider):
         self.release.setdefault(frame_id, asyncio.Event()).set()
 
 
+class LowConfidenceVisionProvider(VisionProvider):
+    async def analyze(self, data: VisionInput) -> VisionResult:
+        return VisionResult(summary="画面太暗，我不确定文字内容。", confidence=0.4)
+
+
 class RateLimitedVisionProvider(VisionProvider):
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -1380,6 +1412,8 @@ async def test_visual_frame_is_deferred_during_voice_response() -> None:
         for event in websocket.events
     )
     assert session.cost_meter.vision_calls == 0
+    assert session.cost_meter.voice_priority_deferred_frames == 1
+    assert session.cost_meter.vision_calls_saved == 1
 
 
 async def test_visual_frame_analysis_does_not_block_realtime_audio() -> None:
@@ -1602,6 +1636,59 @@ async def test_visual_scheduler_can_run_screen_and_camera_in_parallel() -> None:
     assert len([event for event in websocket.events if event["type"] == "vision.summary"]) == 2
 
 
+async def test_low_confidence_visual_result_requests_focus() -> None:
+    websocket = StubWebSocket()
+    runtime = AudioRuntimeState()
+    visual_runtime = VisualRuntimeState()
+    session = SessionState(session_id="test_session", status="listening")
+    settings = Settings(realtime_provider="mock", llm_provider="mock", tts_provider="mock")
+    send_lock = asyncio.Lock()
+    vision = VisionService(LowConfidenceVisionProvider(), settings)
+    dialogue = DialogueService(ProviderRegistry(settings).llm(), settings)
+    avatar = AvatarService()
+    audio = StubStreamingAudioService(OrderSensitiveRealtimeStream())
+
+    await _handle_event(
+        websocket,  # type: ignore[arg-type]
+        EventEnvelope(
+            type="client.media.frame",
+            session_id=session.session_id,
+            payload=FramePayload(
+                frame_id="frame_low_confidence",
+                width=640,
+                height=360,
+                capture_reason="screen_low_fps",
+                scene_hash="low-confidence",
+                data_base64="abc123",
+            ).model_dump(),
+        ),
+        session,
+        vision,
+        dialogue,
+        audio,  # type: ignore[arg-type]
+        avatar,
+        WakeService(),
+        settings,
+        runtime,
+        visual_runtime,
+        0.0,
+        send_lock,
+        None,
+    )
+    assert visual_runtime.task is not None
+    await asyncio.wait_for(visual_runtime.task, timeout=1)
+
+    focus_events = [event for event in websocket.events if event["type"] == "vision.need_focus"]
+    summaries = [event for event in websocket.events if event["type"] == "vision.summary"]
+    assert focus_events
+    assert focus_events[-1]["payload"]["frame_id"] == "frame_low_confidence"
+    assert focus_events[-1]["payload"]["confidence"] == 0.4
+    assert summaries[-1]["payload"]["need_focus"] is True
+    assert session.cost_meter.visual_confidence_low_count == 1
+    assert session.cost_meter.focus_requests == 1
+    assert session.visual_self_check_notice
+
+
 async def test_visual_provider_429_cools_down_subsequent_frames() -> None:
     websocket = StubWebSocket()
     runtime = AudioRuntimeState()
@@ -1659,6 +1746,8 @@ async def test_visual_provider_429_cools_down_subsequent_frames() -> None:
     assert provider.calls == ["frame_429"]
     assert visual_runtime.provider_failure_count == 1
     assert visual_runtime.provider_cooldown_until > time.perf_counter()
+    assert session.cost_meter.visual_cooldown_drops == 1
+    assert session.cost_meter.vision_calls_saved == 1
     assert cooldown_logs
     assert skipped_logs
 

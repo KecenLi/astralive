@@ -39,6 +39,18 @@ export interface CostMeter {
   estimated_cost_usd: number | null;
   mode: CostMode;
   last_latency_ms: number | null;
+  frame_candidates?: number | null;
+  client_deduped_frames?: number | null;
+  sleep_blocked_frames?: number | null;
+  scene_cache_hits?: number | null;
+  vision_calls_saved?: number | null;
+  stale_visual_results_discarded?: number | null;
+  voice_priority_deferred_frames?: number | null;
+  visual_cooldown_drops?: number | null;
+  visual_pending_drops?: number | null;
+  estimated_visual_cost_saved_usd?: number | null;
+  visual_confidence_low_count?: number | null;
+  focus_requests?: number | null;
 }
 
 export interface AudioCapabilities {
@@ -58,6 +70,23 @@ export interface AudioCapabilities {
 
 export interface VisualCapabilities {
   scene_change_threshold: number;
+}
+
+export interface SessionStatePayload {
+  status?: string;
+  audio?: AudioCapabilities;
+  visual?: VisualCapabilities;
+  response_in_progress?: boolean;
+  history_turns?: number | null;
+  visual_self_check_notice?: string | null;
+  focus_notice?: string | null;
+}
+
+export interface VisionNeedFocusPayload {
+  frame_id?: string;
+  confidence?: number | null;
+  reason?: string | null;
+  focus_reason?: string | null;
 }
 
 export interface FramePayload {
@@ -80,6 +109,14 @@ export interface FramePayload {
   scene_hash: string;
   data_base64: string;
   prompt?: string;
+}
+
+export interface VisualFrameMetricPayload {
+  source: "camera" | "screen";
+  capture_reason: FramePayload["capture_reason"];
+  event: "candidate" | "client_deduped" | "sleep_blocked";
+  frame_id?: string;
+  scene_hash_distance?: number | null;
 }
 
 export interface AudioChunkPayload {

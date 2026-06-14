@@ -148,6 +148,17 @@ select {
   border-color: #404040 #ffffff #ffffff #404040;
 }
 
+.panel-title .memory-badge {
+  margin-left: auto;
+  padding: 1px 5px;
+  color: #111111;
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: nowrap;
+  background: #ffffe1;
+  border: 1px solid #808080;
+}
+
 .camera-preview {
   width: 100%;
   aspect-ratio: 16 / 9;
@@ -299,12 +310,14 @@ select {
 }
 
 .metric-list,
-.metric-grid {
+.metric-grid,
+.observability-list {
   margin: 10px 0 0;
 }
 
 .metric-list div,
-.metric-grid div {
+.metric-grid div,
+.observability-list div {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -314,12 +327,14 @@ select {
 }
 
 .metric-list dt,
-.metric-grid dt {
+.metric-grid dt,
+.observability-list dt {
   color: #333333;
 }
 
 .metric-list dd,
-.metric-grid dd {
+.metric-grid dd,
+.observability-list dd {
   margin: 0;
   font-weight: 700;
   text-align: right;
@@ -335,6 +350,13 @@ select {
 
 .metric-grid div {
   display: block;
+}
+
+.observability-list {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 12px;
+  font-size: 12px;
 }
 
 .level-meter {
@@ -587,7 +609,7 @@ select {
   padding: 8px;
   overflow: hidden;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   gap: 6px;
 }
 
@@ -605,6 +627,29 @@ select {
   margin-bottom: 0;
   min-width: 0;
   overflow: hidden;
+}
+
+.conversation-observability {
+  order: 1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  padding: 4px;
+  background: #eeeeee;
+  border: 1px solid #808080;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.conversation-observability span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-observability strong {
+  margin-right: 3px;
 }
 
 .visual-summary strong {
@@ -796,6 +841,25 @@ select {
   background: #fff4c5;
 }
 
+.savings-story {
+  display: grid;
+  gap: 3px;
+  margin-top: 8px;
+  padding: 6px 7px;
+  color: #111111;
+  font-size: 12px;
+  line-height: 1.35;
+  background: #ffffe1;
+  border: 2px solid #808080;
+  border-color: #404040 #ffffff #ffffff #404040;
+}
+
+.savings-story strong,
+.savings-story span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .policy-list {
   margin: 10px 0 0;
   padding-left: 18px;
@@ -843,6 +907,10 @@ select {
 
   .conversation-panel {
     margin: 0 8px 8px;
+  }
+
+  .conversation-observability {
+    grid-template-columns: 1fr;
   }
 }
 

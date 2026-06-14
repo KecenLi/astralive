@@ -26,6 +26,8 @@ import {
   createEvent,
   EventEnvelope,
   FramePayload,
+  SessionStatePayload,
+  VisionNeedFocusPayload,
   VisualCapabilities,
 } from "./lib/events";
 import { wsClient } from "./lib/wsClient";
@@ -83,27 +85,21 @@ function speak(text: string, onDone?: () => void) {
 function handleServerEvent(event: EventEnvelope<unknown>, effects: ServerEventEffects = {}) {
   const store = useAppStore.getState();
   if (event.type === "server.session.ready") {
-    const payload = event.payload as {
-      status?: string;
-      audio?: AudioCapabilities;
-      visual?: VisualCapabilities;
-      response_in_progress?: boolean;
-    };
+    const payload = event.payload as SessionStatePayload;
     if (payload.status) store.setStatus(payload.status);
     if (payload.audio) store.setAudioCapabilities(payload.audio);
     if (payload.visual) store.setVisualCapabilities(payload.visual);
+    store.setMemoryTurns(payload.history_turns);
+    store.setVisualSelfCheckNotice(payload.visual_self_check_notice ?? payload.focus_notice);
     if (payload.response_in_progress) effects.onResponseStarted?.();
   }
   if (event.type === "server.session.state") {
-    const payload = event.payload as {
-      status?: string;
-      audio?: AudioCapabilities;
-      visual?: VisualCapabilities;
-      response_in_progress?: boolean;
-    };
+    const payload = event.payload as SessionStatePayload;
     if (payload.status) store.setStatus(payload.status);
     if (payload.audio) store.setAudioCapabilities(payload.audio);
     if (payload.visual) store.setVisualCapabilities(payload.visual);
+    store.setMemoryTurns(payload.history_turns);
+    store.setVisualSelfCheckNotice(payload.visual_self_check_notice ?? payload.focus_notice);
     if (payload.response_in_progress) {
       effects.onResponseStarted?.();
     } else if (!assistantAudioPlayer.isActive()) {
@@ -157,12 +153,31 @@ function handleServerEvent(event: EventEnvelope<unknown>, effects: ServerEventEf
     store.finalizeUserSpeech(text ?? "");
   }
   if (event.type === "vision.summary") {
-    const payload = event.payload as { summary?: string; frame_id?: string; confidence?: number };
+    const payload = event.payload as {
+      summary?: string;
+      frame_id?: string;
+      confidence?: number;
+      need_focus?: boolean;
+      focus_reason?: string | null;
+    };
     store.setVisualSummary(payload.summary ?? "");
     store.setLastFrameInfo(`${payload.frame_id ?? "frame"} / ${(payload.confidence ?? 0).toFixed(2)}`);
+    if (payload.need_focus) {
+      store.setVisualSelfCheckNotice(
+        payload.focus_reason ?? `视觉置信度 ${(payload.confidence ?? 0).toFixed(2)}，需要更清晰画面。`,
+      );
+    }
   }
   if (event.type === "vision.need_focus") {
-    store.addMessage("system", "需要更清晰画面，点击 Camera 的高清凝视按钮。");
+    const payload = event.payload as VisionNeedFocusPayload;
+    const confidence =
+      typeof payload.confidence === "number" && Number.isFinite(payload.confidence)
+        ? ` / ${(payload.confidence * 100).toFixed(0)}%`
+        : "";
+    const reason = payload.reason ?? payload.focus_reason ?? "需要更清晰画面";
+    const notice = `${reason}${confidence}`;
+    store.setVisualSelfCheckNotice(notice);
+    store.addMessage("system", `${notice}，点击 Camera 或 Screen 的高清凝视按钮。`);
   }
   if (event.type === "cost.update") {
     store.setCost(event.payload as unknown as CostMeter);
@@ -331,6 +346,8 @@ function MainApp() {
         const session = await response.json();
         if (disposed) return;
         actions.setSession(session.session_id, session.wake_word ?? "小七");
+        actions.setMemoryTurns(session.history_turns);
+        actions.setVisualSelfCheckNotice(session.visual_self_check_notice ?? session.focus_notice);
         cleanup = wsClient.onEvent((event) =>
           handleServerEvent(event, {
             stopRealtimeAudio: stopClientAudio,

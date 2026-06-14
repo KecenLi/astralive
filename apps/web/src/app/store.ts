@@ -19,6 +19,8 @@ export interface AppState {
   messages: ConversationMessage[];
   visualSummary: string;
   lastFrameInfo: string;
+  memoryTurns: number;
+  visualSelfCheckNotice: string;
   avatar: AvatarStatePayload;
   cost: CostMeter;
   audioCapabilities: AudioCapabilities | null;
@@ -31,6 +33,8 @@ export interface AppState {
   markWake: () => void;
   setVisualSummary: (summary: string) => void;
   setLastFrameInfo: (info: string) => void;
+  setMemoryTurns: (turns: number | null | undefined) => void;
+  setVisualSelfCheckNotice: (notice: string | null | undefined) => void;
   setAvatar: (payload: AvatarStatePayload) => void;
   setAvatarLipSync: (level: number) => void;
   setCost: (cost: CostMeter) => void;
@@ -53,6 +57,18 @@ const initialCost: CostMeter = {
   estimated_cost_usd: 0,
   mode: "sleep",
   last_latency_ms: null,
+  frame_candidates: 0,
+  client_deduped_frames: 0,
+  sleep_blocked_frames: 0,
+  scene_cache_hits: 0,
+  vision_calls_saved: 0,
+  stale_visual_results_discarded: 0,
+  voice_priority_deferred_frames: 0,
+  visual_cooldown_drops: 0,
+  visual_pending_drops: 0,
+  estimated_visual_cost_saved_usd: 0,
+  visual_confidence_low_count: 0,
+  focus_requests: 0,
 };
 
 export const useAppStore = create<AppState>((set) => ({
@@ -66,6 +82,8 @@ export const useAppStore = create<AppState>((set) => ({
   messages: [],
   visualSummary: "",
   lastFrameInfo: "尚未上传",
+  memoryTurns: 0,
+  visualSelfCheckNotice: "",
   avatar: {
     mode: "sleeping",
     expression: "sleepy",
@@ -78,7 +96,8 @@ export const useAppStore = create<AppState>((set) => ({
   visualCapabilities: {
     scene_change_threshold: 0.12,
   },
-  setSession: (sessionId, wakeWord) => set({ sessionId, wakeWord }),
+  setSession: (sessionId, wakeWord) =>
+    set({ sessionId, wakeWord, memoryTurns: 0, visualSelfCheckNotice: "" }),
   setConnection: (connection) => set({ connection }),
   setStatus: (status) => set({ status }),
   setAudioCapabilities: (audioCapabilities) => set({ audioCapabilities }),
@@ -86,6 +105,9 @@ export const useAppStore = create<AppState>((set) => ({
   markWake: () => set((state) => ({ wakeSerial: state.wakeSerial + 1, status: "listening" })),
   setVisualSummary: (visualSummary) => set({ visualSummary }),
   setLastFrameInfo: (lastFrameInfo) => set({ lastFrameInfo }),
+  setMemoryTurns: (turns) =>
+    set({ memoryTurns: typeof turns === "number" && Number.isFinite(turns) ? Math.max(0, Math.round(turns)) : 0 }),
+  setVisualSelfCheckNotice: (notice) => set({ visualSelfCheckNotice: notice?.trim() ?? "" }),
   setAvatar: (avatar) => set({ avatar, status: avatar.mode }),
   setAvatarLipSync: (level) =>
     set((state) => ({
@@ -95,7 +117,7 @@ export const useAppStore = create<AppState>((set) => ({
         lip_sync_level: Math.min(1, Math.max(0, level)),
       },
     })),
-  setCost: (cost) => set({ cost }),
+  setCost: (cost) => set({ cost: { ...initialCost, ...cost } }),
   addMessage: (speaker, text) =>
     set((state) => ({
       messages: [...state.messages, { id: createId("msg"), speaker, text }],

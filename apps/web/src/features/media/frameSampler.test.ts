@@ -6,6 +6,7 @@ import {
   captureReasonFor,
   DEFAULT_SCENE_HASH_THRESHOLD,
   getFrameIntervalMs,
+  sceneHashDistance,
   shouldSendSceneHash,
 } from "./frameSampler";
 
@@ -50,6 +51,8 @@ describe("frameSampler", () => {
     expect(shouldSendSceneHash(null, "0000", "active")).toBe(true);
     expect(shouldSendSceneHash("0000000000000000", "1000000000000000", "active")).toBe(false);
     expect(shouldSendSceneHash("00000000", "10000000", "active")).toBe(true);
+    expect(sceneHashDistance("0000", "1000")).toBe(0.25);
+    expect(sceneHashDistance(null, "1000")).toBeNull();
   });
 
   it("honors custom scene hash thresholds while focus always sends", () => {

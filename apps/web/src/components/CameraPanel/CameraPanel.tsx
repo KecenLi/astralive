@@ -8,12 +8,13 @@ import {
   captureOptionsFor,
   captureReasonFor,
   getFrameIntervalMs,
+  sceneHashDistance,
   shouldSendSceneHash,
   VisualCaptureActivity,
   VisualCaptureMode,
 } from "../../features/media/frameSampler";
 import { createMockFrame } from "../../features/media/mockFrame";
-import { createEvent, FramePayload } from "../../lib/events";
+import { createEvent, FramePayload, VisualFrameMetricPayload } from "../../lib/events";
 import { wsClient } from "../../lib/wsClient";
 
 interface CameraPanelProps {
@@ -37,6 +38,14 @@ export function CameraPanel({ autoStartSignal, onFrameSent, suspendAutoUpload = 
   const status = useAppStore((state) => state.status);
   const lastFrameInfo = useAppStore((state) => state.lastFrameInfo);
   const sceneChangeThreshold = useAppStore((state) => state.visualCapabilities.scene_change_threshold);
+
+  const sendVisualMetric = useCallback(
+    (payload: Omit<VisualFrameMetricPayload, "source">) => {
+      if (!sessionId) return;
+      wsClient.send(createEvent("client.metrics.visual_frame", sessionId, { source: "camera", ...payload }));
+    },
+    [sessionId],
+  );
 
   const stopCamera = useCallback(() => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -73,6 +82,13 @@ export function CameraPanel({ autoStartSignal, onFrameSent, suspendAutoUpload = 
       captureInFlightRef.current = true;
       try {
         const frame = await captureVideoFrame(video, reason, prompt, captureOptionsFor(mode, activity));
+        const hashDistance = sceneHashDistance(lastSceneHashRef.current, frame.scene_hash);
+        sendVisualMetric({
+          event: "candidate",
+          capture_reason: reason,
+          frame_id: frame.frame_id,
+          ...(hashDistance === null ? {} : { scene_hash_distance: hashDistance }),
+        });
         if (
           !shouldSendSceneHash(
             lastSceneHashRef.current,
@@ -81,6 +97,12 @@ export function CameraPanel({ autoStartSignal, onFrameSent, suspendAutoUpload = 
             sceneChangeThreshold,
           )
         ) {
+          sendVisualMetric({
+            event: "client_deduped",
+            capture_reason: reason,
+            frame_id: frame.frame_id,
+            ...(hashDistance === null ? {} : { scene_hash_distance: hashDistance }),
+          });
           setCameraState("重复画面跳过");
           return;
         }
@@ -96,7 +118,7 @@ export function CameraPanel({ autoStartSignal, onFrameSent, suspendAutoUpload = 
         captureInFlightRef.current = false;
       }
     },
-    [mode, onFrameSent, sceneChangeThreshold, sessionId],
+    [mode, onFrameSent, sceneChangeThreshold, sendVisualMetric, sessionId],
   );
 
   const sendMockFrame = useCallback(() => {
@@ -123,7 +145,7 @@ export function CameraPanel({ autoStartSignal, onFrameSent, suspendAutoUpload = 
   }, [autoUpload, suspendAutoUpload]);
 
   useEffect(() => {
-    if (!autoUpload || suspendAutoUpload || !streamRef.current) return;
+    if (!autoUpload || !streamRef.current) return;
     let disposed = false;
     let timer = 0;
 
@@ -131,6 +153,14 @@ export function CameraPanel({ autoStartSignal, onFrameSent, suspendAutoUpload = 
       const activity: VisualCaptureActivity =
         Date.now() < focusUntil ? "focus" : activityFromStatus(status);
       const reason = captureReasonFor("camera", mode, activity);
+      if (suspendAutoUpload || status === "sleeping") {
+        sendVisualMetric({ event: "sleep_blocked", capture_reason: reason });
+        setCameraState(status === "sleeping" ? "睡眠中，自动采样拦截" : "语音优先，暂停自动上传");
+        if (!disposed) {
+          timer = window.setTimeout(tick, getFrameIntervalMs(mode, activity));
+        }
+        return;
+      }
       await sendFrame(reason, "连续摄像头视觉上下文。", activity);
       if (!disposed) {
         timer = window.setTimeout(tick, getFrameIntervalMs(mode, activity));
@@ -142,7 +172,7 @@ export function CameraPanel({ autoStartSignal, onFrameSent, suspendAutoUpload = 
       disposed = true;
       window.clearTimeout(timer);
     };
-  }, [autoUpload, focusUntil, mode, sendFrame, status, suspendAutoUpload]);
+  }, [autoUpload, focusUntil, mode, sendFrame, sendVisualMetric, status, suspendAutoUpload]);
 
   return (
     <section className="panel camera-panel">

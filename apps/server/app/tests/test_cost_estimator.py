@@ -131,6 +131,28 @@ def test_fallback_uses_text_length_when_usage_is_missing() -> None:
     assert estimate.cost_usd is not None
 
 
+def test_litellm_style_per_token_price_fields_are_supported() -> None:
+    estimator = CostEstimator(
+        price_table={
+            "openai_compatible:gpt-litellm-style": {
+                "input_cost_per_token": 0.000001,
+                "output_cost_per_token": 0.000002,
+            }
+        }
+    )
+
+    estimate = estimator.estimate(
+        raw={
+            "provider": "openai_compatible",
+            "model": "gpt-litellm-style",
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50},
+        }
+    )
+
+    assert estimate.price_source == "provided"
+    assert estimate.cost_usd == pytest.approx(0.0002)
+
+
 @pytest.mark.parametrize("provider", ["mock", "ollama", "local_whisper", "cosyvoice3"])
 def test_local_providers_are_zero_cost(provider: str) -> None:
     estimator = CostEstimator(

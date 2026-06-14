@@ -18,12 +18,14 @@ class SessionState(BaseModel):
     wake_word: str = "小七"
     last_user_text: str | None = None
     last_visual_summary: str | None = None
+    visual_self_check_notice: str | None = None
     last_visual_summary_at: datetime | None = None
     last_scene_hash: str | None = None
     response_in_progress: bool = False
     interrupted_count: int = 0
     cost_meter: CostMeter = Field(default_factory=CostMeter)
     history: list[ChatMessage] = Field(default_factory=list)
+    visual_candidate_frame_ids: set[str] = Field(default_factory=set, exclude=True)
 
     def append_history_turn(
         self,
@@ -80,6 +82,7 @@ class SessionState(BaseModel):
             "wake_word": self.wake_word,
             "last_user_text": self.last_user_text,
             "last_visual_summary": self.last_visual_summary,
+            "visual_self_check_notice": self.visual_self_check_notice,
             "response_in_progress": self.response_in_progress,
             "interrupted_count": self.interrupted_count,
             "history_turns": len(self.history) // 2,

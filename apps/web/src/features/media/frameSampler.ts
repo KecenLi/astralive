@@ -90,5 +90,11 @@ export function shouldSendSceneHash(
 ) {
   if (activity === "focus") return true;
   if (!previous || !next) return true;
-  return normalizedHashDistance(previous, next) > threshold;
+  const distance = sceneHashDistance(previous, next);
+  return distance === null || distance > threshold;
+}
+
+export function sceneHashDistance(previous: string | null, next: string) {
+  if (!previous || !next) return null;
+  return normalizedHashDistance(previous, next);
 }

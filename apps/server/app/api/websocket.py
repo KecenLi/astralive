@@ -263,8 +263,24 @@ async def _handle_event(
         await _send_cost(websocket, session, send_lock)
         return None
 
+    if event.type == "client.metrics.visual_frame":
+        _record_client_visual_metric(session, event.payload, settings)
+        await _send_cost(websocket, session, send_lock)
+        return response_task
+
     if event.type == "client.media.frame":
+        frame = FramePayload.model_validate(event.payload)
+        _record_visual_frame_candidate(session, frame.frame_id)
         if _should_defer_visual_frame(session, audio_runtime):
+            dropped_count = 1 + len(visual_runtime.pending)
+            session.cost_meter.voice_priority_deferred_frames += dropped_count
+            _record_saved_vision_call(
+                session,
+                settings,
+                prompt=str(event.payload.get("prompt") or session.last_user_text or "请描述画面。"),
+                output_text=session.last_visual_summary,
+                count=dropped_count,
+            )
             visual_runtime.pending.clear()
             await _send(
                 websocket,
@@ -278,10 +294,20 @@ async def _handle_event(
                 ),
                 send_lock,
             )
+            await _send_cost(websocket, session, send_lock)
             return response_task
         if _visual_provider_cooling_down(visual_runtime):
+            dropped_count = 1 + len(visual_runtime.pending)
+            session.cost_meter.visual_cooldown_drops += dropped_count
+            _record_saved_vision_call(
+                session,
+                settings,
+                prompt=str(event.payload.get("prompt") or session.last_user_text or "请描述画面。"),
+                output_text=session.last_visual_summary,
+                count=dropped_count,
+            )
             visual_runtime.pending.clear()
-            visual_runtime.dropped_pending_frames += 1
+            visual_runtime.dropped_pending_frames += dropped_count
             now = time.perf_counter()
             if now - visual_runtime.provider_cooldown_notice_at > 10:
                 visual_runtime.provider_cooldown_notice_at = now
@@ -297,14 +323,22 @@ async def _handle_event(
                     ),
                     send_lock,
                 )
+            await _send_cost(websocket, session, send_lock)
             return response_task
-        frame = FramePayload.model_validate(event.payload)
         _, dropped = visual_runtime.enqueue(
             frame,
             str(event.payload.get("prompt") or session.last_user_text or "请描述画面。"),
             settings,
         )
         if dropped:
+            session.cost_meter.visual_pending_drops += dropped
+            _record_saved_vision_call(
+                session,
+                settings,
+                prompt=str(event.payload.get("prompt") or session.last_user_text or "请描述画面。"),
+                output_text=session.last_visual_summary,
+                count=dropped,
+            )
             await _send(
                 websocket,
                 make_event(
@@ -1358,6 +1392,74 @@ def _visual_source_key(capture_reason: str) -> str:
     return "general"
 
 
+def _record_visual_frame_candidate(session: SessionState, frame_id: str | None) -> None:
+    normalized = str(frame_id or "").strip()
+    if normalized:
+        if normalized in session.visual_candidate_frame_ids:
+            return
+        session.visual_candidate_frame_ids.add(normalized)
+    session.cost_meter.add_frame_candidate()
+
+
+def _record_client_visual_metric(session: SessionState, payload: Any, settings: Settings) -> None:
+    if not isinstance(payload, dict):
+        return
+    event = str(payload.get("event") or payload.get("type") or "").strip()
+    frame_id = str(payload.get("frame_id") or "").strip()
+    if event == "candidate":
+        _record_visual_frame_candidate(session, frame_id)
+        return
+    if event in {"client_deduped", "deduped", "scene_deduped"}:
+        _record_visual_frame_candidate(session, frame_id)
+        session.cost_meter.client_deduped_frames += 1
+        _record_saved_vision_call(session, settings, output_text=session.last_visual_summary)
+        return
+    if event in {"sleep_blocked", "sleep", "blocked_by_sleep"}:
+        _record_visual_frame_candidate(session, frame_id)
+        session.cost_meter.sleep_blocked_frames += 1
+        _record_saved_vision_call(session, settings, output_text=session.last_visual_summary)
+
+
+def _record_saved_vision_call(
+    session: SessionState,
+    settings: Settings,
+    *,
+    prompt: str | None = None,
+    output_text: str | None = None,
+    count: int = 1,
+) -> None:
+    if count <= 0:
+        return
+    estimate = CostEstimator.from_settings(settings).estimate(
+        provider=settings.vision_provider,
+        model=_vision_model_name(settings),
+        input_text=prompt or "视觉帧分析",
+        output_text=output_text or session.last_visual_summary or "视觉摘要",
+    )
+    session.cost_meter.add_saved_vision_call(cost_usd=estimate.cost_usd, count=count)
+
+
+def _vision_model_name(settings: Settings) -> str:
+    provider = settings.vision_provider.lower()
+    if provider == "vertex_ai":
+        return settings.vertex_ai_vision_model
+    if provider == "gemini":
+        return settings.gemini_vision_model
+    if provider == "openai_compatible":
+        return settings.openai_compatible_vision_model
+    return provider
+
+
+def _vision_result_needs_focus(result: Any) -> bool:
+    if bool(getattr(result, "need_focus", False)):
+        return True
+    confidence = getattr(result, "confidence", None)
+    try:
+        return confidence is not None and float(confidence) < 0.55
+    except (TypeError, ValueError):
+        return False
+
+
 def _start_visual_tasks(
     websocket: WebSocket,
     session: SessionState,
@@ -1370,7 +1472,10 @@ def _start_visual_tasks(
     if _should_defer_visual_frame(session, audio_runtime):
         return
     if _visual_provider_cooling_down(visual_runtime):
-        visual_runtime.dropped_pending_frames += len(visual_runtime.pending)
+        dropped = len(visual_runtime.pending)
+        visual_runtime.dropped_pending_frames += dropped
+        session.cost_meter.visual_cooldown_drops += dropped
+        _record_saved_vision_call(session, settings, output_text=session.last_visual_summary, count=dropped)
         visual_runtime.pending.clear()
         return
 
@@ -1436,6 +1541,7 @@ async def _run_visual_frame_analysis(
             or job.sequence < visual_runtime.applied_sequence
             or result_age > settings.vision_result_max_age_seconds
         ):
+            session.cost_meter.stale_visual_results_discarded += 1
             await _send(
                 websocket,
                 make_event(
@@ -1458,7 +1564,32 @@ async def _run_visual_frame_analysis(
 
         vision.apply_frame_result(session, frame, result)
         visual_runtime.applied_sequence = max(visual_runtime.applied_sequence, job.sequence)
+        if _vision_result_needs_focus(result):
+            session.cost_meter.focus_requests += 1
+            if getattr(result, "confidence", 0.0) < 0.55:
+                session.cost_meter.visual_confidence_low_count += 1
+            focus_reason = getattr(result, "focus_reason", None) or "low_confidence"
+            session.visual_self_check_notice = (
+                f"{focus_reason} / confidence {getattr(result, 'confidence', 0.0):.2f}"
+            )
+            await _send(
+                websocket,
+                make_event(
+                    "vision.need_focus",
+                    session.session_id,
+                    {
+                        "reason": focus_reason,
+                        "frame_id": frame.frame_id,
+                        "confidence": getattr(result, "confidence", 0.0),
+                        "summary": result.summary,
+                        "objects": [obj.model_dump() for obj in result.objects],
+                        "ocr_text": result.ocr_text,
+                    },
+                ),
+                send_lock,
+            )
         if _should_defer_visual_frame(session, audio_runtime):
+            session.cost_meter.voice_priority_deferred_frames += 1
             await _send(
                 websocket,
                 make_event(
@@ -1487,6 +1618,8 @@ async def _run_visual_frame_analysis(
                     "objects": [obj.model_dump() for obj in result.objects],
                     "ocr_text": result.ocr_text,
                     "confidence": result.confidence,
+                    "need_focus": _vision_result_needs_focus(result),
+                    "focus_reason": getattr(result, "focus_reason", None),
                     "from_cache": from_cache,
                 },
             ),

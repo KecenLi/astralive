@@ -6,6 +6,7 @@ from app.config import Settings
 from app.contracts.model_io import VisionInput, VisionResult
 from app.providers.raw_usage import raw_usage_payload
 from app.providers.vision.base import VisionProvider
+from app.providers.vision.structured import build_structured_vision_prompt, parse_structured_vision_result
 
 
 class OpenAICompatibleVisionProvider(VisionProvider):
@@ -36,11 +37,7 @@ class OpenAICompatibleVisionProvider(VisionProvider):
 
     def _analyze_sync(self, data: VisionInput) -> VisionResult:
         detail = "high" if data.mode == "focus" else "low"
-        prompt = (
-            "请用中文简短总结画面。只描述和用户问题相关的可见事实；"
-            "如果画面太模糊或信息不足，请明确说需要更清晰画面。\n\n"
-            f"用户问题：{data.prompt}"
-        )
+        prompt = build_structured_vision_prompt(data.prompt)
         payload = {
             "model": self.model,
             "messages": [
@@ -65,9 +62,10 @@ class OpenAICompatibleVisionProvider(VisionProvider):
         if not summary:
             summary = "云端视觉模型没有返回画面描述。"
 
-        return VisionResult(
-            summary=summary,
-            confidence=0.72 if data.mode == "focus" else 0.66,
+        return parse_structured_vision_result(
+            summary,
+            fallback_summary=summary,
+            fallback_confidence=0.72 if data.mode == "focus" else 0.66,
             raw={
                 "provider": self.provider_name,
                 "model": self.model,

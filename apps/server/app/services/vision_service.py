@@ -44,6 +44,15 @@ class VisionService:
 
         is_focus_frame = frame.capture_reason in {"focus_roi", "screen_focus"}
         if not is_focus_frame and self._cache_valid(session, frame.scene_hash):
+            session.cost_meter.scene_cache_hits += 1
+            session.cost_meter.add_saved_vision_call(
+                cost_usd=self.cost_estimator.estimate(
+                    provider=self.settings.vision_provider,
+                    model=_vision_model_name(self.settings),
+                    input_text=prompt,
+                    output_text=session.last_visual_summary,
+                ).cost_usd
+            )
             return (
                 VisionResult(
                     summary=session.last_visual_summary or "",
@@ -109,3 +118,14 @@ def _normalized_hash_distance(a: str, b: str) -> float:
         if a[index] != b[index]:
             distance += 1
     return distance / max(len(a), len(b))
+
+
+def _vision_model_name(settings: Settings) -> str:
+    provider = settings.vision_provider.lower()
+    if provider == "vertex_ai":
+        return settings.vertex_ai_vision_model
+    if provider == "gemini":
+        return settings.gemini_vision_model
+    if provider == "openai_compatible":
+        return settings.openai_compatible_vision_model
+    return provider
