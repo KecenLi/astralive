@@ -3,12 +3,10 @@ import json
 from collections.abc import AsyncIterator
 from urllib import request
 
-import httpx
-
 from app.config import Settings
 from app.contracts.model_io import DialogueInput, DialogueResult, DialogueStreamChunk
 from app.providers.llm.base import LLMProvider
-from app.providers.llm.streaming import content_to_text, iter_sse_data
+from app.providers.llm.streaming import content_to_text, iter_sse_data, make_streaming_client
 from app.providers.raw_usage import raw_usage_payload
 
 
@@ -38,7 +36,7 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         payload["stream_options"] = {"include_usage": True}
         raw_base = {"provider": self.provider_name, "model": self.model}
         latest_usage: dict | None = None
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with make_streaming_client(60.0) as client:
             async with client.stream(
                 "POST",
                 f"{self.base_url.rstrip('/')}/chat/completions",

@@ -14,6 +14,7 @@ import {
   VisualCaptureMode,
 } from "../../features/media/frameSampler";
 import { requestScreenCapture, stopMediaStream } from "../../features/media/screenCapture";
+import { runExclusiveCapture } from "../../features/media/captureCoordinator";
 import { createEvent, FramePayload, VisualFrameMetricPayload } from "../../lib/events";
 import { wsClient } from "../../lib/wsClient";
 
@@ -171,7 +172,10 @@ export function ScreenCapturePanel({ autoStartSignal, onFrameSent, suspendAutoUp
         }
         return;
       }
-      await captureAndSend(activity);
+      // Share the single capture slot with the camera loop so the two visual
+      // sources never burst frames at the server's single-concurrency vision
+      // path simultaneously. A skipped sampled frame is harmless.
+      await runExclusiveCapture(() => captureAndSend(activity));
       if (!disposed) {
         timer = window.setTimeout(tick, getFrameIntervalMs(mode, activity));
       }

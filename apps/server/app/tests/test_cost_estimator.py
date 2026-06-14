@@ -197,3 +197,42 @@ def test_cost_meter_add_estimate_accumulates_tokens_cost_and_call_type() -> None
     assert meter.estimated_input_tokens == 100
     assert meter.estimated_output_tokens == 50
     assert meter.estimated_cost_usd == pytest.approx(0.0002)
+
+
+def test_qwen_plus_has_builtin_price_so_panel_is_not_zero() -> None:
+    estimator = CostEstimator()
+    estimate = estimator.estimate(
+        provider="openai_compatible",
+        model="qwen-plus",
+        raw={"usage": {"prompt_tokens": 1000, "completion_tokens": 1000}},
+    )
+    # China provider example ships qwen-plus; real usage must yield non-zero cost.
+    assert estimate.cost_usd is not None
+    assert estimate.cost_usd > 0
+    assert estimate.source == "usage"
+
+
+def test_unknown_cloud_provider_uses_generic_fallback_not_zero() -> None:
+    estimator = CostEstimator()
+    estimate = estimator.estimate(
+        provider="some_new_cloud_api",
+        model="mystery-model",
+        raw={"usage": {"prompt_tokens": 1000, "completion_tokens": 1000}},
+    )
+    assert estimate.cost_usd is not None
+    assert estimate.cost_usd > 0
+    assert estimate.price_source == "generic-fallback"
+
+
+def test_local_providers_stay_zero_cost() -> None:
+    estimator = CostEstimator()
+    for provider in ("mock", "cosyvoice3", "local_whisper", "ollama"):
+        estimate = estimator.estimate(provider=provider, model="x", output_text="本地不计费")
+        assert estimate.cost_usd == 0.0
+
+
+def test_empty_provider_keeps_none_price() -> None:
+    estimator = CostEstimator()
+    estimate = estimator.estimate(raw={"usage": {"prompt_tokens": 5, "completion_tokens": 5}})
+    # No provider identity at all: cannot price, so stays None (honest unknown).
+    assert estimate.cost_usd is None

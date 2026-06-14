@@ -14,6 +14,7 @@ import {
   VisualCaptureMode,
 } from "../../features/media/frameSampler";
 import { createMockFrame } from "../../features/media/mockFrame";
+import { runExclusiveCapture } from "../../features/media/captureCoordinator";
 import { createEvent, FramePayload, VisualFrameMetricPayload } from "../../lib/events";
 import { wsClient } from "../../lib/wsClient";
 
@@ -161,7 +162,11 @@ export function CameraPanel({ autoStartSignal, onFrameSent, suspendAutoUpload = 
         }
         return;
       }
-      await sendFrame(reason, "连续摄像头视觉上下文。", activity);
+      // Funnel auto-uploads through the shared coordinator so camera and screen
+      // never fire concurrently and overwhelm the single-concurrency vision
+      // path. If the slot is busy this tick is skipped (returns null) and we
+      // just reschedule — a dropped sampled frame is harmless.
+      await runExclusiveCapture(() => sendFrame(reason, "连续摄像头视觉上下文。", activity));
       if (!disposed) {
         timer = window.setTimeout(tick, getFrameIntervalMs(mode, activity));
       }

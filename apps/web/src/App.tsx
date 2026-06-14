@@ -33,6 +33,7 @@ import {
 import { wsClient } from "./lib/wsClient";
 
 const RESPONSE_AUDIO_DONE_TIMEOUT_MS = 90_000;
+const FIXED_NOTICE_AUDIO_SOURCE = "fixed_notice";
 
 interface SendUserTextOptions {
   keepConversation?: boolean;
@@ -50,36 +51,7 @@ interface ServerEventEffects {
 }
 
 function cancelSpeech() {
-  if (!("speechSynthesis" in window)) return;
-  window.speechSynthesis.cancel();
   useAppStore.getState().setAvatarLipSync(0);
-}
-
-function speak(text: string, onDone?: () => void) {
-  if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") return false;
-  cancelSpeech();
-  const utterance = new SpeechSynthesisUtterance(text);
-  utterance.lang = "zh-CN";
-  utterance.rate = 1;
-  let lipTimer: number | null = null;
-  let finished = false;
-  const finish = () => {
-    if (finished) return;
-    finished = true;
-    if (lipTimer) window.clearInterval(lipTimer);
-    useAppStore.getState().setAvatarLipSync(0);
-    onDone?.();
-  };
-  utterance.onstart = () => {
-    const startedAt = performance.now();
-    lipTimer = window.setInterval(() => {
-      const level = 0.18 + Math.abs(Math.sin((performance.now() - startedAt) / 150)) * 0.35;
-      useAppStore.getState().setAvatarLipSync(level);
-    }, 90);
-  };
-  utterance.onend = utterance.onerror = finish;
-  window.speechSynthesis.speak(utterance);
-  return true;
 }
 
 function handleServerEvent(event: EventEnvelope<unknown>, effects: ServerEventEffects = {}) {
@@ -118,25 +90,27 @@ function handleServerEvent(event: EventEnvelope<unknown>, effects: ServerEventEf
     if (payload.audio_expected) {
       effects.onAssistantAudioExpected?.();
     } else {
-      const speaking = speak(text, () => effects.onResponseFinished?.("speech_synthesis_done"));
-      if (!speaking) effects.onResponseFinished?.("text_final_no_audio");
+      effects.onResponseFinished?.("text_final_no_audio");
     }
   }
   if (event.type === "assistant.audio.chunk") {
-    effects.onResponseStarted?.();
-    effects.onAssistantAudioExpected?.();
+    const payload = event.payload as AssistantAudioPayload;
+    const fixedNotice = payload.source === FIXED_NOTICE_AUDIO_SOURCE;
+    if (!fixedNotice) {
+      effects.onResponseStarted?.();
+      effects.onAssistantAudioExpected?.();
+    }
     cancelSpeech();
-    void assistantAudioPlayer.play(event.payload as AssistantAudioPayload).catch((error) => {
+    void assistantAudioPlayer.play(payload).catch((error) => {
       store.addMessage("system", error instanceof Error ? error.message : String(error));
-      effects.onResponseFinished?.("audio_play_failed");
+      if (!fixedNotice) effects.onResponseFinished?.("audio_play_failed");
     });
   }
   if (event.type === "assistant.audio.done") {
-    const payload = event.payload as { chunks?: number; fallback_text?: string };
+    const payload = event.payload as { chunks?: number; fallback_text?: string; source?: string };
+    if (payload.source === FIXED_NOTICE_AUDIO_SOURCE) return;
     if ((payload.chunks ?? 0) === 0 && payload.fallback_text) {
-      effects.onAssistantAudioStreamDone?.();
-      const speaking = speak(payload.fallback_text, () => effects.onResponseFinished?.("fallback_speech_done"));
-      if (!speaking) effects.onResponseFinished?.("fallback_text_no_audio");
+      effects.onAssistantAudioDone?.();
     } else {
       effects.onAssistantAudioDone?.();
     }

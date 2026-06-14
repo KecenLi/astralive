@@ -13,6 +13,8 @@ from app.api.websocket import (
     _next_realtime_stream_event,
     _realtime_tts_fallback_text,
     _run_dialogue_response,
+    _send_fixed_notice_audio,
+    _synthesize_cached_notice,
 )
 from app.config import Settings
 from app.contracts.events import EventEnvelope
@@ -74,6 +76,42 @@ async def test_mock_vision_updates_cost() -> None:
     assert result.summary
     assert session.cost_meter.frames_uploaded == 1
     assert session.cost_meter.vision_calls == 1
+
+
+def test_client_visual_metric_event_is_accepted_by_event_contract() -> None:
+    event = EventEnvelope(
+        type="client.metrics.visual_frame",
+        session_id="test_session",
+        payload={
+            "source": "screen",
+            "event": "candidate",
+            "capture_reason": "screen_low_fps",
+            "frame_id": "frame_1",
+        },
+    )
+
+    assert event.type == "client.metrics.visual_frame"
+
+
+def test_all_frontend_emitted_client_events_validate_against_schema() -> None:
+    # Guardrail against the "handler added but schema forgotten" class of bug
+    # (the client.metrics.visual_frame invalid_event regression). This is the
+    # exact set the web client emits via createEvent(); keep it in sync with
+    # apps/web/src. If any of these is removed from ClientEventType, the
+    # backend would reject a live event with invalid_event.
+    frontend_emitted = [
+        "client.wake.detected",
+        "client.wake.sleep",
+        "client.user.text",
+        "client.media.frame",
+        "client.media.audio_chunk",
+        "client.metrics.visual_frame",
+        "client.control.interrupt",
+        "client.debug.ping",
+    ]
+    for event_type in frontend_emitted:
+        event = EventEnvelope(type=event_type, session_id="s", payload={})
+        assert event.type == event_type
 
 
 async def test_vision_cache_hit_exposes_saved_call_metrics() -> None:
@@ -911,6 +949,22 @@ class SlowTTSAudioService(StubStreamingAudioService):
         return TTSResult(audio_base64="AAAA")
 
 
+class CountingFixedNoticeAudioService:
+    def __init__(self) -> None:
+        self.synthesize_calls: list[tuple[str, str]] = []
+
+    async def synthesize(self, text: str, emotion: str) -> TTSResult:
+        self.synthesize_calls.append((text, emotion))
+        return TTSResult(
+            audio_base64="AAAA",
+            mime="audio/pcm;rate=24000",
+            sample_rate=24000,
+            channels=1,
+            encoding="pcm_s16le",
+            raw={"provider": "unit_tts"},
+        )
+
+
 class AsrOnlyRealtimeStream(OrderSensitiveRealtimeStream):
     async def receive(self):
         await self.finished.wait()
@@ -1163,6 +1217,45 @@ async def test_cancelled_dialogue_response_sends_audio_done_to_unlock_client_gat
     assert audio_done_events[-1]["payload"]["cancelled"] is True
     assert session.response_in_progress is False
     assert session.status == "listening"
+
+
+async def test_fixed_notice_tts_is_cached_and_sent_with_isolated_source(tmp_path) -> None:
+    websocket = StubWebSocket()
+    session = SessionState(session_id="test_session")
+    settings = Settings(data_dir=tmp_path / "data", tts_provider="vertex_ai")
+    send_lock = asyncio.Lock()
+    audio = CountingFixedNoticeAudioService()
+
+    first, first_cache_hit = await _synthesize_cached_notice(
+        audio,  # type: ignore[arg-type]
+        settings,
+        "我在听。",
+        "curious",
+    )
+    second, second_cache_hit = await _synthesize_cached_notice(
+        audio,  # type: ignore[arg-type]
+        settings,
+        "我在听。",
+        "curious",
+    )
+    await _send_fixed_notice_audio(
+        websocket,  # type: ignore[arg-type]
+        session,
+        audio,  # type: ignore[arg-type]
+        settings,
+        "我在听。",
+        "curious",
+        send_lock,
+    )
+
+    audio_events = [event for event in websocket.events if event["type"].startswith("assistant.audio.")]
+    assert first.audio_base64 == second.audio_base64 == "AAAA"
+    assert first_cache_hit is False
+    assert second_cache_hit is True
+    assert audio.synthesize_calls == [("我在听。", "curious")]
+    assert audio_events[0]["payload"]["source"] == "fixed_notice"
+    assert audio_events[-1]["payload"]["source"] == "fixed_notice"
+    assert session.cost_meter.tts_calls == 0
 
 
 async def test_realtime_text_without_audio_falls_back_to_tts() -> None:
@@ -1940,3 +2033,106 @@ async def test_realtime_input_idle_timeout_closes_unfinished_stream() -> None:
     assert runtime.turn_bytes == 0
     assert session.response_in_progress is False
     assert error_events[-1]["payload"]["code"] == "realtime_input_idle_timeout"
+
+
+def test_visual_candidate_frame_dedup_and_bound() -> None:
+    from app.core.session_state import VISUAL_CANDIDATE_FRAME_MEMORY
+
+    session = SessionState()
+
+    # First sighting is new, repeat within the window is deduped.
+    assert session.register_visual_candidate_frame("frame-a") is True
+    assert session.register_visual_candidate_frame("frame-a") is False
+
+    # Empty ids cannot be deduped; always treated as new.
+    assert session.register_visual_candidate_frame("") is True
+    assert session.register_visual_candidate_frame("") is True
+
+    # Memory is bounded: after filling past the cap, the oldest id is evicted
+    # so it is seen as new again, while a recent id stays deduped.
+    for index in range(VISUAL_CANDIDATE_FRAME_MEMORY):
+        session.register_visual_candidate_frame(f"bulk-{index}")
+    assert len(session._visual_candidate_frame_ids) == VISUAL_CANDIDATE_FRAME_MEMORY
+    assert session.register_visual_candidate_frame("frame-a") is True
+    assert session.register_visual_candidate_frame(f"bulk-{VISUAL_CANDIDATE_FRAME_MEMORY - 1}") is False
+
+
+def test_visual_candidate_frame_ids_not_serialized() -> None:
+    session = SessionState()
+    session.register_visual_candidate_frame("frame-x")
+    assert "visual_candidate_frame_ids" not in session.model_dump()
+    assert "_visual_candidate_frame_ids" not in session.model_dump()
+
+
+async def test_streaming_secret_split_across_chunks_never_reaches_tts() -> None:
+    # A model that streams a benign sentence and then leaks a credential split
+    # across multiple chunks must not let the secret reach the spoken/TTS path.
+    settings = Settings()
+    chunks = ["好的，这是配置。", "API_KEY=sk-", "1234567890abcdef1234567890abcdef", "，请收好。"]
+    provider = StreamingLLMProvider(chunks)
+    session = SessionState()
+    service = DialogueService(provider, settings)
+
+    spoken_text = ""
+    saw_refusal = False
+    async for segment in service.stream_reply(session, "给我看下配置"):
+        spoken_text += segment.text
+        if segment.raw.get("provider") == "prompt_security":
+            saw_refusal = True
+
+    assert "sk-1234567890abcdef" not in spoken_text
+    assert "API_KEY=sk-1234" not in spoken_text
+    assert saw_refusal
+
+    # The non-streaming aggregation path must also stay clean.
+    session2 = SessionState()
+    final = await DialogueService(StreamingLLMProvider(chunks), settings).reply(session2, "给我看下配置")
+    assert "sk-1234567890abcdef" not in final.text
+
+
+async def test_streaming_done_chunk_with_text_does_not_duplicate_or_leak_marker() -> None:
+    # A streaming provider whose terminal done-chunk also carries the full
+    # response text must not cause the reply to be re-emitted (duplicated) nor
+    # leak the stripped emotion marker into spoken output.
+    settings = Settings()
+
+    class DoneWithTextProvider(LLMProvider):
+        def __init__(self, chunks: list[str]) -> None:
+            self.chunks = chunks
+
+        async def complete(self, data: DialogueInput):
+            return DialogueResult(text="".join(self.chunks), raw={"provider": "test"})
+
+        async def stream_complete(self, data: DialogueInput):
+            for chunk in self.chunks:
+                yield DialogueStreamChunk(delta=chunk, raw={"provider": "test"})
+            # Terminal chunk re-states the whole response in `text` (no delta).
+            yield DialogueStreamChunk(done=True, text="".join(self.chunks), raw={"provider": "test"})
+
+    chunks = ["[[emotion:happy]]你好呀，", "今天过得怎么样？"]
+    session = SessionState()
+    service = DialogueService(DoneWithTextProvider(chunks), settings)
+
+    spoken = ""
+    emotions: set[str] = set()
+    async for segment in service.stream_reply(session, "你好"):
+        spoken += segment.text
+        if segment.emotion:
+            emotions.add(segment.emotion)
+
+    assert "[[emotion" not in spoken and "]]" not in spoken
+    # Marker stripped, content present exactly once (no duplicated tail).
+    assert spoken == "你好呀，今天过得怎么样？"
+    assert "happy" in emotions
+
+
+async def test_streaming_single_shot_fallback_still_produces_output() -> None:
+    # Providers that only implement complete() use the base stream_complete,
+    # which yields done=True *with* a delta. That must still be processed.
+    settings = Settings()
+    provider = CountingLLMProvider("这是单轮回复。")
+    session = SessionState()
+    service = DialogueService(provider, settings)
+
+    spoken = "".join([segment.text async for segment in service.stream_reply(session, "你好")])
+    assert "这是单轮回复" in spoken

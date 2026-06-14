@@ -33,14 +33,18 @@ export function buildCostNarrative(cost: ReturnType<typeof useAppStore.getState>
   );
   const totalCalls =
     actualVisionCalls + metricValue(cost.llm_calls) + metricValue(cost.asr_calls) + metricValue(cost.tts_calls);
-  const estimatedCostPerCall =
-    totalCalls > 0 && isFiniteNumber(cost.estimated_cost_usd) ? cost.estimated_cost_usd / totalCalls : null;
+  // Total estimated spend is a hard, defensible number. We deliberately do not
+  // surface a blended "per call" average: vision/LLM/ASR/TTS have very
+  // different unit prices, so dividing total cost by total call count produces
+  // a figure with no real meaning that is hard to justify to reviewers.
+  const estimatedTotalCost = isFiniteNumber(cost.estimated_cost_usd) ? cost.estimated_cost_usd : 0;
 
   return {
     actualVisionCalls,
     candidateFrames,
-    estimatedCostPerCall,
+    estimatedTotalCost,
     savedVisionCalls,
+    totalCalls,
   };
 }
 
@@ -69,8 +73,8 @@ export function CostPanel() {
           {formatCount(cost.scene_cache_hits)}
         </span>
         <span>
-          Est. saved {formatUsd(cost.estimated_visual_cost_saved_usd)} / est. cost per call{" "}
-          {formatUsd(narrative.estimatedCostPerCall)}
+          Est. saved {formatUsd(cost.estimated_visual_cost_saved_usd)} / est. spend{" "}
+          {formatUsd(narrative.estimatedTotalCost)} over {formatCount(narrative.totalCalls)} calls
         </span>
       </div>
       <dl className="metric-grid">

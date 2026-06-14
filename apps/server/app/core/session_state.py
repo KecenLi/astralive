@@ -1,14 +1,20 @@
+from collections import deque
 from datetime import datetime, timezone
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from app.contracts.model_io import ChatMessage
 from app.core.cost_meter import CostMeter
 
 
 SessionStatus = Literal["sleeping", "awake", "listening", "thinking", "speaking", "interrupted"]
+
+# Upper bound on how many recent visual frame ids we remember for candidate
+# dedup. Keeps a long soak session from growing this set without bound while
+# still catching the duplicates that matter (frames arrive close together).
+VISUAL_CANDIDATE_FRAME_MEMORY = 512
 
 
 class SessionState(BaseModel):
@@ -25,7 +31,30 @@ class SessionState(BaseModel):
     interrupted_count: int = 0
     cost_meter: CostMeter = Field(default_factory=CostMeter)
     history: list[ChatMessage] = Field(default_factory=list)
-    visual_candidate_frame_ids: set[str] = Field(default_factory=set, exclude=True)
+
+    # Bounded LRU of recently seen frame ids. The deque enforces the size cap
+    # and the set gives O(1) membership; both are kept in sync via
+    # register_visual_candidate_frame. Excluded from serialization.
+    _visual_candidate_frame_ids: set[str] = PrivateAttr(default_factory=set)
+    _visual_candidate_frame_order: deque[str] = PrivateAttr(default_factory=lambda: deque(maxlen=VISUAL_CANDIDATE_FRAME_MEMORY))
+
+    def register_visual_candidate_frame(self, frame_id: str) -> bool:
+        """Record a frame id; return True if it was not seen recently.
+
+        Empty ids are always treated as new (cannot be deduped). The memory is
+        bounded to VISUAL_CANDIDATE_FRAME_MEMORY entries; the oldest id is
+        evicted from both structures when the cap is exceeded.
+        """
+        if not frame_id:
+            return True
+        if frame_id in self._visual_candidate_frame_ids:
+            return False
+        if len(self._visual_candidate_frame_order) >= VISUAL_CANDIDATE_FRAME_MEMORY:
+            evicted = self._visual_candidate_frame_order.popleft()
+            self._visual_candidate_frame_ids.discard(evicted)
+        self._visual_candidate_frame_order.append(frame_id)
+        self._visual_candidate_frame_ids.add(frame_id)
+        return True
 
     def append_history_turn(
         self,

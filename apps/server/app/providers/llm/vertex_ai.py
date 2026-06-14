@@ -2,12 +2,10 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 
-import httpx
-
 from app.config import Settings
 from app.contracts.model_io import DialogueInput, DialogueResult, DialogueStreamChunk
 from app.providers.llm.base import LLMProvider
-from app.providers.llm.streaming import iter_sse_data
+from app.providers.llm.streaming import iter_sse_data, make_streaming_client
 from app.providers.raw_usage import raw_usage_payload
 from app.providers.vertex_ai_client import VertexAIClient
 
@@ -39,7 +37,7 @@ class VertexAILLMProvider(LLMProvider):
         )
         raw_base = {"provider": self.provider_name, "model": self.model}
         latest_usage: dict | None = None
-        async with httpx.AsyncClient(timeout=self.settings.vertex_ai_request_timeout_seconds) as client:
+        async with make_streaming_client(self.settings.vertex_ai_request_timeout_seconds) as client:
             async with client.stream(
                 "POST",
                 url,

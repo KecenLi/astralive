@@ -3,12 +3,10 @@ import json
 from collections.abc import AsyncIterator
 from urllib import request
 
-import httpx
-
 from app.config import Settings
 from app.contracts.model_io import DialogueInput, DialogueResult, DialogueStreamChunk
 from app.providers.llm.base import LLMProvider
-from app.providers.llm.streaming import iter_jsonl_data
+from app.providers.llm.streaming import iter_jsonl_data, make_streaming_client
 
 
 class OllamaLLMProvider(LLMProvider):
@@ -27,7 +25,7 @@ class OllamaLLMProvider(LLMProvider):
         payload = self._build_payload(data, stream=True)
         raw_base = {"provider": "ollama", "model": self.settings.ollama_llm_model}
         final_chunk: dict | None = None
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with make_streaming_client(60.0) as client:
             async with client.stream(
                 "POST",
                 f"{self.settings.ollama_base_url.rstrip('/')}/api/chat",

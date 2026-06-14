@@ -1,6 +1,24 @@
 from collections.abc import AsyncIterator
+import ssl
 
+import certifi
 import httpx
+
+
+# Build the TLS context once from certifi's bundled CA file. In a PyInstaller
+# exe, ssl.create_default_context() (httpx's default) can raise
+# FileNotFoundError: [Errno 2] when the OS CA bundle path is missing. Pointing
+# explicitly at certifi.where() makes HTTPS work regardless of how the exe was
+# packaged — defense in depth alongside bundling certifi in the .spec.
+try:
+    _SSL_CONTEXT: ssl.SSLContext | bool = ssl.create_default_context(cafile=certifi.where())
+except Exception:  # noqa: BLE001 - fall back to httpx's own default if certifi is unavailable
+    _SSL_CONTEXT = True
+
+
+def make_streaming_client(timeout: float) -> httpx.AsyncClient:
+    """An httpx.AsyncClient that verifies TLS using certifi's CA bundle."""
+    return httpx.AsyncClient(timeout=timeout, verify=_SSL_CONTEXT)
 
 
 async def iter_sse_data(response: httpx.Response) -> AsyncIterator[str]:

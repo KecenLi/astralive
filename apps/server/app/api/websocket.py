@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import json
 from dataclasses import dataclass
 from contextlib import suppress
 import io
@@ -29,6 +31,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 sessions: dict[str, SessionState] = {}
 REALTIME_TTS_FALLBACK_MAX_CHARS = 360
+FIXED_NOTICE_SOURCE = "fixed_notice"
+FIXED_NOTICE_PREWARM: tuple[tuple[str, str], ...] = (
+    ("我在听。", "curious"),
+    ("进入睡眠。", "sleepy"),
+    ("我先停下。", "surprised"),
+    ("我这边听到实时语音通道断开了，但没有收到可识别的音频。请再说一次。", "concerned"),
+    ("我听到你说话了，但备用识别超时了。请再说一次，或者先用文本输入。", "concerned"),
+    ("我听到你说话了，但这次没有识别出清楚内容。请离麦克风近一点再说一次。", "concerned"),
+)
 
 
 @dataclass
@@ -117,6 +128,9 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
 
     await _send(websocket, make_event("server.session.ready", session_id, _session_payload(session, settings)), send_lock)
     await _send_cost(websocket, session, send_lock)
+    if settings.tts_provider != "mock":
+        prewarm_task = asyncio.create_task(_prewarm_fixed_notice_audio(audio, settings, session_id))
+        prewarm_task.add_done_callback(_log_task_exception)
 
     try:
         while True:
@@ -186,6 +200,116 @@ async def _prewarm_audio(audio: AudioService, session_id: str) -> None:
         logger.exception("audio provider prewarm failed: %s", session_id)
 
 
+async def _prewarm_fixed_notice_audio(audio: AudioService, settings: Settings, session_id: str) -> None:
+    if settings.tts_provider == "mock":
+        return
+    for text, emotion in FIXED_NOTICE_PREWARM:
+        try:
+            await _synthesize_cached_notice(audio, settings, text, emotion)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("fixed notice prewarm failed: %s", session_id)
+            return
+
+
+def _start_fixed_notice_audio(
+    websocket: WebSocket,
+    session: SessionState,
+    audio: AudioService,
+    settings: Settings,
+    text: str,
+    emotion: str,
+    send_lock: asyncio.Lock,
+) -> None:
+    if settings.tts_provider == "mock":
+        return
+    task = asyncio.create_task(_send_fixed_notice_audio(websocket, session, audio, settings, text, emotion, send_lock))
+    task.add_done_callback(_log_task_exception)
+
+
+async def _send_fixed_notice_audio(
+    websocket: WebSocket,
+    session: SessionState,
+    audio: AudioService,
+    settings: Settings,
+    text: str,
+    emotion: str,
+    send_lock: asyncio.Lock,
+) -> None:
+    try:
+        tts_result, cache_hit = await _synthesize_cached_notice(audio, settings, text, emotion)
+        if not cache_hit:
+            session.cost_meter.tts_calls += 1
+            _record_estimated_cost(session, settings, raw=tts_result.raw, input_text=text)
+        await _send_tts_audio(websocket, session, [tts_result], FIXED_NOTICE_SOURCE, send_lock)
+        await _send_cost(websocket, session, send_lock)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("fixed notice tts failed")
+        with suppress(WebSocketDisconnect, RuntimeError):
+            await _send(
+                websocket,
+                make_event(
+                    "debug.log",
+                    session.session_id,
+                    {"message": "Fixed notice TTS failed.", "detail": str(exc), "text": text},
+                ),
+                send_lock,
+            )
+
+
+async def _synthesize_cached_notice(
+    audio: AudioService,
+    settings: Settings,
+    text: str,
+    emotion: str,
+) -> tuple[TTSResult, bool]:
+    cache_path = _fixed_notice_cache_path(settings, text, emotion)
+    if cache_path.exists():
+        try:
+            return TTSResult.model_validate_json(cache_path.read_text(encoding="utf-8")), True
+        except Exception:  # noqa: BLE001
+            cache_path.unlink(missing_ok=True)
+
+    result = await audio.synthesize(text, emotion)
+    if result.audio_base64:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = cache_path.with_name(f"{cache_path.stem}.{time.perf_counter_ns()}.tmp")
+        tmp_path.write_text(result.model_dump_json(), encoding="utf-8")
+        tmp_path.replace(cache_path)
+    return result, False
+
+
+def _fixed_notice_cache_path(settings: Settings, text: str, emotion: str):
+    return settings.data_dir / "cache" / "fixed_tts" / f"{_fixed_notice_cache_key(settings, text, emotion)}.json"
+
+
+def _fixed_notice_cache_key(settings: Settings, text: str, emotion: str) -> str:
+    payload = {
+        "text": text,
+        "emotion": emotion,
+        "tts_provider": settings.tts_provider,
+        "openai_compatible_tts_base_url": settings.openai_compatible_tts_base_url
+        or settings.openai_compatible_base_url,
+        "openai_compatible_tts_model": settings.openai_compatible_tts_model,
+        "openai_compatible_tts_voice": settings.openai_compatible_tts_voice,
+        "openai_compatible_tts_endpoint_path": settings.openai_compatible_tts_endpoint_path,
+        "openai_compatible_tts_response_format": settings.openai_compatible_tts_response_format,
+        "gemini_tts_model": settings.gemini_tts_model,
+        "gemini_tts_voice": settings.gemini_tts_voice,
+        "vertex_ai_tts_model": settings.vertex_ai_tts_model,
+        "vertex_ai_tts_voice": settings.vertex_ai_tts_voice,
+        "cosyvoice3_model_dir": settings.cosyvoice3_model_dir,
+        "cosyvoice3_prompt_audio": settings.cosyvoice3_prompt_audio,
+        "cosyvoice3_prompt_text": settings.cosyvoice3_prompt_text,
+        "cosyvoice3_seed": settings.cosyvoice3_seed,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:32]
+
+
 async def _handle_event(
     websocket: WebSocket,
     event: EventEnvelope,
@@ -221,6 +345,7 @@ async def _handle_event(
             avatar.state_event(session.session_id, "listening", "curious", "我在听。"),
             send_lock,
         )
+        _start_fixed_notice_audio(websocket, session, audio, settings, "我在听。", "curious", send_lock)
         await _send_cost(websocket, session, send_lock)
         return None
 
@@ -239,6 +364,7 @@ async def _handle_event(
             avatar.state_event(session.session_id, "sleeping", "sleepy", "进入睡眠。"),
             send_lock,
         )
+        _start_fixed_notice_audio(websocket, session, audio, settings, "进入睡眠。", "sleepy", send_lock)
         await _send_cost(websocket, session, send_lock)
         return None
 
@@ -254,6 +380,7 @@ async def _handle_event(
             avatar.state_event(session.session_id, "interrupted", "surprised", "我先停下。"),
             send_lock,
         )
+        _start_fixed_notice_audio(websocket, session, audio, settings, "我先停下。", "surprised", send_lock)
         session.status = "listening"
         await _send(
             websocket,
@@ -671,6 +798,11 @@ async def _handle_user_text(
         await _send_cost(websocket, session, send_lock)
         return response_task
     if dialogue.needs_vision(user_text) and not session.last_visual_summary:
+        # No visual summary yet (e.g. the first frame has not landed). Surface a
+        # non-blocking hint so the UI can nudge the user to aim the camera/screen,
+        # but DO NOT dead-end the turn: fall through and let 小七 answer naturally
+        # (the persona is instructed to say she'll look and ask to aim the lens),
+        # so a vision question never silently goes unanswered.
         await _send(
             websocket,
             make_event(
@@ -681,7 +813,6 @@ async def _handle_user_text(
             send_lock,
         )
         await _send_cost(websocket, session, send_lock)
-        return response_task
 
     _cancel_task(response_task)
     task = asyncio.create_task(
@@ -1394,10 +1525,8 @@ def _visual_source_key(capture_reason: str) -> str:
 
 def _record_visual_frame_candidate(session: SessionState, frame_id: str | None) -> None:
     normalized = str(frame_id or "").strip()
-    if normalized:
-        if normalized in session.visual_candidate_frame_ids:
-            return
-        session.visual_candidate_frame_ids.add(normalized)
+    if not session.register_visual_candidate_frame(normalized):
+        return
     session.cost_meter.add_frame_candidate()
 
 

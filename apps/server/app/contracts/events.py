@@ -16,6 +16,7 @@ ClientEventType = Literal[
     "client.media.frame",
     "client.media.scene_changed",
     "client.media.audio_chunk",
+    "client.metrics.visual_frame",
     "client.control.interrupt",
     "client.control.cancel_response",
     "client.control.confirm",

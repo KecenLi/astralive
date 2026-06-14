@@ -13,16 +13,30 @@ LOCAL_ZERO_COST_PROVIDERS = {
     "ollama",
 }
 
+# Public list prices (USD per 1M tokens) used only for on-screen estimation.
+# These change more often than code, so COST_PRICE_TABLE_JSON overrides them.
+# Numbers are vendor list prices, not a guarantee of billed amounts; the panel
+# always labels them as estimates.
 DEFAULT_PRICE_TABLE = {
-    "vertex_ai:gemini-2.5-flash": {
-        "input_per_million": 0.30,
-        "output_per_million": 2.50,
-    },
-    "gemini:gemini-2.5-flash": {
-        "input_per_million": 0.30,
-        "output_per_million": 2.50,
-    },
+    "vertex_ai:gemini-2.5-flash": {"input_per_million": 0.30, "output_per_million": 2.50},
+    "gemini:gemini-2.5-flash": {"input_per_million": 0.30, "output_per_million": 2.50},
+    # Common China-region OpenAI-compatible models (DashScope/Qwen list prices,
+    # CNY converted at ~7.2). The China provider example ships qwen-plus, so
+    # without these the cost panel would show $0 despite real spend.
+    "openai_compatible:qwen-plus": {"input_per_million": 0.11, "output_per_million": 0.28},
+    "openai_compatible:qwen-turbo": {"input_per_million": 0.04, "output_per_million": 0.08},
+    "openai_compatible:qwen-max": {"input_per_million": 0.34, "output_per_million": 1.36},
+    "openai_compatible:qwen-vl-plus": {"input_per_million": 0.21, "output_per_million": 0.21},
+    # Generic OpenAI-style reference points for the common case.
+    "openai_compatible:gpt-4o": {"input_per_million": 2.50, "output_per_million": 10.00},
+    "openai_compatible:gpt-4o-mini": {"input_per_million": 0.15, "output_per_million": 0.60},
 }
+
+# Last-resort rate when token usage is known but no model price is configured.
+# Deliberately conservative (a mid-range small-model price) so the panel shows a
+# non-zero, honest estimate instead of a misleading $0. Tagged so the UI/logs
+# can tell it apart from a real configured price.
+GENERIC_FALLBACK_RATE_PER_MILLION = (0.20, 0.60)
 
 
 @dataclass(frozen=True)
@@ -129,6 +143,16 @@ class CostEstimator:
         for key in candidates:
             if key and key in self._price_table:
                 return self._price_table[key]
+        # Known cloud provider with no configured price: fall back to a
+        # conservative generic rate so the panel reports an honest non-zero
+        # estimate rather than a misleading $0. Tagged distinctly.
+        if provider_key:
+            generic_input, generic_output = GENERIC_FALLBACK_RATE_PER_MILLION
+            return _PriceRate(
+                input_per_million=generic_input,
+                output_per_million=generic_output,
+                source="generic-fallback",
+            )
         return None
 
 

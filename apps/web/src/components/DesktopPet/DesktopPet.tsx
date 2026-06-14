@@ -19,15 +19,6 @@ const petStates: Array<{
   { mode: "idle", expression: "neutral", motion: "idle", subtitle: "需要我就叫小七。" },
 ];
 
-function speak(text: string) {
-  if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") return;
-  window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(text);
-  utterance.lang = "zh-CN";
-  utterance.rate = 1.02;
-  window.speechSynthesis.speak(utterance);
-}
-
 export function DesktopPet() {
   const { settings } = useDesktopSettings();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -73,7 +64,6 @@ export function DesktopPet() {
         setBubbleVisible(false);
         bubbleTimerRef.current = null;
       }, 9000);
-      speak(next.text);
     }) ?? (() => undefined);
   }, []);
 
@@ -132,7 +122,6 @@ export function DesktopPet() {
       setBubbleVisible(false);
       bubbleTimerRef.current = null;
     }, 2600);
-    speak(petStates[next].subtitle);
   }
 
   function hidePet() {

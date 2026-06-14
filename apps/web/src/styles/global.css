@@ -6,6 +6,8 @@
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
+  /* Global component zoom driven by Ctrl + wheel (see lib/uiScale.ts). */
+  --ui-scale: 1;
 }
 
 * {
@@ -34,10 +36,14 @@ select {
 }
 
 .app-shell {
-  height: 100vh;
+  /* `zoom` scales the whole shell (layout + text) by the Ctrl+wheel factor.
+     Electron/Chromium implement zoom without the layout-breaking side effects
+     of transform: scale(). 100/scale keeps the shell filling the viewport. */
+  zoom: var(--ui-scale, 1);
+  height: calc(100vh / var(--ui-scale, 1));
   min-height: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) minmax(170px, 26vh);
+  grid-template-rows: auto minmax(0, 1fr) minmax(230px, 34vh);
   overflow: hidden;
   background: #c0c0c0;
   border: 2px solid #808080;
@@ -784,10 +790,10 @@ select {
 }
 
 .message {
-  max-width: 86%;
+  max-width: 92%;
   border: 1px solid #808080;
   border-radius: 0;
-  padding: 6px 8px;
+  padding: 7px 10px;
   background: #f4f4f4;
   color: #111111;
 }
@@ -801,7 +807,8 @@ select {
 
 .message p {
   margin: 0;
-  line-height: 1.48;
+  font-size: 14px;
+  line-height: 1.5;
   overflow-wrap: anywhere;
 }
 

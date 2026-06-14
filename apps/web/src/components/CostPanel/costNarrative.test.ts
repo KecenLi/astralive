@@ -31,7 +31,8 @@ describe("buildCostNarrative", () => {
     expect(narrative.candidateFrames).toBe(22);
     expect(narrative.actualVisionCalls).toBe(4);
     expect(narrative.savedVisionCalls).toBe(18);
-    expect(narrative.estimatedCostPerCall).toBeCloseTo(0.002);
+    expect(narrative.estimatedTotalCost).toBeCloseTo(0.01);
+    expect(narrative.totalCalls).toBe(5);
   });
 
   it("falls back to component savings when the backend has not sent saved calls yet", () => {

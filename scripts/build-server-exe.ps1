@@ -29,6 +29,16 @@ try {
             "google.auth",
             "--hidden-import",
             "google.auth.transport.requests",
+            "--hidden-import",
+            "certifi",
+            "--hidden-import",
+            "httpx",
+            "--hidden-import",
+            "httpcore",
+            "--collect-data",
+            "certifi",
+            "--collect-data",
+            "httpx",
             "modvii_server.py"
         )
     } elseif ($Python) {
@@ -53,6 +63,16 @@ try {
             "google.auth",
             "--hidden-import",
             "google.auth.transport.requests",
+            "--hidden-import",
+            "certifi",
+            "--hidden-import",
+            "httpx",
+            "--hidden-import",
+            "httpcore",
+            "--collect-data",
+            "certifi",
+            "--collect-data",
+            "httpx",
             "modvii_server.py"
         )
     } else {

@@ -116,6 +116,16 @@ class DialogueService:
             if chunk.emotion:
                 emotion = normalize_emotion(chunk.emotion, fallback=emotion)
             should_speak = chunk.should_speak
+            # Streaming providers emit incremental `delta`s and a terminal
+            # done-chunk that carries only metadata/usage (no delta). That
+            # terminal chunk may still carry a full-response `text` summary;
+            # feeding it to the stateful parser would re-emit the whole reply
+            # (un-stripped of the emotion marker) as a duplicate tail. So on a
+            # done-chunk without a delta, skip the text re-feed. The single-shot
+            # fallback (base stream_complete) sets done=True *with* a delta and
+            # must still be processed.
+            if chunk.done and not chunk.delta:
+                continue
             delta = output_parser.feed(chunk.delta or chunk.text)
             emotion = output_parser.emotion or emotion
             should_speak = output_parser.should_speak
