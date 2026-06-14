@@ -94,6 +94,16 @@ export function shouldSendSceneHash(
   return distance === null || distance > threshold;
 }
 
+export function shouldBypassSceneDedupe(reason: FramePayload["capture_reason"], manual = false) {
+  return (
+    manual ||
+    reason === "visual_question" ||
+    reason === "focus_roi" ||
+    reason === "screen_focus" ||
+    reason === "manual_debug"
+  );
+}
+
 export function sceneHashDistance(previous: string | null, next: string) {
   if (!previous || !next) return null;
   return normalizedHashDistance(previous, next);

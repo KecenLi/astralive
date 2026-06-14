@@ -18,6 +18,16 @@ def normalize_language(value: str) -> str | None:
     return normalized.split("-", 1)[0]
 
 
+# Priming text steers Whisper toward Simplified Chinese with punctuation and the
+# assistant's own vocabulary, which markedly cuts homophone errors and wrong
+# characters on short spoken turns. The assistant name "小七" is included so it
+# is transcribed correctly instead of homophones like 小柒/小气/小七.
+CHINESE_INITIAL_PROMPT = (
+    "以下是普通话对话的转写，使用简体中文并保留标点符号。"
+    "用户在和桌面语音助手小七聊天，内容涉及日常交流、屏幕与摄像头里看到的东西、提问和闲聊。"
+)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="MODVII persistent local Whisper ASR worker.")
     parser.add_argument("--model", default="base")
@@ -26,6 +36,12 @@ def main() -> int:
     args = parser.parse_args()
 
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    # Guarantee UTF-8 stdio regardless of how the worker was launched, so Chinese
+    # transcripts are never mangled by a non-UTF-8 console code page on Windows.
+    for stream in (sys.stdout, sys.stdin):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure:
+            reconfigure(encoding="utf-8")
     ensure_ffmpeg_on_path()
     import whisper
 
@@ -39,12 +55,26 @@ def main() -> int:
             request_id = str(request.get("id") or "")
             audio_path = Path(request["audio_path"]).resolve()
             language = normalize_language(str(request.get("language") or "")) or default_language
+            on_gpu = str(args.device).lower().startswith("cuda")
+            # Use the Chinese priming prompt only for Chinese (or auto) turns so it
+            # does not bias English transcription. A per-request override wins.
+            request_prompt = str(request.get("initial_prompt") or "").strip()
+            if request_prompt:
+                initial_prompt: str | None = request_prompt
+            elif language in (None, "zh"):
+                initial_prompt = CHINESE_INITIAL_PROMPT
+            else:
+                initial_prompt = None
             result = model.transcribe(
                 str(audio_path),
                 language=language,
                 task="transcribe",
-                fp16=str(args.device).lower().startswith("cuda"),
+                fp16=on_gpu,
                 verbose=False,
+                # Beam search is more accurate than greedy decoding; affordable on
+                # GPU. Falls back gracefully on CPU (just slower).
+                beam_size=5 if on_gpu else None,
+                initial_prompt=initial_prompt,
                 condition_on_previous_text=False,
                 no_speech_threshold=0.72,
                 logprob_threshold=-1.2,

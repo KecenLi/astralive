@@ -163,6 +163,19 @@ function handleServerEvent(event: EventEnvelope<unknown>, effects: ServerEventEf
     store.setVisualSelfCheckNotice(notice);
     store.addMessage("system", `${notice}，点击 Camera 或 Screen 的高清凝视按钮。`);
   }
+  if (event.type === "vision.error") {
+    const payload = event.payload as {
+      frame_id?: string;
+      capture_reason?: string;
+      detail?: string;
+      user_visible?: boolean;
+    };
+    const detail = payload.detail?.trim() || "视觉服务暂时不可用";
+    store.setLastFrameInfo(`${payload.frame_id ?? "frame"} / 视觉失败`);
+    if (payload.user_visible) {
+      store.addMessage("system", `视觉捕捉失败：${detail}。可以稍后重试，或先继续语音对话。`);
+    }
+  }
   if (event.type === "cost.update") {
     store.setCost(event.payload as unknown as CostMeter);
   }

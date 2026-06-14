@@ -9,6 +9,7 @@ import {
   captureReasonFor,
   getFrameIntervalMs,
   sceneHashDistance,
+  shouldBypassSceneDedupe,
   shouldSendSceneHash,
   VisualCaptureActivity,
   VisualCaptureMode,
@@ -74,7 +75,10 @@ export function ScreenCapturePanel({ autoStartSignal, onFrameSent, suspendAutoUp
   }, [stopScreen]);
 
   const captureAndSend = useCallback(
-    async (activity: VisualCaptureActivity) => {
+    async (
+      activity: VisualCaptureActivity,
+      options: { manual?: boolean; prompt?: string } = {},
+    ) => {
       if (captureInFlightRef.current) {
         setCaptureState("捕捉仍在进行，跳过本次点击");
         return;
@@ -91,7 +95,7 @@ export function ScreenCapturePanel({ autoStartSignal, onFrameSent, suspendAutoUp
         const frame = await captureVideoFrame(
           video,
           reason,
-          activity === "focus" ? "用户要求看清楚屏幕内容。" : "连续屏幕视觉上下文。",
+          options.prompt ?? (activity === "focus" ? "用户要求看清楚屏幕内容。" : "连续屏幕视觉上下文。"),
           captureOptionsFor(mode, activity),
         );
         const hashDistance = sceneHashDistance(lastSceneHashRef.current, frame.scene_hash);
@@ -101,7 +105,9 @@ export function ScreenCapturePanel({ autoStartSignal, onFrameSent, suspendAutoUp
           frame_id: frame.frame_id,
           ...(hashDistance === null ? {} : { scene_hash_distance: hashDistance }),
         });
+        const bypassDedupe = shouldBypassSceneDedupe(reason, options.manual);
         if (
+          !bypassDedupe &&
           !shouldSendSceneHash(
             lastSceneHashRef.current,
             frame.scene_hash,
@@ -115,7 +121,7 @@ export function ScreenCapturePanel({ autoStartSignal, onFrameSent, suspendAutoUp
             frame_id: frame.frame_id,
             ...(hashDistance === null ? {} : { scene_hash_distance: hashDistance }),
           });
-          setCaptureState("重复画面跳过");
+          setCaptureState("重复画面跳过；手动上传可强制重试");
           return;
         }
         lastSceneHashRef.current = frame.scene_hash;
@@ -126,7 +132,7 @@ export function ScreenCapturePanel({ autoStartSignal, onFrameSent, suspendAutoUp
           return;
         }
         const sent = wsClient.send(createEvent("client.media.frame", sessionId, frame));
-        setCaptureState(sent ? `sent ${reason}` : "WebSocket 未连接，帧未发送");
+        setCaptureState(sent ? `${options.manual ? "manual sent" : "sent"} ${reason}` : "WebSocket 未连接，帧未发送");
       } catch (error) {
         setCaptureState(error instanceof Error ? error.message : "屏幕帧捕捉失败");
       } finally {
@@ -138,7 +144,7 @@ export function ScreenCapturePanel({ autoStartSignal, onFrameSent, suspendAutoUp
 
   const focusScreen = useCallback(() => {
     setFocusUntil(Date.now() + 10_000);
-    void captureAndSend("focus");
+    void captureAndSend("focus", { manual: true, prompt: "用户要求看清楚屏幕内容。" });
   }, [captureAndSend]);
 
   useEffect(() => {
@@ -202,7 +208,12 @@ export function ScreenCapturePanel({ autoStartSignal, onFrameSent, suspendAutoUp
         <button className="icon-button" type="button" title="停止屏幕捕捉" onClick={stopScreen}>
           <Square size={17} />
         </button>
-        <button className="icon-button" type="button" title="上传屏幕帧" onClick={() => void captureAndSend("active")}>
+        <button
+          className="icon-button"
+          type="button"
+          title="上传屏幕帧"
+          onClick={() => void captureAndSend("active", { manual: true, prompt: "用户手动要求读取当前屏幕。" })}
+        >
           <Upload size={18} />
         </button>
         <button className="icon-button" type="button" title="高清屏幕凝视" onClick={focusScreen}>

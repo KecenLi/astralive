@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     vertex_ai_realtime_model: str = "gemini-live-2.5-flash-native-audio"
     vertex_ai_tts_model: str = "gemini-3.1-flash-tts-preview"
     vertex_ai_tts_voice: str = "Kore"
-    vertex_ai_request_timeout_seconds: float = 15.0
+    vertex_ai_request_timeout_seconds: float = 20.0
 
     cosyvoice3_python: str = ""
     cosyvoice3_repo_dir: str = str(PROJECT_ROOT / "third_party" / "CosyVoice")
@@ -146,7 +146,7 @@ class Settings(BaseSettings):
     max_frame_width: int = 1280
     max_frame_height: int = 720
     vision_cache_ttl_seconds: int = 30
-    vision_request_timeout_seconds: float = 5.0
+    vision_request_timeout_seconds: float = 20.0
     vision_max_concurrency: int = 1
     vision_pending_frame_limit: int = 2
     vision_result_max_age_seconds: float = 12.0

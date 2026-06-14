@@ -82,10 +82,31 @@ class VisionService:
                 ),
                 timeout=self.settings.vision_request_timeout_seconds,
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("vision provider failed; frame skipped: %s", exc)
+        except TimeoutError as exc:
+            detail = f"vision provider timed out after {self.settings.vision_request_timeout_seconds:.1f}s"
+            logger.warning("vision provider failed; frame skipped: %s", detail)
             summary = session.last_visual_summary or "视觉服务暂时不可用，已跳过本帧，不影响语音对话。"
-            result = VisionResult(summary=summary, confidence=0.0, raw={"error": str(exc)})
+            result = VisionResult(
+                summary=summary,
+                confidence=0.0,
+                raw={
+                    "error": detail,
+                    "exception_type": type(exc).__name__,
+                    "timeout_seconds": self.settings.vision_request_timeout_seconds,
+                },
+            )
+            if commit:
+                self.apply_frame_result(session, frame, result)
+            return result, False
+        except Exception as exc:  # noqa: BLE001
+            detail = str(exc) or type(exc).__name__
+            logger.warning("vision provider failed; frame skipped: %s", detail)
+            summary = session.last_visual_summary or "视觉服务暂时不可用，已跳过本帧，不影响语音对话。"
+            result = VisionResult(
+                summary=summary,
+                confidence=0.0,
+                raw={"error": detail, "exception_type": type(exc).__name__},
+            )
             if commit:
                 self.apply_frame_result(session, frame, result)
             return result, False

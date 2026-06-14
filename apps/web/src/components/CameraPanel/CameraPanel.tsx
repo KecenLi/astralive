@@ -9,6 +9,7 @@ import {
   captureReasonFor,
   getFrameIntervalMs,
   sceneHashDistance,
+  shouldBypassSceneDedupe,
   shouldSendSceneHash,
   VisualCaptureActivity,
   VisualCaptureMode,
@@ -73,7 +74,12 @@ export function CameraPanel({ autoStartSignal, onFrameSent, suspendAutoUpload = 
   }, [deviceId, stopCamera]);
 
   const sendFrame = useCallback(
-    async (reason: FramePayload["capture_reason"], prompt: string, activity: VisualCaptureActivity = "active") => {
+    async (
+      reason: FramePayload["capture_reason"],
+      prompt: string,
+      activity: VisualCaptureActivity = "active",
+      manual = false,
+    ) => {
       if (captureInFlightRef.current) return;
       const video = videoRef.current;
       if (!video?.videoWidth) {
@@ -90,7 +96,9 @@ export function CameraPanel({ autoStartSignal, onFrameSent, suspendAutoUpload = 
           frame_id: frame.frame_id,
           ...(hashDistance === null ? {} : { scene_hash_distance: hashDistance }),
         });
+        const bypassDedupe = shouldBypassSceneDedupe(reason, manual);
         if (
+          !bypassDedupe &&
           !shouldSendSceneHash(
             lastSceneHashRef.current,
             frame.scene_hash,
@@ -104,14 +112,14 @@ export function CameraPanel({ autoStartSignal, onFrameSent, suspendAutoUpload = 
             frame_id: frame.frame_id,
             ...(hashDistance === null ? {} : { scene_hash_distance: hashDistance }),
           });
-          setCameraState("重复画面跳过");
+          setCameraState("重复画面跳过；手动上传可强制重试");
           return;
         }
         lastSceneHashRef.current = frame.scene_hash;
         onFrameSent(frame);
         if (sessionId) {
           const sent = wsClient.send(createEvent("client.media.frame", sessionId, frame));
-          setCameraState(sent ? `sent ${reason}` : "WebSocket 未连接，帧未发送");
+          setCameraState(sent ? `${manual ? "manual sent" : "sent"} ${reason}` : "WebSocket 未连接，帧未发送");
         } else {
           setCameraState("会话未就绪，帧未发送");
         }
@@ -194,7 +202,7 @@ export function CameraPanel({ autoStartSignal, onFrameSent, suspendAutoUpload = 
           className="icon-button"
           type="button"
           title="上传摄像头帧"
-          onClick={() => void sendFrame("visual_question", "用户问了视觉相关问题。", "active")}
+          onClick={() => void sendFrame("visual_question", "用户问了视觉相关问题。", "active", true)}
         >
           <Upload size={18} />
         </button>
@@ -204,7 +212,7 @@ export function CameraPanel({ autoStartSignal, onFrameSent, suspendAutoUpload = 
           title="高清凝视"
           onClick={() => {
             setFocusUntil(Date.now() + 10_000);
-            void sendFrame("focus_roi", "用户要求看清楚一点或读文字。", "focus");
+            void sendFrame("focus_roi", "用户要求看清楚一点或读文字。", "focus", true);
           }}
         >
           <ScanEye size={18} />

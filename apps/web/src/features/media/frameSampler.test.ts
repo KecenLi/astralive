@@ -7,6 +7,7 @@ import {
   DEFAULT_SCENE_HASH_THRESHOLD,
   getFrameIntervalMs,
   sceneHashDistance,
+  shouldBypassSceneDedupe,
   shouldSendSceneHash,
 } from "./frameSampler";
 
@@ -60,5 +61,14 @@ describe("frameSampler", () => {
     expect(shouldSendSceneHash("0000", "1000", "active", 0.25)).toBe(false);
     expect(shouldSendSceneHash("0000", "1000", "active", 0.24)).toBe(true);
     expect(shouldSendSceneHash("0000", "0000", "focus", 1)).toBe(true);
+  });
+
+  it("bypasses scene dedupe for explicit manual and focus captures", () => {
+    expect(shouldBypassSceneDedupe("screen_low_fps")).toBe(false);
+    expect(shouldBypassSceneDedupe("screen_low_fps", true)).toBe(true);
+    expect(shouldBypassSceneDedupe("visual_question")).toBe(true);
+    expect(shouldBypassSceneDedupe("screen_focus")).toBe(true);
+    expect(shouldBypassSceneDedupe("focus_roi")).toBe(true);
+    expect(shouldBypassSceneDedupe("manual_debug")).toBe(true);
   });
 });

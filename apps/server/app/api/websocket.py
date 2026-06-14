@@ -400,7 +400,7 @@ async def _handle_event(
     if event.type == "client.media.frame":
         frame = FramePayload.model_validate(event.payload)
         _record_visual_frame_candidate(session, frame.frame_id)
-        if _visual_provider_cooling_down(visual_runtime):
+        if _visual_provider_cooling_down(visual_runtime) and not _frame_bypasses_visual_cooldown(frame):
             dropped_count = 1 + len(visual_runtime.pending)
             session.cost_meter.visual_cooldown_drops += dropped_count
             _record_saved_vision_call(
@@ -1578,6 +1578,10 @@ def _visual_trace(job: VisualFrameJob, *, state: str, from_cache: bool | None = 
     return trace
 
 
+def _frame_bypasses_visual_cooldown(frame: FramePayload) -> bool:
+    return frame.capture_reason in {"visual_question", "focus_roi", "screen_focus", "manual_debug"}
+
+
 def _vision_summary_payload(job: VisualFrameJob, result: Any, *, from_cache: bool, deferred: bool) -> dict[str, Any]:
     return {
         "summary_id": f"vis_{int(time.time() * 1000)}",
@@ -1689,12 +1693,18 @@ def _start_visual_tasks(
     send_lock: asyncio.Lock,
 ) -> None:
     if _visual_provider_cooling_down(visual_runtime):
-        dropped = len(visual_runtime.pending)
+        dropped = 0
+        for source, job in list(visual_runtime.pending.items()):
+            if _frame_bypasses_visual_cooldown(job.frame):
+                continue
+            visual_runtime.pending.pop(source, None)
+            visual_runtime.latest_sequence_by_source[source] = visual_runtime.applied_sequence
+            dropped += 1
         visual_runtime.dropped_pending_frames += dropped
         session.cost_meter.visual_cooldown_drops += dropped
         _record_saved_vision_call(session, settings, output_text=session.last_visual_summary, count=dropped)
-        visual_runtime.pending.clear()
-        return
+        if not visual_runtime.pending:
+            return
 
     max_concurrency = max(1, settings.vision_max_concurrency)
     while visual_runtime.pending and len(visual_runtime.active_tasks) < max_concurrency:
@@ -1731,6 +1741,24 @@ async def _run_visual_frame_analysis(
         result, from_cache = await vision.analyze_frame(session, frame, prompt=job.prompt, commit=False)
         if _vision_result_failed(result):
             cooldown_seconds = _mark_visual_provider_failure(visual_runtime, result)
+            user_visible = _frame_bypasses_visual_cooldown(frame)
+            await _send(
+                websocket,
+                make_event(
+                    "vision.error",
+                    session.session_id,
+                    {
+                        "frame_id": frame.frame_id,
+                        "capture_reason": frame.capture_reason,
+                        "source": job.source,
+                        "detail": str(result.raw.get("error", ""))[:500],
+                        "recoverable": True,
+                        "user_visible": user_visible,
+                        "trace": _visual_trace(job, state="provider_failed", from_cache=from_cache),
+                    },
+                ),
+                send_lock,
+            )
             await _send(
                 websocket,
                 make_event(

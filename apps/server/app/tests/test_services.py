@@ -148,6 +148,12 @@ class FailingVisionProvider(VisionProvider):
         raise RuntimeError("quota exhausted")
 
 
+class TimeoutVisionProvider(VisionProvider):
+    async def analyze(self, data: VisionInput) -> VisionResult:
+        await asyncio.sleep(60)
+        return VisionResult(summary="late visual", confidence=0.8)
+
+
 async def test_vision_failure_returns_degraded_summary_without_counting_call() -> None:
     settings = Settings(vision_request_timeout_seconds=0.1)
     session = SessionState(wake_word=settings.wake_word, last_visual_summary="之前的画面摘要。")
@@ -171,6 +177,32 @@ async def test_vision_failure_returns_degraded_summary_without_counting_call() -
     assert result.confidence == 0.0
     assert session.cost_meter.vision_calls == 0
     assert session.last_scene_hash == "next"
+
+
+async def test_vision_timeout_reports_visible_detail_without_counting_call() -> None:
+    settings = Settings(vision_request_timeout_seconds=0.01)
+    session = SessionState(wake_word=settings.wake_word, last_visual_summary="之前的画面摘要。")
+    service = VisionService(TimeoutVisionProvider(), settings)
+
+    result, from_cache = await service.analyze_frame(
+        session,
+        FramePayload(
+            frame_id="frame_timeout",
+            width=640,
+            height=360,
+            capture_reason="screen_low_fps",
+            scene_hash="timeout",
+            data_base64="abc123",
+        ),
+        "你看到了什么？",
+    )
+
+    assert not from_cache
+    assert result.summary == "之前的画面摘要。"
+    assert result.confidence == 0.0
+    assert "timed out after 0.0" in str(result.raw["error"])
+    assert result.raw["exception_type"] == "TimeoutError"
+    assert session.cost_meter.vision_calls == 0
 
 
 async def test_mock_dialogue_uses_visual_summary() -> None:
@@ -2021,6 +2053,60 @@ async def test_visual_provider_429_cools_down_subsequent_frames() -> None:
     assert session.cost_meter.vision_calls_saved == 1
     assert cooldown_logs
     assert skipped_logs
+
+
+async def test_manual_visual_frame_bypasses_provider_cooldown() -> None:
+    websocket = StubWebSocket()
+    runtime = AudioRuntimeState()
+    visual_runtime = VisualRuntimeState()
+    session = SessionState(session_id="test_session", status="listening")
+    settings = Settings(realtime_provider="mock", llm_provider="mock", tts_provider="mock")
+    send_lock = asyncio.Lock()
+    provider = RateLimitedVisionProvider()
+    vision = VisionService(provider, settings)
+    dialogue = DialogueService(ProviderRegistry(settings).llm(), settings)
+    avatar = AvatarService()
+    audio = StubStreamingAudioService(OrderSensitiveRealtimeStream())
+
+    for frame_id, reason in (("frame_429", "screen_low_fps"), ("frame_manual", "visual_question")):
+        await _handle_event(
+            websocket,  # type: ignore[arg-type]
+            EventEnvelope(
+                type="client.media.frame",
+                session_id=session.session_id,
+                payload=FramePayload(
+                    frame_id=frame_id,
+                    width=640,
+                    height=360,
+                    capture_reason=reason,
+                    scene_hash=frame_id,
+                    data_base64="abc123",
+                ).model_dump(),
+            ),
+            session,
+            vision,
+            dialogue,
+            audio,  # type: ignore[arg-type]
+            avatar,
+            WakeService(),
+            settings,
+            runtime,
+            visual_runtime,
+            0.0,
+            send_lock,
+            None,
+        )
+        if visual_runtime.task:
+            await asyncio.wait_for(visual_runtime.task, timeout=1)
+
+    visible_errors = [
+        event
+        for event in websocket.events
+        if event["type"] == "vision.error" and event["payload"].get("user_visible")
+    ]
+    assert provider.calls == ["frame_429", "frame_manual"]
+    assert visible_errors
+    assert visible_errors[-1]["payload"]["frame_id"] == "frame_manual"
 
 
 def test_realtime_tts_fallback_text_is_bounded() -> None:
