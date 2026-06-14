@@ -14,22 +14,46 @@ $Root = Split-Path -Parent $PSScriptRoot
 $Common = Join-Path $PSScriptRoot "common.ps1"
 $RootLiteral = $Root.Replace("'", "''")
 $CommonLiteral = $Common.Replace("'", "''")
+$DesktopCommand = @"
+. '$CommonLiteral'
+`$env:MODVII_RENDERER_URL='http://127.0.0.1:5173'
+Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
+Add-ProcessPathEntry -Path (Join-Path `$env:ProgramFiles 'nodejs')
+`$DesktopDir = Join-Path '$RootLiteral' 'apps\desktop'
+Set-Location `$DesktopDir
+Invoke-NodePackageScript -PackagePrefix 'typescript' -RelativeScriptPath 'node_modules\typescript\bin\tsc' -Arguments @('-p', 'tsconfig.json')
+`$ElectronPathFile = Resolve-PnpmPackageScript -PackagePrefix 'electron' -RelativeScriptPath 'node_modules\electron\path.txt'
+`$ElectronRoot = Split-Path -Parent `$ElectronPathFile
+`$ElectronExe = Join-Path (Join-Path `$ElectronRoot 'dist') ((Get-Content `$ElectronPathFile -Raw).Trim())
+Invoke-CmdExecutable -Executable `$ElectronExe -Arguments @('.')
+"@
 Set-Location $Root
 
+function Test-ViteReady {
+    try {
+        return (Invoke-WebRequest "http://127.0.0.1:5173" -TimeoutSec 2 -UseBasicParsing).StatusCode -eq 200
+    } catch {
+        return $false
+    }
+}
+
 # 1) Web dev server (Vite).
-Start-Process powershell -ArgumentList @(
-    "-NoProfile", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command",
-    ". '$CommonLiteral'; Set-Location '$RootLiteral'; Invoke-Pnpm @('--filter', '@modvii/web', 'dev')"
-) -WorkingDirectory $Root
+if (Test-ViteReady) {
+    Write-Host "Vite already ready on http://127.0.0.1:5173." -ForegroundColor Green
+} else {
+    Start-Process powershell -ArgumentList @(
+        "-NoProfile", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command",
+        ". '$CommonLiteral'; Set-Location '$RootLiteral'; Invoke-Pnpm @('--filter', '@modvii/web', 'dev')"
+    ) -WorkingDirectory $Root
+}
 
 Write-Host "Waiting for Vite on http://127.0.0.1:5173 ..." -ForegroundColor Yellow
 $ready = $false
 foreach ($i in 1..40) {
-    try {
-        if ((Invoke-WebRequest "http://127.0.0.1:5173" -TimeoutSec 2 -UseBasicParsing).StatusCode -eq 200) {
-            $ready = $true; break
-        }
-    } catch { Start-Sleep -Seconds 2 }
+    if (Test-ViteReady) {
+        $ready = $true; break
+    }
+    Start-Sleep -Seconds 2
 }
 if ($ready) { Write-Host "Vite ready." -ForegroundColor Green }
 else { Write-Host "Vite slow to start; check its window, then continue." -ForegroundColor Red }
@@ -39,7 +63,7 @@ else { Write-Host "Vite slow to start; check its window, then continue." -Foregr
 $env:MODVII_RENDERER_URL = "http://127.0.0.1:5173"
 Start-Process powershell -ArgumentList @(
     "-NoProfile", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command",
-    ". '$CommonLiteral'; `$env:MODVII_RENDERER_URL='http://127.0.0.1:5173'; Set-Location '$RootLiteral'; Invoke-Pnpm @('--filter', 'modvii-desktop', 'dev')"
+    $DesktopCommand
 ) -WorkingDirectory $Root
 
 Write-Host "Launched. The Electron window will appear once its backend reports healthy (model load ~30-60s)." -ForegroundColor Green
