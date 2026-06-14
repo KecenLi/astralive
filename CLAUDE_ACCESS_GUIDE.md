@@ -76,7 +76,7 @@ Use the dev launcher when validating Claude's source changes. It starts Vite and
 Electron from the current source tree. Electron starts its own backend on a free
 port, so do not start another backend manually.
 
-Run from a PowerShell terminal where `pnpm` is available:
+Run from a PowerShell terminal where Node.js/Corepack is available:
 
 ```powershell
 cd "D:\assist ai"
@@ -91,9 +91,8 @@ Expected behavior:
   model loading. First startup can take 30-60 seconds.
 - Grant microphone, camera, and screen permissions when prompted.
 
-If `pnpm` is missing in Claude's shell but works in the user's shell, ask the
-user to run the command above from their normal project terminal. Do not rewrite
-the dependency setup just to work around PATH in one agent shell.
+The launcher uses `scripts\common.ps1` / `Invoke-Pnpm`, so it can fall back to
+`corepack pnpm` when no global `pnpm.cmd` is on PATH.
 
 ## Logs To Watch
 
