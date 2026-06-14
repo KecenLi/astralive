@@ -15,7 +15,7 @@ import {
   VisualCaptureMode,
 } from "../../features/media/frameSampler";
 import { createMockFrame } from "../../features/media/mockFrame";
-import { runExclusiveCapture } from "../../features/media/captureCoordinator";
+import { runVisualSourceCapture } from "../../features/media/captureCoordinator";
 import { createEvent, FramePayload, VisualFrameMetricPayload } from "../../lib/events";
 import { wsClient } from "../../lib/wsClient";
 
@@ -25,11 +25,29 @@ interface CameraPanelProps {
   suspendAutoUpload?: boolean;
 }
 
+const reasonLabel: Record<FramePayload["capture_reason"], string> = {
+  wake_snapshot: "唤醒快照",
+  visual_question: "视觉提问",
+  scene_changed: "场景变化",
+  manual_debug: "手动测试",
+  focus_roi: "摄像头高清",
+  periodic_low_cost: "低频采样",
+  screen_low_fps: "屏幕低帧",
+  screen_stream: "屏幕连续",
+  camera_stream: "摄像头连续",
+  screen_focus: "屏幕高清",
+};
+
 export function CameraPanel({ autoStartSignal, onFrameSent, suspendAutoUpload = false }: CameraPanelProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const lastSceneHashRef = useRef<string | null>(null);
   const captureInFlightRef = useRef(false);
+  // streamRef alone can't drive the auto-upload effect: mutating a ref does not
+  // re-run effects, so starting the camera after mount left the capture loop
+  // dead and no frames were ever uploaded. Mirror the stream's liveness into
+  // state so the effect (re)starts when the camera actually turns on/off.
+  const [streamActive, setStreamActive] = useState(false);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [deviceId, setDeviceId] = useState("");
   const [cameraState, setCameraState] = useState("未授权");
@@ -54,6 +72,7 @@ export function CameraPanel({ autoStartSignal, onFrameSent, suspendAutoUpload = 
     streamRef.current = null;
     lastSceneHashRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
+    setStreamActive(false);
   }, []);
 
   const startCamera = useCallback(async (nextDeviceId = deviceId) => {
@@ -65,7 +84,8 @@ export function CameraPanel({ autoStartSignal, onFrameSent, suspendAutoUpload = 
       });
       streamRef.current = stream;
       if (videoRef.current) videoRef.current.srcObject = stream;
-      setCameraState("ready");
+      setStreamActive(true);
+      setCameraState("已就绪");
       const allDevices = await navigator.mediaDevices.enumerateDevices();
       setDevices(allDevices.filter((device) => device.kind === "videoinput"));
     } catch (error) {
@@ -119,7 +139,9 @@ export function CameraPanel({ autoStartSignal, onFrameSent, suspendAutoUpload = 
         onFrameSent(frame);
         if (sessionId) {
           const sent = wsClient.send(createEvent("client.media.frame", sessionId, frame));
-          setCameraState(sent ? `${manual ? "manual sent" : "sent"} ${reason}` : "WebSocket 未连接，帧未发送");
+          setCameraState(
+            sent ? `${manual ? "手动已发送" : "已发送"} ${reasonLabel[reason] ?? reason}` : "WebSocket 未连接，帧未发送",
+          );
         } else {
           setCameraState("会话未就绪，帧未发送");
         }
@@ -154,7 +176,7 @@ export function CameraPanel({ autoStartSignal, onFrameSent, suspendAutoUpload = 
   }, [autoUpload, suspendAutoUpload]);
 
   useEffect(() => {
-    if (!autoUpload || !streamRef.current) return;
+    if (!autoUpload || !streamActive || !streamRef.current) return;
     let disposed = false;
     let timer = 0;
 
@@ -174,7 +196,7 @@ export function CameraPanel({ autoStartSignal, onFrameSent, suspendAutoUpload = 
       // never fire concurrently and overwhelm the single-concurrency vision
       // path. If the slot is busy this tick is skipped (returns null) and we
       // just reschedule — a dropped sampled frame is harmless.
-      await runExclusiveCapture(() => sendFrame(reason, "连续摄像头视觉上下文。", activity));
+      await runVisualSourceCapture("camera", () => sendFrame(reason, "连续摄像头视觉上下文。", activity));
       if (!disposed) {
         timer = window.setTimeout(tick, getFrameIntervalMs(mode, activity));
       }
@@ -185,13 +207,13 @@ export function CameraPanel({ autoStartSignal, onFrameSent, suspendAutoUpload = 
       disposed = true;
       window.clearTimeout(timer);
     };
-  }, [autoUpload, focusUntil, mode, sendFrame, sendVisualMetric, status, suspendAutoUpload]);
+  }, [autoUpload, focusUntil, mode, sendFrame, sendVisualMetric, status, streamActive, suspendAutoUpload]);
 
   return (
     <section className="panel camera-panel">
       <div className="panel-title">
         <Camera size={18} />
-        <span>Camera</span>
+        <span>摄像头</span>
       </div>
       <video ref={videoRef} className="camera-preview" autoPlay muted playsInline />
       <div className="toolbar">

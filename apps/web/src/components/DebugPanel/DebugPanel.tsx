@@ -13,7 +13,7 @@ export function DebugPanel() {
     <section className="panel debug-panel">
       <div className="panel-title">
         <Bug size={18} />
-        <span>Debug</span>
+        <span>调试</span>
       </div>
       <dl className="metric-list">
         <div>
@@ -21,23 +21,23 @@ export function DebugPanel() {
           <dd>{connection}</dd>
         </div>
         <div>
-          <dt>Session</dt>
-          <dd>{sessionId || "pending"}</dd>
+          <dt>会话</dt>
+          <dd>{sessionId || "等待中"}</dd>
         </div>
         <div>
-          <dt>Realtime</dt>
-          <dd>{audio?.realtime_provider ?? "pending"}</dd>
+          <dt>实时通道</dt>
+          <dd>{audio?.realtime_provider ?? "等待中"}</dd>
         </div>
         <div>
           <dt>ASR/TTS</dt>
-          <dd>{audio ? `${audio.asr_provider}/${audio.tts_provider}` : "pending"}</dd>
+          <dd>{audio ? `${audio.asr_provider}/${audio.tts_provider}` : "等待中"}</dd>
         </div>
         <div>
-          <dt>Audio</dt>
-          <dd>{audio ? `${audio.input_sample_rate}->${audio.output_sample_rate} Hz / ${audio.channels}ch` : "pending"}</dd>
+          <dt>音频</dt>
+          <dd>{audio ? `${audio.input_sample_rate}->${audio.output_sample_rate} Hz / ${audio.channels} 声道` : "等待中"}</dd>
         </div>
         <div>
-          <dt>Idle timeout</dt>
+          <dt>静默超时</dt>
           <dd>{audio?.realtime_input_idle_timeout_seconds ?? 0}s</dd>
         </div>
       </dl>
@@ -47,7 +47,7 @@ export function DebugPanel() {
         onClick={() => sessionId && wsClient.send(createEvent("client.debug.ping", sessionId, {}))}
       >
         <PlugZap size={18} />
-        Ping
+        心跳测试
       </button>
     </section>
   );

@@ -72,6 +72,8 @@ export function MicPanel({
   const audioGateRef = useRef<LiveAudioGate | null>(null);
   const tenVadRecorderRef = useRef<TenVadRecorder | null>(null);
   const sileroVadRef = useRef<MicVAD | null>(null);
+  const streamedAudioChunksRef = useRef(0);
+  const streamedAudioBytesRef = useRef(0);
   const startLiveAudioRef = useRef<() => Promise<void>>(async () => undefined);
   const startWakeRecognitionRef = useRef<() => void>(() => undefined);
   const audioSentRef = useRef(false);
@@ -195,7 +197,7 @@ export function MicPanel({
         rafRef.current = requestAnimationFrame(tick);
       };
       tick();
-      setMicState("ready");
+      setMicState("已就绪");
       return stream;
     } catch (error) {
       setMicState(error instanceof Error ? error.message : "麦克风不可用");
@@ -284,6 +286,8 @@ export function MicPanel({
       startingRef.current = false;
       setSpeechInputActive(false, "stop");
       setLiveStreaming(false);
+      streamedAudioChunksRef.current = 0;
+      streamedAudioBytesRef.current = 0;
       const shouldSendFinal = sendFinal && (hadRecorder || hadTenVad || hadSileroVad) && audioSentRef.current;
       if (shouldSendFinal) {
         const sent = sendAudioChunk(new ArrayBuffer(0), true);
@@ -292,7 +296,7 @@ export function MicPanel({
       audioSentRef.current = false;
       traceIdRef.current = "";
       if (hadRecorder || hadTenVad || hadSileroVad) {
-        setMicState("ready");
+        setMicState("已就绪");
       }
     },
     [sendAudioChunk, setSpeechInputActive],
@@ -320,6 +324,8 @@ export function MicPanel({
     }
 
     audioSentRef.current = false;
+    streamedAudioChunksRef.current = 0;
+    streamedAudioBytesRef.current = 0;
     if (voiceSettings.vadProvider === "ten") try {
       const tenRecorder = new TenVadRecorder({
         threshold: voiceSettings.tenThreshold,
@@ -334,8 +340,10 @@ export function MicPanel({
         streamChunks: voiceSettings.sendMode === "streaming_chunks",
         onSpeechStart: () => {
           traceIdRef.current = createId("turn");
+          streamedAudioChunksRef.current = 0;
+          streamedAudioBytesRef.current = 0;
           setSpeechInputActive(true, "speech_start");
-          setMicState("TEN VAD: 检测到语音");
+          setMicState("TEN VAD：检测到语音");
           console.warn(`MODVII mic TEN VAD speech start ${JSON.stringify({
             traceId: traceIdRef.current,
             sendMode: voiceSettings.sendMode,
@@ -352,9 +360,11 @@ export function MicPanel({
               return;
             }
             sentChunks += 1;
+            streamedAudioChunksRef.current += 1;
+            streamedAudioBytesRef.current += chunk.byteLength;
             audioSentRef.current = true;
           }
-          if (sentChunks > 0) setMicState("TEN VAD: streaming");
+          if (sentChunks > 0) setMicState("TEN VAD：正在发送");
         },
         onSpeechEnd: (pcm, stats) => {
           if (!tenVadRecorderRef.current) return;
@@ -365,9 +375,11 @@ export function MicPanel({
                   sentFinal: sendAudioChunk(new ArrayBuffer(0), true, {
                     source: "ten_vad_stream",
                     vad_stats: stats,
+                    streamed_chunks: streamedAudioChunksRef.current,
+                    streamed_bytes: streamedAudioBytesRef.current,
                   }),
-                  sentChunks: 0,
-                  totalBytes: pcm.byteLength,
+                  sentChunks: streamedAudioChunksRef.current,
+                  totalBytes: streamedAudioBytesRef.current,
                 }
               : sendAudioTurn(pcm);
           audioSentRef.current = audioSentRef.current || result.sentAudio;
@@ -407,7 +419,7 @@ export function MicPanel({
       tenVadRecorderRef.current = tenRecorder;
       await tenRecorder.start(stream);
       setLiveStreaming(true);
-      setMicState("TEN VAD: 等待语音");
+      setMicState("TEN VAD：等待语音");
       console.warn("MODVII mic TEN VAD started");
       return;
     } catch (error) {
@@ -439,7 +451,7 @@ export function MicPanel({
         },
         onSpeechRealStart: () => {
           setSpeechInputActive(true, "speech_start");
-          setMicState("live streaming");
+          setMicState("实时语音发送中");
         },
         onSpeechEnd: (audio) => {
           if (!sileroVadRef.current) return;
@@ -516,7 +528,7 @@ export function MicPanel({
         if (decision.state === "waiting") {
           setMicState("等待语音");
         } else if (decision.state === "speaking") {
-          setMicState("live streaming");
+          setMicState("实时语音发送中");
         } else if (decision.state === "silence") {
           setMicState("检测静音");
         }
@@ -547,7 +559,7 @@ export function MicPanel({
     try {
       await recorder.start(stream);
       setLiveStreaming(true);
-      setMicState("live streaming");
+      setMicState("实时语音发送中");
     } catch (error) {
       recorderRef.current = null;
       setMicState(error instanceof Error ? error.message : "实时语音不可用");
@@ -653,7 +665,7 @@ export function MicPanel({
         recognitionRestartTimerRef.current = window.setTimeout(() => startWakeRecognition(), 450);
         return;
       }
-      setMicState("ready");
+      setMicState("已就绪");
     };
     try {
       recognition.start();
@@ -669,7 +681,7 @@ export function MicPanel({
   function toggleWakeRecognition() {
     if (recognitionActive || recognitionRef.current) {
       stopWakeRecognition();
-      setMicState("ready");
+      setMicState("已就绪");
       return;
     }
     startWakeRecognition();
@@ -747,7 +759,7 @@ export function MicPanel({
     <section className="panel mic-panel">
       <div className="panel-title">
         <Mic size={18} />
-        <span>Mic</span>
+        <span>麦克风</span>
       </div>
       <div className="level-meter" aria-label="输入音量">
         <span style={{ transform: `scaleX(${muted ? 0 : level})` }} />
@@ -793,22 +805,22 @@ export function MicPanel({
       <dl className="metric-list">
         <div>
           <dt>状态</dt>
-          <dd>{recognitionActive ? `${micState} / active` : micState}</dd>
+          <dd>{recognitionActive ? `${micState} / 活跃` : micState}</dd>
         </div>
         <div>
           <dt>会话</dt>
-          <dd>{sessionId ? "ready" : "pending"}</dd>
+          <dd>{sessionId ? "已就绪" : "等待中"}</dd>
         </div>
         <div>
           <dt>实时</dt>
           <dd>
             {liveStreaming
-              ? "streaming"
+              ? "发送中"
               : realtimeAvailable
                 ? realtimeFormatCompatible
-                  ? "off"
-                  : "incompatible"
-                : "unavailable"}
+                  ? "关闭"
+                  : "格式不兼容"
+                : "不可用"}
           </dd>
         </div>
         <div>

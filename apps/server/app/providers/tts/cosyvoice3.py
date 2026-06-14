@@ -119,6 +119,11 @@ class CosyVoice3TTSProvider(TTSProvider):
             raise RuntimeError(f"CosyVoice3 synthesis produced no audio. {details}")
 
 
+class _WorkerCrash(Exception):
+    """The worker process died (pipe closed / non-zero exit). Retryable on a
+    freshly spawned process, unlike a clean in-band error response."""
+
+
 class _CosyVoice3Worker:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -127,41 +132,64 @@ class _CosyVoice3Worker:
         self.stderr_file = None
 
     async def synthesize(self, request: dict, output_path: Path) -> None:
+        # Serialize all requests (one GPU model, one stdin/stdout pipe) and retry
+        # once on a fresh process if the worker dies mid-synthesis. A single
+        # transient crash (e.g. a CUDA hiccup under ASR+TTS GPU contention) must
+        # not lose the whole turn's audio.
         async with self.lock:
-            process = await self._ensure_process()
-            request_id = uuid.uuid4().hex
-            payload = {
-                **request,
-                "id": request_id,
-                "output": str(output_path),
-            }
-            if not process.stdin or not process.stdout:
-                raise RuntimeError("CosyVoice3 worker pipes are not available.")
+            last_error: Exception | None = None
+            for attempt in range(2):
+                try:
+                    await self._synthesize_once(request, output_path)
+                    return
+                except _WorkerCrash as exc:
+                    last_error = exc
+                    self._terminate()  # ensure the next attempt spawns a clean process
+                    continue
+            raise RuntimeError(
+                f"CosyVoice3 worker crashed and retry failed: {last_error}"
+            ) from last_error
+
+    async def _synthesize_once(self, request: dict, output_path: Path) -> None:
+        process = await self._ensure_process()
+        request_id = uuid.uuid4().hex
+        payload = {
+            **request,
+            "id": request_id,
+            "output": str(output_path),
+        }
+        if not process.stdin or not process.stdout:
+            raise _WorkerCrash("CosyVoice3 worker pipes are not available.")
+        try:
             process.stdin.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
             await process.stdin.drain()
-            started = asyncio.get_running_loop().time()
-            while True:
-                remaining = self.settings.cosyvoice3_timeout_seconds - (asyncio.get_running_loop().time() - started)
-                if remaining <= 0:
-                    self._terminate()
-                    raise RuntimeError("CosyVoice3 worker synthesis timed out.")
-                try:
-                    line = await asyncio.wait_for(process.stdout.readline(), timeout=remaining)
-                except TimeoutError as exc:
-                    self._terminate()
-                    raise RuntimeError("CosyVoice3 worker synthesis timed out.") from exc
-                if not line:
-                    code = process.returncode
-                    self._terminate()
-                    raise RuntimeError(f"CosyVoice3 worker exited before returning audio. exit_code={code}")
-                response = json.loads(line.decode("utf-8"))
-                if str(response.get("id") or "") != request_id:
-                    continue
-                if not response.get("ok"):
-                    raise RuntimeError(f"CosyVoice3 worker failed: {response.get('error')}")
-                if not output_path.exists() or output_path.stat().st_size == 0:
-                    raise RuntimeError("CosyVoice3 worker produced no audio.")
-                return
+        except (ConnectionResetError, BrokenPipeError, RuntimeError) as exc:
+            raise _WorkerCrash(f"CosyVoice3 worker stdin closed: {exc}") from exc
+        started = asyncio.get_running_loop().time()
+        while True:
+            remaining = self.settings.cosyvoice3_timeout_seconds - (asyncio.get_running_loop().time() - started)
+            if remaining <= 0:
+                self._terminate()
+                raise RuntimeError("CosyVoice3 worker synthesis timed out.")
+            try:
+                line = await asyncio.wait_for(process.stdout.readline(), timeout=remaining)
+            except TimeoutError as exc:
+                self._terminate()
+                raise RuntimeError("CosyVoice3 worker synthesis timed out.") from exc
+            if not line:
+                # Empty read => the worker process died. Treat as a retryable crash.
+                code = process.returncode
+                raise _WorkerCrash(f"CosyVoice3 worker exited before returning audio. exit_code={code}")
+            response = json.loads(line.decode("utf-8"))
+            if str(response.get("id") or "") != request_id:
+                continue
+            if not response.get("ok"):
+                # A clean error response (e.g. recovered OOM) is NOT a crash; do
+                # not retry blindly — surface it so the caller can fall back.
+                raise RuntimeError(f"CosyVoice3 worker failed: {response.get('error')}")
+            if not output_path.exists() or output_path.stat().st_size == 0:
+                raise RuntimeError("CosyVoice3 worker produced no audio.")
+            return
 
     async def _ensure_process(self) -> asyncio.subprocess.Process:
         if self.process and self.process.returncode is None:

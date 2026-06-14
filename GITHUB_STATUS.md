@@ -2,9 +2,25 @@
 
 - Repository: https://github.com/KecenLi/astralive
 - Branch: main
-- Latest feature commit for this round: this commit, local Whisper large-v3 packaging integration
+- Latest feature commit for this round: pending, visual capture / voice loop / ASR recovery / Chinese UI round
 - To check the current latest commit: `git rev-parse --short HEAD`
 - Reminder: after each implementation and test round, commit and push intentional source changes, then report the commit hash, latest packaged exe path, timestamp, and SHA256.
+
+## 2026-06-14 Visual Capture / Voice Loop / Chinese UI Round
+
+- GitHub reminder: push only intentional source changes to `https://github.com/KecenLi/astralive` on `main`; do not commit `.env`, `data/`, packaged `dist/`, local model weights, logs, or tokens.
+- Root cause handled: camera/screen preview could be active while the auto-upload loop never restarted after `streamRef` changed; panels now track a real `streamActive` state, and capture scheduling is source-level so camera and screen can run independently.
+- Voice loop handled: TEN VAD now creates the trace before the first streamed chunk, the final metadata reports actual streamed chunks/bytes, ASR worker pipe/process crashes retry once, and ASR/TTS local GPU work is serialized to avoid same-GPU memory races.
+- Visual failure handling: if Vertex returns timeout/429, the UI now says the frame was uploaded but cloud vision failed, instead of implying camera/screen permission failure.
+- Extreme-noise guard: if local ASR returns only punctuation/no language content, MODVII now logs and returns to listening instead of sending meaningless text to the LLM.
+- Desktop pet toggle: hiding the transparent always-on-top pet now closes and recreates the pet window instead of relying on `BrowserWindow.hide()` visibility state.
+- Local ASR default for deadline speed: `.env` is ignored and currently uses `LOCAL_ASR_MODEL=base`, `LOCAL_ASR_MODEL_PATH=D:\assist ai\models\whisper\base.pt`, `LOCAL_ASR_DEVICE=cuda`; `large-v3.pt` remains available but is not the default.
+- Validation before packaging: backend pytest `92 passed`, `ruff check app` clean, web TypeScript build check clean, Vitest `53 passed`, verifier script syntax check clean.
+- Source dev blind soak against the real local backend: 3/3 rounds returned to listening, 0 hard timeouts, 0 server error events, visual answered 2/2 expected visual rounds, with `vision.summary` observed.
+- Final packaged mock smoke: passed for main render, Live2D, text dialogue, prompt-attack refusal, screen capture, screen+voice concurrency, desktop pet toggle/click, and backend audio websocket.
+- Final packaged real-provider smoke: `low_noise` passed with local Whisper + Vertex vision/LLM + CosyVoice3, auto-returned to listening, visual summary updated, no server errors. `white_noise` did not crash but base Whisper produced punctuation-only text, now guarded.
+- Latest portable exe: `D:\assist ai\dist\desktop\MODVII 0.1.0.exe`, timestamp `2026-06-14 20:38:40 +0800`, SHA256 `94CE60E914D52065AE696F6466276EFD0822CCA5766F83DAEFA46D7C444B76A0`.
+- Latest installer: `D:\assist ai\dist\desktop\MODVII Setup 0.1.0.exe`, timestamp `2026-06-14 20:38:38 +0800`, SHA256 `D6FF62F6D8CA48D861D4B32CE56714C33E7B9A8B4CC0920083BC22A9175BEFA5`.
 
 ## 2026-06-14 Visual Timeout / Manual Capture Round
 

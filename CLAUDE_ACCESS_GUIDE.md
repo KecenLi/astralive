@@ -18,7 +18,7 @@ Those are Electron portable extraction folders and may contain old code.
 
 ## Current Local Model / Cache Layout
 
-- Whisper `large-v3`: `D:\assist ai\models\whisper\large-v3.pt`
+- Whisper fast model: `D:\assist ai\models\whisper\base.pt`
 - Compatibility junction: `C:\Users\YHT\.cache\whisper` -> `D:\assist ai\models\whisper`
 - CosyVoice model: `D:\assist ai\models\Fun-CosyVoice3-0.5B`
 - CosyVoice repo/venv: `D:\assist ai\third_party\CosyVoice`
@@ -28,9 +28,9 @@ The ignored local `.env` should use:
 
 ```powershell
 ASR_PROVIDER=local_whisper
-LOCAL_ASR_MODEL=large-v3
+LOCAL_ASR_MODEL=base
 LOCAL_ASR_DEVICE=cuda
-LOCAL_ASR_MODEL_PATH=D:\assist ai\models\whisper\large-v3.pt
+LOCAL_ASR_MODEL_PATH=D:\assist ai\models\whisper\base.pt
 TTS_PROVIDER=cosyvoice3
 COSYVOICE3_DEVICE=cuda
 REALTIME_PROVIDER=none

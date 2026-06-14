@@ -39,6 +39,26 @@ const RESPONSE_AUDIO_DONE_TIMEOUT_MS = 90_000;
 const RESPONSE_TOTAL_WATCHDOG_TIMEOUT_MS = 90_000;
 const FIXED_NOTICE_AUDIO_SOURCE = "fixed_notice";
 
+const costModeLabel: Record<string, string> = {
+  sleep: "睡眠模式",
+  low_cost: "省流模式",
+  active: "活跃模式",
+  focus: "高清凝视",
+};
+
+const frameReasonLabel: Record<FramePayload["capture_reason"], string> = {
+  wake_snapshot: "唤醒快照",
+  visual_question: "视觉提问",
+  scene_changed: "场景变化",
+  manual_debug: "手动测试",
+  focus_roi: "摄像头高清",
+  periodic_low_cost: "低频采样",
+  screen_low_fps: "屏幕低帧",
+  screen_stream: "屏幕连续",
+  camera_stream: "摄像头连续",
+  screen_focus: "屏幕高清",
+};
+
 interface SendUserTextOptions {
   keepConversation?: boolean;
   proactive?: boolean;
@@ -161,7 +181,7 @@ function handleServerEvent(event: EventEnvelope<unknown>, effects: ServerEventEf
     const reason = payload.reason ?? payload.focus_reason ?? "需要更清晰画面";
     const notice = `${reason}${confidence}`;
     store.setVisualSelfCheckNotice(notice);
-    store.addMessage("system", `${notice}，点击 Camera 或 Screen 的高清凝视按钮。`);
+    store.addMessage("system", `${notice}，点击摄像头或屏幕的高清凝视按钮。`);
   }
   if (event.type === "vision.error") {
     const payload = event.payload as {
@@ -173,6 +193,12 @@ function handleServerEvent(event: EventEnvelope<unknown>, effects: ServerEventEf
     const detail = payload.detail?.trim() || "视觉服务暂时不可用";
     store.setLastFrameInfo(`${payload.frame_id ?? "frame"} / 视觉失败`);
     if (payload.user_visible) {
+      const reason =
+        payload.capture_reason && payload.capture_reason in frameReasonLabel
+          ? frameReasonLabel[payload.capture_reason as FramePayload["capture_reason"]]
+          : "手动捕捉";
+      store.setVisualSummary(`${reason}已上传，但云端视觉暂时失败：${detail}`);
+      store.setVisualSelfCheckNotice("视觉云端失败，不是摄像头或屏幕权限问题。");
       store.addMessage("system", `视觉捕捉失败：${detail}。可以稍后重试，或先继续语音对话。`);
     }
   }
@@ -218,7 +244,7 @@ function MainApp() {
   const reconnectAttemptsRef = useRef(0);
 
   const providerLabel = useMemo(
-    () => `${store.cost.mode.toUpperCase()} / runtime providers`,
+    () => `${costModeLabel[store.cost.mode] ?? store.cost.mode} / 运行中模型`,
     [store.cost.mode],
   );
 
@@ -638,7 +664,7 @@ function MainApp() {
   }, []);
 
   function handleFrameSent(frame: FramePayload) {
-    store.setLastFrameInfo(`${frame.width}x${frame.height} / ${frame.capture_reason}`);
+    store.setLastFrameInfo(`${frame.width}x${frame.height} / ${frameReasonLabel[frame.capture_reason] ?? frame.capture_reason}`);
   }
 
   const mediaUploadSuspended = shouldSuspendVisualAutoUpload({

@@ -37,7 +37,12 @@ from app.contracts.model_io import (
 from app.core.session_state import SessionState
 from app.services.avatar_service import AvatarService
 from app.providers.asr.google_genai import GoogleGenAIASRProvider
-from app.providers.asr.local_whisper import LocalWhisperASRProvider, _worker_command
+from app.providers.asr.local_whisper import (
+    LocalWhisperASRProvider,
+    _LocalWhisperWorker,
+    _WorkerCrash,
+    _worker_command,
+)
 from app.providers.asr.openai_compatible import OpenAICompatibleASRProvider
 from app.providers.registry import ProviderRegistry
 from app.providers.llm.openai_compatible import OpenAICompatibleLLMProvider
@@ -558,6 +563,26 @@ async def test_local_whisper_asr_uses_worker_wav(tmp_path) -> None:
     assert result.text == "小七本地识别"
     assert result.raw["provider"] == "local_whisper"
     assert calls == [(calls[0][0], "zh-CN")]
+
+
+async def test_local_whisper_worker_retries_once_after_process_crash(tmp_path, monkeypatch) -> None:
+    worker = _LocalWhisperWorker(Settings(data_dir=tmp_path / "data"))
+    calls = 0
+
+    async def fake_once(audio_path, language: str):
+        nonlocal calls
+        calls += 1
+        assert language == "zh-CN"
+        if calls == 1:
+            raise _WorkerCrash("pipe closed")
+        return {"text": "重试成功", "language": "zh", "segments": 1}
+
+    monkeypatch.setattr(worker, "_transcribe_once", fake_once)
+
+    result = await worker.transcribe(tmp_path / "turn.wav", "zh-CN")
+
+    assert result["text"] == "重试成功"
+    assert calls == 2
 
 
 def test_local_whisper_worker_command_includes_model_path_and_download_root(tmp_path) -> None:
@@ -1133,6 +1158,90 @@ class StubWebSocket:
     async def send_json(self, event: dict) -> None:
         await asyncio.sleep(0)
         self.events.append(event)
+
+
+class PunctuationOnlyASRAudioService:
+    has_realtime = False
+    can_stream_realtime = False
+
+    def __init__(self) -> None:
+        self.transcribe_calls = 0
+
+    async def transcribe(self, audio_bytes: bytes, metadata: dict | None = None) -> ASRResult:
+        self.transcribe_calls += 1
+        return ASRResult(text="。。。。。。", confidence=0.1, is_final=True)
+
+    def decode_audio_chunk(self, payload: AudioChunkPayload) -> bytes:
+        return base64.b64decode(payload.data_base64) if payload.data_base64 else b""
+
+
+async def test_asr_first_ignores_punctuation_only_transcript() -> None:
+    websocket = StubWebSocket()
+    session = SessionState(session_id="test_session")
+    settings = Settings(realtime_provider="none", tts_provider="mock")
+    runtime = AudioRuntimeState()
+    visual_runtime = VisualRuntimeState()
+    send_lock = asyncio.Lock()
+    audio = PunctuationOnlyASRAudioService()
+    dialogue = DialogueService(ProviderRegistry(settings).llm(), settings)
+
+    first_payload = AudioChunkPayload(
+        chunk_id="chunk_1",
+        mime="audio/pcm;rate=16000",
+        sample_rate=16000,
+        channels=1,
+        encoding="pcm_s16le",
+        data_base64=base64.b64encode(b"\x01\x00" * 320).decode("ascii"),
+        is_final=False,
+    )
+    await _handle_event(
+        websocket,  # type: ignore[arg-type]
+        EventEnvelope(type="client.media.audio_chunk", session_id=session.session_id, payload=first_payload.model_dump()),
+        session,
+        VisionService(ProviderRegistry(settings).vision(), settings),
+        dialogue,
+        audio,  # type: ignore[arg-type]
+        AvatarService(),
+        WakeService(),
+        settings,
+        runtime,
+        visual_runtime,
+        time.perf_counter(),
+        send_lock,
+        None,
+    )
+
+    task = await _handle_event(
+        websocket,  # type: ignore[arg-type]
+        EventEnvelope(
+            type="client.media.audio_chunk",
+            session_id=session.session_id,
+            payload=first_payload.model_copy(update={"chunk_id": "chunk_final", "data_base64": "", "is_final": True}).model_dump(),
+        ),
+        session,
+        VisionService(ProviderRegistry(settings).vision(), settings),
+        dialogue,
+        audio,  # type: ignore[arg-type]
+        AvatarService(),
+        WakeService(),
+        settings,
+        runtime,
+        visual_runtime,
+        time.perf_counter(),
+        send_lock,
+        None,
+    )
+
+    assert task is None
+    assert audio.transcribe_calls == 1
+    assert session.status == "listening"
+    event_types = [event["type"] for event in websocket.events]
+    assert "asr.transcript.final" in event_types
+    assert "assistant.text.final" not in event_types
+    assert any(
+        event["type"] == "debug.log" and "no language content" in event["payload"]["message"]
+        for event in websocket.events
+    )
 
 
 async def test_realtime_audio_receiver_starts_after_final_audio_chunk() -> None:
@@ -1817,6 +1926,45 @@ def test_clearing_pending_visual_frames_does_not_stale_active_source() -> None:
     assert visual_runtime.dropped_pending_frames == 1
 
 
+def test_clearing_pending_visual_frames_keeps_manual_focus_jobs() -> None:
+    visual_runtime = VisualRuntimeState()
+    visual_runtime.pending["screen"] = VisualFrameJob(
+        sequence=1,
+        source="screen",
+        frame=FramePayload(
+            frame_id="auto_screen",
+            width=640,
+            height=360,
+            capture_reason="screen_low_fps",
+            scene_hash="auto",
+            data_base64="abc123",
+        ),
+        prompt="自动屏幕帧",
+        received_at=time.perf_counter(),
+    )
+    visual_runtime.pending["focus"] = VisualFrameJob(
+        sequence=2,
+        source="focus",
+        frame=FramePayload(
+            frame_id="manual_focus",
+            width=640,
+            height=360,
+            capture_reason="screen_focus",
+            scene_hash="focus",
+            data_base64="abc123",
+        ),
+        prompt="用户手动高清凝视",
+        received_at=time.perf_counter(),
+    )
+
+    dropped = _clear_pending_visual_runtime(visual_runtime)
+
+    assert dropped == 1
+    assert set(visual_runtime.pending) == {"focus"}
+    assert visual_runtime.pending["focus"].frame.frame_id == "manual_focus"
+    assert visual_runtime.dropped_pending_frames == 1
+
+
 async def test_visual_scheduler_keeps_latest_pending_screen_frame() -> None:
     websocket = StubWebSocket()
     runtime = AudioRuntimeState()
@@ -1958,6 +2106,81 @@ async def test_visual_scheduler_can_run_screen_and_camera_in_parallel() -> None:
 
     assert set(provider.calls) == {"screen_1", "camera_1"}
     assert len([event for event in websocket.events if event["type"] == "vision.summary"]) == 2
+
+
+async def test_parallel_visual_results_are_stale_checked_per_source() -> None:
+    websocket = StubWebSocket()
+    runtime = AudioRuntimeState()
+    visual_runtime = VisualRuntimeState()
+    session = SessionState(session_id="test_session", status="listening")
+    settings = Settings(
+        realtime_provider="mock",
+        llm_provider="mock",
+        tts_provider="mock",
+        vision_max_concurrency=2,
+        vision_pending_frame_limit=2,
+    )
+    send_lock = asyncio.Lock()
+    provider = ControlledVisionProvider()
+    vision = VisionService(provider, settings)
+    dialogue = DialogueService(ProviderRegistry(settings).llm(), settings)
+    avatar = AvatarService()
+    audio = StubStreamingAudioService(OrderSensitiveRealtimeStream())
+
+    for frame_id, reason in (("screen_older", "screen_stream"), ("camera_newer", "camera_stream")):
+        await _handle_event(
+            websocket,  # type: ignore[arg-type]
+            EventEnvelope(
+                type="client.media.frame",
+                session_id=session.session_id,
+                payload=FramePayload(
+                    frame_id=frame_id,
+                    width=640,
+                    height=360,
+                    capture_reason=reason,
+                    scene_hash=frame_id,
+                    data_base64="abc123",
+                ).model_dump(),
+            ),
+            session,
+            vision,
+            dialogue,
+            audio,  # type: ignore[arg-type]
+            avatar,
+            WakeService(),
+            settings,
+            runtime,
+            visual_runtime,
+            0.0,
+            send_lock,
+            None,
+        )
+
+    await wait_for_started_frame(provider, "screen_older")
+    await wait_for_started_frame(provider, "camera_newer")
+    active_tasks = list(visual_runtime.active_tasks)
+    provider.release_frame("camera_newer")
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        if any(
+            event["type"] == "vision.summary" and event["payload"]["frame_id"] == "camera_newer"
+            for event in websocket.events
+        ):
+            break
+    else:
+        pytest.fail("camera visual summary was not sent")
+
+    provider.release_frame("screen_older")
+    await asyncio.wait_for(asyncio.gather(*active_tasks), timeout=1)
+
+    summary_ids = [
+        event["payload"]["frame_id"]
+        for event in websocket.events
+        if event["type"] == "vision.summary"
+    ]
+    assert "camera_newer" in summary_ids
+    assert "screen_older" in summary_ids
+    assert session.cost_meter.stale_visual_results_discarded == 0
 
 
 async def test_low_confidence_visual_result_requests_focus() -> None:

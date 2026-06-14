@@ -157,8 +157,17 @@ try {
   await pet.enable();
   step("connect-cdp", "pass", { mainUrl: mainTarget.url, petUrl: petTarget.url });
 
-  await waitForEval(main, `document.body.innerText.includes("MODVII") && document.body.innerText.includes("Conversation")`);
-  await waitForEval(main, `document.body.innerText.includes("会话") && document.body.innerText.includes("ready")`, 20_000);
+  await waitForEval(
+    main,
+    `document.body.innerText.includes("MODVII") &&
+      (document.body.innerText.includes("Conversation") || document.body.innerText.includes("会话"))`,
+  );
+  await waitForEval(
+    main,
+    `document.body.innerText.includes("会话") &&
+      (document.body.innerText.includes("ready") || document.body.innerText.includes("已就绪") || document.body.innerText.includes("等待中"))`,
+    20_000,
+  );
   await screenshot(main, "main-ready");
   step("main-rendered", "pass", { body: await bodyExcerpt(main) });
 
@@ -194,7 +203,8 @@ try {
       document.querySelector(".mic-panel")?.innerText.includes("监听唤醒词") ||
       document.querySelector(".mic-panel")?.innerText.includes("关键词") ||
       document.querySelector(".mic-panel")?.innerText.includes("等待语音") ||
-      document.querySelector(".mic-panel")?.innerText.includes("streaming")`,
+      document.querySelector(".mic-panel")?.innerText.includes("streaming") ||
+      document.querySelector(".mic-panel")?.innerText.includes("发送中")`,
     15_000,
   );
   step("keyword-listen-button-click", "pass", { panel: await main.evaluate(`document.querySelector(".mic-panel")?.innerText || ""`) });
@@ -203,7 +213,11 @@ try {
     main,
     `(() => {
       const text = document.querySelector(".mic-panel")?.innerText || "";
-      return !text.includes("监听唤醒词") && !text.includes("TEN VAD: streaming") && !text.includes("live streaming");
+      return !text.includes("监听唤醒词") &&
+        !text.includes("TEN VAD: streaming") &&
+        !text.includes("TEN VAD：正在发送") &&
+        !text.includes("live streaming") &&
+        !text.includes("实时语音发送中");
     })()`,
     12_000,
   );
@@ -227,7 +241,7 @@ try {
     `(() => {
       const panel = document.querySelector(".screen-panel");
       const video = panel?.querySelector("video");
-      return panel?.innerText.includes("ready") && video?.videoWidth > 0;
+      return (panel?.innerText.includes("ready") || panel?.innerText.includes("已就绪")) && video?.videoWidth > 0;
     })()`,
     20_000,
   );
@@ -240,6 +254,7 @@ try {
 
   const hiddenState = await togglePetFromMain(false);
   const shownState = await togglePetFromMain(true);
+  pet = await reconnectPetPage();
   step("pet-toggle-button", "pass", { hiddenState, shownState });
 
   const beforeBubble = await pet.evaluate(`document.querySelector("[data-testid='pet-bubble']")?.innerText || ""`);
@@ -281,14 +296,27 @@ function killExisting() {
 
 async function verifyFakeMicRealtime(page) {
   await clickByTitle(page, "授权麦克风");
-  await waitForEval(page, `document.querySelector(".mic-panel")?.innerText.includes("ready")`, 12_000);
+  await waitForEval(
+    page,
+    `(() => {
+      const text = document.querySelector(".mic-panel")?.innerText || "";
+      return text.includes("ready") || text.includes("已就绪");
+    })()`,
+    12_000,
+  );
   await clickLiveAudio(page);
   try {
     await waitForEval(
       page,
       `(() => {
         const text = document.querySelector(".mic-panel")?.innerText || "";
-        return text.includes("live streaming") || text.includes("等待语音") || text.includes("检测到语音");
+        return text.includes("live streaming") ||
+          text.includes("streaming") ||
+          text.includes("实时语音发送中") ||
+          text.includes("TEN VAD：正在发送") ||
+          text.includes("发送中") ||
+          text.includes("等待语音") ||
+          text.includes("检测到语音");
       })()`,
       12_000,
     );
@@ -327,7 +355,13 @@ async function verifyWakeButtonAutoRealtime(page) {
       `(() => {
         const panel = document.querySelector(".mic-panel");
         const text = panel?.innerText || "";
-        return text.includes("live streaming") || text.includes("等待语音") || text.includes("streaming");
+        return text.includes("live streaming") ||
+          text.includes("streaming") ||
+          text.includes("实时语音发送中") ||
+          text.includes("TEN VAD：正在发送") ||
+          text.includes("发送中") ||
+          text.includes("等待语音") ||
+          text.includes("检测到语音");
       })()`,
       15_000,
     );
@@ -368,13 +402,25 @@ async function verifyRealApiDesktop(page) {
     await waitFor(() => capture.receivedTypes["vision.summary"] >= 1, 25_000).catch(() => false);
 
     await clickByTitle(page, "授权麦克风");
-    await waitForEval(page, `document.querySelector(".mic-panel")?.innerText.includes("ready")`, 20_000);
+    await waitForEval(
+      page,
+      `(() => {
+        const text = document.querySelector(".mic-panel")?.innerText || "";
+        return text.includes("ready") || text.includes("已就绪");
+      })()`,
+      20_000,
+    );
     await clickLiveAudio(page);
     await waitForEval(
       page,
       `(() => {
         const text = document.querySelector(".mic-panel")?.innerText || "";
-        return text.includes("streaming") || text.includes("等待语音") || text.includes("检测到语音");
+        return text.includes("streaming") ||
+          text.includes("实时语音发送中") ||
+          text.includes("TEN VAD：正在发送") ||
+          text.includes("发送中") ||
+          text.includes("等待语音") ||
+          text.includes("检测到语音");
       })()`,
       20_000,
     );
@@ -395,6 +441,9 @@ async function verifyRealApiDesktop(page) {
         capture.autoReturnedToListening ||
         capture.sentAudioChunks > sentAtDone + 1 ||
         panel.includes("streaming") ||
+        panel.includes("实时语音发送中") ||
+        panel.includes("TEN VAD：正在发送") ||
+        panel.includes("发送中") ||
         panel.includes("等待语音") ||
         panel.includes("监听")
       );
@@ -590,13 +639,25 @@ async function verifyScreenCaptureVoiceConcurrency(page) {
     await ensureScreenReady(page);
     await selectScreenModeContinuous(page);
     await clickByTitle(page, "授权麦克风");
-    await waitForEval(page, `document.querySelector(".mic-panel")?.innerText.includes("ready")`, 12_000);
+    await waitForEval(
+      page,
+      `(() => {
+        const text = document.querySelector(".mic-panel")?.innerText || "";
+        return text.includes("ready") || text.includes("已就绪");
+      })()`,
+      12_000,
+    );
     await clickLiveAudio(page);
     await waitForEval(
       page,
       `(() => {
         const text = document.querySelector(".mic-panel")?.innerText || "";
-        return text.includes("streaming") || text.includes("等待语音") || text.includes("检测到语音");
+        return text.includes("streaming") ||
+          text.includes("实时语音发送中") ||
+          text.includes("TEN VAD：正在发送") ||
+          text.includes("发送中") ||
+          text.includes("等待语音") ||
+          text.includes("检测到语音");
       })()`,
       12_000,
     );
@@ -642,7 +703,12 @@ async function assistantMessageCount(page) {
 async function isLiveAudioStreaming(page) {
   return page.evaluate(`(() => {
     const text = document.querySelector(".mic-panel")?.innerText || "";
-    return text.includes("streaming") || text.includes("等待语音") || text.includes("检测到语音");
+    return text.includes("streaming") ||
+      text.includes("实时语音发送中") ||
+      text.includes("TEN VAD：正在发送") ||
+      text.includes("发送中") ||
+      text.includes("等待语音") ||
+      text.includes("检测到语音");
   })()`);
 }
 
@@ -1028,7 +1094,14 @@ async function selectScreenModeContinuous(page) {
 async function uploadScreenFrameWithRetry(page) {
   const successExpression = `(() => {
     const text = document.querySelector(".screen-panel")?.innerText || "";
-    return text.includes("screen_stream") || text.includes("screen_low_fps") || text.includes("sent") || text.includes("重复画面跳过");
+    return text.includes("screen_stream") ||
+      text.includes("screen_low_fps") ||
+      text.includes("sent") ||
+      text.includes("屏幕连续") ||
+      text.includes("屏幕低帧") ||
+      text.includes("已发送") ||
+      text.includes("手动已发送") ||
+      text.includes("重复画面跳过");
   })()`;
   for (let attempt = 1; attempt <= 4; attempt += 1) {
     await ensureScreenReady(page);
@@ -1051,7 +1124,8 @@ async function ensureScreenReady(page) {
   const readyExpression = `(() => {
     const panel = document.querySelector(".screen-panel");
     const video = panel?.querySelector("video");
-    return panel?.innerText.includes("ready") && video?.videoWidth > 0;
+    const text = panel?.innerText || "";
+    return (text.includes("ready") || text.includes("已就绪")) && video?.videoWidth > 0;
   })()`;
   if (await page.evaluate(`Boolean(${readyExpression})`)) return;
   await clickByTitle(page, "启动屏幕捕捉");
@@ -1071,6 +1145,13 @@ async function togglePetFromMain(expectedVisible) {
   await clickByButtonText(main, "桌宠");
   const state = await waitForPetState(expectedVisible);
   return state;
+}
+
+async function reconnectPetPage() {
+  const target = await waitForTarget((candidate) => candidate.type === "page" && candidate.url.includes("mode=pet"), 20_000);
+  const page = await CdpPage.connect(target.webSocketDebuggerUrl);
+  await page.enable();
+  return page;
 }
 
 async function waitForPetState(expectedVisible, timeoutMs = 12_000) {

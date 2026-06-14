@@ -23,6 +23,14 @@ const initialStatus: PermissionStatus = {
   autostart: "pending",
 };
 
+const permissionStatusLabel: Record<string, string> = {
+  pending: "等待",
+  ready: "已授权",
+  failed: "失败",
+  enabled: "已启用",
+  disabled: "未启用",
+};
+
 export function DevicePermissionWizard({ onComplete }: PermissionWizardProps) {
   const [visible, setVisible] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -134,7 +142,7 @@ function PermissionItem({ icon, label, value }: { icon: ReactNode; label: string
         {icon}
         {label}
       </span>
-      <strong>{value}</strong>
+      <strong>{permissionStatusLabel[value] ?? value}</strong>
     </div>
   );
 }

@@ -85,6 +85,10 @@ class LocalWhisperASRProvider(ASRProvider):
         return output
 
 
+class _WorkerCrash(Exception):
+    """The worker process died or its pipe closed; retry on a clean process."""
+
+
 class _LocalWhisperWorker:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -94,38 +98,50 @@ class _LocalWhisperWorker:
 
     async def transcribe(self, audio_path: Path, language: str) -> dict:
         async with self.lock:
-            process = await self._ensure_process()
-            request_id = uuid.uuid4().hex
-            payload = {
-                "id": request_id,
-                "audio_path": str(audio_path),
-                "language": language,
-            }
-            if not process.stdin or not process.stdout:
-                raise RuntimeError("Local Whisper worker pipes are not available.")
+            last_error: Exception | None = None
+            for _attempt in range(2):
+                try:
+                    return await self._transcribe_once(audio_path, language)
+                except _WorkerCrash as exc:
+                    last_error = exc
+                    self._terminate()
+            raise RuntimeError(f"Local Whisper worker crashed and retry failed: {last_error}") from last_error
+
+    async def _transcribe_once(self, audio_path: Path, language: str) -> dict:
+        process = await self._ensure_process()
+        request_id = uuid.uuid4().hex
+        payload = {
+            "id": request_id,
+            "audio_path": str(audio_path),
+            "language": language,
+        }
+        if not process.stdin or not process.stdout:
+            raise _WorkerCrash("Local Whisper worker pipes are not available.")
+        try:
             process.stdin.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
             await process.stdin.drain()
-            started = asyncio.get_running_loop().time()
-            while True:
-                remaining = self.settings.local_asr_timeout_seconds - (asyncio.get_running_loop().time() - started)
-                if remaining <= 0:
-                    self._terminate()
-                    raise RuntimeError("Local Whisper ASR timed out.")
-                try:
-                    line = await asyncio.wait_for(process.stdout.readline(), timeout=remaining)
-                except TimeoutError as exc:
-                    self._terminate()
-                    raise RuntimeError("Local Whisper ASR timed out.") from exc
-                if not line:
-                    code = process.returncode
-                    self._terminate()
-                    raise RuntimeError(f"Local Whisper worker exited before returning text. exit_code={code}")
-                response = json.loads(line.decode("utf-8"))
-                if str(response.get("id") or "") != request_id:
-                    continue
-                if not response.get("ok"):
-                    raise RuntimeError(f"Local Whisper worker failed: {response.get('error')}")
-                return response
+        except (ConnectionResetError, BrokenPipeError, RuntimeError) as exc:
+            raise _WorkerCrash(f"Local Whisper worker stdin closed: {exc}") from exc
+        started = asyncio.get_running_loop().time()
+        while True:
+            remaining = self.settings.local_asr_timeout_seconds - (asyncio.get_running_loop().time() - started)
+            if remaining <= 0:
+                self._terminate()
+                raise RuntimeError("Local Whisper ASR timed out.")
+            try:
+                line = await asyncio.wait_for(process.stdout.readline(), timeout=remaining)
+            except TimeoutError as exc:
+                self._terminate()
+                raise RuntimeError("Local Whisper ASR timed out.") from exc
+            if not line:
+                code = process.returncode
+                raise _WorkerCrash(f"Local Whisper worker exited before returning text. exit_code={code}")
+            response = json.loads(line.decode("utf-8"))
+            if str(response.get("id") or "") != request_id:
+                continue
+            if not response.get("ok"):
+                raise RuntimeError(f"Local Whisper worker failed: {response.get('error')}")
+            return response
 
     async def _ensure_process(self) -> asyncio.subprocess.Process:
         if self.process and self.process.returncode is None:

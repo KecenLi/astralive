@@ -101,18 +101,45 @@ def synthesize(request: dict, model, torch) -> dict:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-    with contextlib.redirect_stdout(sys.stderr):
-        chunks = [
-            chunk["tts_speech"].detach().cpu()
-            for chunk in model.inference_zero_shot(text, prompt_text, str(prompt_audio), stream=False)
-            if "tts_speech" in chunk
-        ]
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            chunks = [
+                chunk["tts_speech"].detach().cpu()
+                for chunk in model.inference_zero_shot(text, prompt_text, str(prompt_audio), stream=False)
+                if "tts_speech" in chunk
+            ]
+    except RuntimeError as exc:
+        # A CUDA out-of-memory mid-inference would otherwise corrupt the CUDA
+        # context and kill the whole worker process (exit_code=None on the
+        # provider side). Instead, free cached VRAM and surface a normal error
+        # response so the worker stays alive for the next request.
+        if _is_cuda_oom(exc):
+            _free_cuda(torch)
+            raise RuntimeError(f"CUDA out of memory during synthesis; recovered worker. {exc}") from exc
+        raise
     if not chunks:
         raise RuntimeError("CosyVoice3 returned no tts_speech chunks.")
 
     audio = (torch.cat(chunks, dim=1) if len(chunks) > 1 else chunks[0]).clamp(-1.0, 1.0)
     _save_wav_pcm16(output_path, audio, model.sample_rate)
+    # Proactively release the activation memory so back-to-back turns under GPU
+    # pressure (ASR + TTS sharing one card) don't accumulate toward an OOM.
+    _free_cuda(torch)
     return {"sample_rate": model.sample_rate, "chunks": len(chunks)}
+
+
+def _is_cuda_oom(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return "out of memory" in message or "cuda error" in message or "cublas" in message
+
+
+def _free_cuda(torch) -> None:
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+    except Exception:  # noqa: BLE001 - best-effort cleanup, never fatal
+        pass
 
 
 def main() -> int:

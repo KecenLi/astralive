@@ -17,6 +17,15 @@ const expressionLabel: Record<string, string> = {
   sleepy: "休眠",
 };
 
+const statusLabel: Record<string, string> = {
+  sleeping: "睡眠",
+  awake: "已唤醒",
+  listening: "监听",
+  thinking: "思考",
+  speaking: "说话",
+  interrupted: "已打断",
+};
+
 export function AvatarStage({
   onInterrupt,
   layout,
@@ -78,7 +87,7 @@ export function AvatarStage({
   const mouthOpen = Math.max(0.08, Math.min(1, lipSyncLevel || (isSpeaking ? 0.35 : 0.08)));
 
   return (
-    <section className="avatar-stage" aria-label="Avatar">
+    <section className="avatar-stage" aria-label="小七立绘">
       <div className={`live2d-layer ${isLive2DReady ? "is-ready" : ""}`} aria-hidden={!isLive2DReady}>
         <canvas ref={canvasRef} />
       </div>
@@ -102,7 +111,7 @@ export function AvatarStage({
       </div>
 
       <div className="avatar-meta">
-        <span className="status-pill">{status}</span>
+        <span className="status-pill">{statusLabel[status] ?? status}</span>
         <span>{expressionLabel[avatar.expression] ?? avatar.expression}</span>
       </div>
 

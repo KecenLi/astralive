@@ -15,7 +15,7 @@ import {
   VisualCaptureMode,
 } from "../../features/media/frameSampler";
 import { requestScreenCapture, stopMediaStream } from "../../features/media/screenCapture";
-import { runExclusiveCapture } from "../../features/media/captureCoordinator";
+import { runVisualSourceCapture } from "../../features/media/captureCoordinator";
 import { createEvent, FramePayload, VisualFrameMetricPayload } from "../../lib/events";
 import { wsClient } from "../../lib/wsClient";
 
@@ -25,11 +25,28 @@ interface ScreenCapturePanelProps {
   suspendAutoUpload?: boolean;
 }
 
+const reasonLabel: Record<FramePayload["capture_reason"], string> = {
+  wake_snapshot: "唤醒快照",
+  visual_question: "视觉提问",
+  scene_changed: "场景变化",
+  manual_debug: "手动测试",
+  focus_roi: "摄像头高清",
+  periodic_low_cost: "低频采样",
+  screen_low_fps: "屏幕低帧",
+  screen_stream: "屏幕连续",
+  camera_stream: "摄像头连续",
+  screen_focus: "屏幕高清",
+};
+
 export function ScreenCapturePanel({ autoStartSignal, onFrameSent, suspendAutoUpload = false }: ScreenCapturePanelProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const lastSceneHashRef = useRef<string | null>(null);
   const captureInFlightRef = useRef(false);
+  // Mirror stream liveness into state so the auto-upload effect (re)starts when
+  // screen capture actually turns on — a ref mutation alone never re-runs it,
+  // which left the capture loop dead and uploaded zero frames.
+  const [streamActive, setStreamActive] = useState(false);
   const [captureState, setCaptureState] = useState("未授权");
   const [sourceName, setSourceName] = useState("未选择");
   const [mode, setMode] = useState<VisualCaptureMode>("low_fps");
@@ -53,7 +70,8 @@ export function ScreenCapturePanel({ autoStartSignal, onFrameSent, suspendAutoUp
     streamRef.current = null;
     lastSceneHashRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
-    setCaptureState("stopped");
+    setStreamActive(false);
+    setCaptureState("已停止");
   }, []);
 
   const startScreen = useCallback(async () => {
@@ -67,8 +85,10 @@ export function ScreenCapturePanel({ autoStartSignal, onFrameSent, suspendAutoUp
         if (streamRef.current !== result.stream) return;
         setCaptureState("屏幕源已停止");
         streamRef.current = null;
+        setStreamActive(false);
       });
-      setCaptureState("ready");
+      setStreamActive(true);
+      setCaptureState("已就绪");
     } catch (error) {
       setCaptureState(error instanceof Error ? error.message : "屏幕捕捉不可用");
     }
@@ -126,13 +146,15 @@ export function ScreenCapturePanel({ autoStartSignal, onFrameSent, suspendAutoUp
         }
         lastSceneHashRef.current = frame.scene_hash;
         onFrameSent(frame);
-        setLastFrameInfo(`${frame.width}x${frame.height} / ${reason}`);
+        setLastFrameInfo(`${frame.width}x${frame.height} / ${reasonLabel[reason] ?? reason}`);
         if (!sessionId) {
           setCaptureState("会话未就绪，帧未发送");
           return;
         }
         const sent = wsClient.send(createEvent("client.media.frame", sessionId, frame));
-        setCaptureState(sent ? `${options.manual ? "manual sent" : "sent"} ${reason}` : "WebSocket 未连接，帧未发送");
+        setCaptureState(
+          sent ? `${options.manual ? "手动已发送" : "已发送"} ${reasonLabel[reason] ?? reason}` : "WebSocket 未连接，帧未发送",
+        );
       } catch (error) {
         setCaptureState(error instanceof Error ? error.message : "屏幕帧捕捉失败");
       } finally {
@@ -162,7 +184,7 @@ export function ScreenCapturePanel({ autoStartSignal, onFrameSent, suspendAutoUp
   }, [autoUpload, suspendAutoUpload]);
 
   useEffect(() => {
-    if (!autoUpload || !streamRef.current) return;
+    if (!autoUpload || !streamActive || !streamRef.current) return;
     let disposed = false;
     let timer = 0;
 
@@ -181,7 +203,7 @@ export function ScreenCapturePanel({ autoStartSignal, onFrameSent, suspendAutoUp
       // Share the single capture slot with the camera loop so the two visual
       // sources never burst frames at the server's single-concurrency vision
       // path simultaneously. A skipped sampled frame is harmless.
-      await runExclusiveCapture(() => captureAndSend(activity));
+      await runVisualSourceCapture("screen", () => captureAndSend(activity));
       if (!disposed) {
         timer = window.setTimeout(tick, getFrameIntervalMs(mode, activity));
       }
@@ -192,13 +214,13 @@ export function ScreenCapturePanel({ autoStartSignal, onFrameSent, suspendAutoUp
       disposed = true;
       window.clearTimeout(timer);
     };
-  }, [autoUpload, captureAndSend, focusUntil, mode, sendVisualMetric, status, suspendAutoUpload]);
+  }, [autoUpload, captureAndSend, focusUntil, mode, sendVisualMetric, status, streamActive, suspendAutoUpload]);
 
   return (
     <section className="panel screen-panel">
       <div className="panel-title">
         <ScreenShare size={18} />
-        <span>Screen</span>
+        <span>屏幕</span>
       </div>
       <video ref={videoRef} className="camera-preview" autoPlay muted playsInline />
       <div className="toolbar">

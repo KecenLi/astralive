@@ -567,13 +567,15 @@ function registerIpc() {
     return { visible: true };
   });
   ipcMain.handle("pet:hide", () => {
-    petWindow?.hide();
+    petWindow?.close();
+    petWindow = null;
     writeSettings({ petEnabled: false });
     return { visible: false };
   });
   ipcMain.handle("pet:toggle", async () => {
     if (petWindow && !petWindow.isDestroyed() && petWindow.isVisible()) {
-      petWindow.hide();
+      petWindow.close();
+      petWindow = null;
       writeSettings({ petEnabled: false });
       return { visible: false };
     }

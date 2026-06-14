@@ -2,6 +2,12 @@ import { MessageSquareText } from "lucide-react";
 
 import { useAppStore } from "../../app/store";
 
+const speakerLabel: Record<string, string> = {
+  user: "你",
+  assistant: "小七",
+  system: "系统",
+};
+
 export function ConversationPanel() {
   const messages = useAppStore((state) => state.messages);
   const userDraft = useAppStore((state) => state.currentUserDraft);
@@ -23,21 +29,21 @@ export function ConversationPanel() {
   const selfCheckNotice = visualSelfCheckNotice || latestFocusMessage || "视觉自检正常";
 
   return (
-    <section className="conversation-panel" aria-label="Conversation">
+    <section className="conversation-panel" aria-label="对话">
       <div className="panel-title">
         <MessageSquareText size={18} />
-        <span>Conversation</span>
-        <small className="memory-badge">memory {memoryTurns} turns</small>
+        <span>对话</span>
+        <small className="memory-badge">记忆 {memoryTurns} 轮</small>
       </div>
-      <div className="conversation-observability" aria-label="Conversation observability">
+      <div className="conversation-observability" aria-label="对话状态">
         <span>
-          <strong>Memory</strong> {memoryTurns} turns
+          <strong>记忆</strong> {memoryTurns} 轮
         </span>
         <span>
-          <strong>Self-check</strong> {selfCheckNotice}
+          <strong>自检</strong> {selfCheckNotice}
         </span>
         <span>
-          <strong>Frame</strong> {lastFrameInfo}
+          <strong>画面</strong> {lastFrameInfo}
         </span>
       </div>
       <div className="visual-summary">
@@ -47,19 +53,19 @@ export function ConversationPanel() {
       <div className="message-list">
         {messages.map((message) => (
           <article key={message.id} className={`message message-${message.speaker}`}>
-            <span>{message.speaker}</span>
+            <span>{speakerLabel[message.speaker] ?? message.speaker}</span>
             <p>{message.text}</p>
           </article>
         ))}
         {userDraft && (
           <article className="message message-user">
-            <span>user</span>
+            <span>你</span>
             <p>{userDraft}</p>
           </article>
         )}
         {draft && (
           <article className="message message-assistant">
-            <span>assistant</span>
+            <span>小七</span>
             <p>{draft}</p>
           </article>
         )}

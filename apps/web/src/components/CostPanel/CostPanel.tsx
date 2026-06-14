@@ -18,6 +18,22 @@ function formatUsd(value: number | null | undefined) {
   return isFiniteNumber(value) ? `$${value.toFixed(4)}` : "$0.0000";
 }
 
+const modeLabel: Record<string, string> = {
+  sleep: "睡眠",
+  low_cost: "省流",
+  active: "活跃",
+  focus: "高清",
+};
+
+const statusLabel: Record<string, string> = {
+  sleeping: "睡眠",
+  awake: "已唤醒",
+  listening: "监听",
+  thinking: "思考",
+  speaking: "说话",
+  interrupted: "已打断",
+};
+
 export function buildCostNarrative(cost: ReturnType<typeof useAppStore.getState>["cost"]) {
   const actualVisionCalls = metricValue(cost.vision_calls);
   const componentSavedCalls =
@@ -57,41 +73,41 @@ export function CostPanel() {
     <section className="panel cost-panel">
       <div className="panel-title">
         <Gauge size={18} />
-        <span>Cost</span>
+        <span>成本</span>
       </div>
       <div className={`cost-mode mode-${cost.mode}`}>
-        <span>{cost.mode}</span>
-        <small>{status}</small>
+        <span>{modeLabel[cost.mode] ?? cost.mode}</span>
+        <small>{statusLabel[status] ?? status}</small>
       </div>
-      <div className="savings-story" aria-label="Cost observability">
+      <div className="savings-story" aria-label="成本可视化">
         <strong>
-          Candidate frames {formatCount(narrative.candidateFrames)} -&gt; actual vision calls{" "}
+          候选帧 {formatCount(narrative.candidateFrames)} -&gt; 实际视觉调用{" "}
           {formatCount(narrative.actualVisionCalls)}
         </strong>
         <span>
-          Saved vision calls {formatCount(narrative.savedVisionCalls)} / cache hits{" "}
+          节省视觉调用 {formatCount(narrative.savedVisionCalls)} / 缓存命中{" "}
           {formatCount(cost.scene_cache_hits)}
         </span>
         <span>
-          Est. saved {formatUsd(cost.estimated_visual_cost_saved_usd)} / est. spend{" "}
-          {formatUsd(narrative.estimatedTotalCost)} over {formatCount(narrative.totalCalls)} calls
+          估算节省 {formatUsd(cost.estimated_visual_cost_saved_usd)} / 估算支出{" "}
+          {formatUsd(narrative.estimatedTotalCost)} / 总调用 {formatCount(narrative.totalCalls)}
         </span>
       </div>
       <dl className="metric-grid">
         <div>
-          <dt>candidate frames</dt>
+          <dt>候选帧</dt>
           <dd>{formatCount(narrative.candidateFrames)}</dd>
         </div>
         <div>
-          <dt>actual calls</dt>
+          <dt>实际调用</dt>
           <dd>{formatCount(cost.vision_calls)}</dd>
         </div>
         <div>
-          <dt>cache hits</dt>
+          <dt>缓存命中</dt>
           <dd>{formatCount(cost.scene_cache_hits)}</dd>
         </div>
         <div>
-          <dt>saved calls</dt>
+          <dt>节省调用</dt>
           <dd>{formatCount(narrative.savedVisionCalls)}</dd>
         </div>
         <div>
@@ -113,31 +129,31 @@ export function CostPanel() {
       </dl>
       <dl className="observability-list">
         <div>
-          <dt>client dedupe</dt>
+          <dt>本地去重</dt>
           <dd>{formatCount(cost.client_deduped_frames)}</dd>
         </div>
         <div>
-          <dt>sleep blocked</dt>
+          <dt>睡眠拦截</dt>
           <dd>{formatCount(cost.sleep_blocked_frames)}</dd>
         </div>
         <div>
-          <dt>voice deferred</dt>
+          <dt>语音延迟发送</dt>
           <dd>{formatCount(cost.voice_priority_deferred_frames)}</dd>
         </div>
         <div>
-          <dt>cooldown drops</dt>
+          <dt>冷却丢帧</dt>
           <dd>{formatCount(cost.visual_cooldown_drops)}</dd>
         </div>
         <div>
-          <dt>pending drops</dt>
+          <dt>排队丢帧</dt>
           <dd>{formatCount(cost.visual_pending_drops)}</dd>
         </div>
         <div>
-          <dt>stale discarded</dt>
+          <dt>过期丢弃</dt>
           <dd>{formatCount(cost.stale_visual_results_discarded)}</dd>
         </div>
         <div>
-          <dt>low confidence / focus</dt>
+          <dt>低置信/高清</dt>
           <dd>
             {formatCount(cost.visual_confidence_low_count)} / {formatCount(cost.focus_requests)}
           </dd>

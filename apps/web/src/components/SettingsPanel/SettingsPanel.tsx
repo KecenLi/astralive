@@ -39,12 +39,12 @@ export function SettingsPanel({ open, settings, onClose, onPatch }: SettingsPane
   const proactive = settings.proactiveChat;
 
   return (
-    <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="MODVII Settings">
+    <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="MODVII 设置">
       <section className="settings-window">
         <header className="settings-title">
           <span>
             <SlidersHorizontal size={18} />
-            Settings
+            设置
           </span>
           <button className="icon-button" type="button" title="关闭设置" onClick={onClose}>
             <X size={18} />
@@ -55,10 +55,10 @@ export function SettingsPanel({ open, settings, onClose, onPatch }: SettingsPane
           <fieldset className="settings-group">
             <legend>
               <Monitor size={16} />
-              Avatar
+              主界面立绘
             </legend>
             <label>
-              Scale
+              缩放
               {numberInput(main.scale, (scale) => onPatch({ avatarLayout: { main: { scale } } }), {
                 min: 0.15,
                 max: 2.25,
@@ -66,7 +66,7 @@ export function SettingsPanel({ open, settings, onClose, onPatch }: SettingsPane
               })}
             </label>
             <label>
-              Offset X
+              横向偏移
               {numberInput(main.offsetX, (offsetX) => onPatch({ avatarLayout: { main: { offsetX } } }), {
                 min: -900,
                 max: 900,
@@ -74,7 +74,7 @@ export function SettingsPanel({ open, settings, onClose, onPatch }: SettingsPane
               })}
             </label>
             <label>
-              Offset Y
+              纵向偏移
               {numberInput(main.offsetY, (offsetY) => onPatch({ avatarLayout: { main: { offsetY } } }), {
                 min: -900,
                 max: 900,
@@ -82,7 +82,7 @@ export function SettingsPanel({ open, settings, onClose, onPatch }: SettingsPane
               })}
             </label>
             <label>
-              Max H
+              最大高度
               {numberInput(
                 main.maxHeightPx,
                 (maxHeightPx) => onPatch({ avatarLayout: { main: { maxHeightPx } } }),
@@ -94,10 +94,10 @@ export function SettingsPanel({ open, settings, onClose, onPatch }: SettingsPane
           <fieldset className="settings-group">
             <legend>
               <Bot size={16} />
-              Pet
+              桌宠
             </legend>
             <label>
-              Scale
+              缩放
               {numberInput(pet.scale, (scale) => onPatch({ avatarLayout: { pet: { scale } } }), {
                 min: 0.15,
                 max: 2.25,
@@ -105,7 +105,7 @@ export function SettingsPanel({ open, settings, onClose, onPatch }: SettingsPane
               })}
             </label>
             <label>
-              Offset X
+              横向偏移
               {numberInput(pet.offsetX, (offsetX) => onPatch({ avatarLayout: { pet: { offsetX } } }), {
                 min: -900,
                 max: 900,
@@ -113,7 +113,7 @@ export function SettingsPanel({ open, settings, onClose, onPatch }: SettingsPane
               })}
             </label>
             <label>
-              Offset Y
+              纵向偏移
               {numberInput(pet.offsetY, (offsetY) => onPatch({ avatarLayout: { pet: { offsetY } } }), {
                 min: -900,
                 max: 900,
@@ -121,7 +121,7 @@ export function SettingsPanel({ open, settings, onClose, onPatch }: SettingsPane
               })}
             </label>
             <label>
-              Max H
+              最大高度
               {numberInput(
                 pet.maxHeightPx,
                 (maxHeightPx) => onPatch({ avatarLayout: { pet: { maxHeightPx } } }),
@@ -133,41 +133,41 @@ export function SettingsPanel({ open, settings, onClose, onPatch }: SettingsPane
           <fieldset className="settings-group">
             <legend>
               <Mic size={16} />
-              Voice
+              语音
             </legend>
             <label>
-              VAD
+              端点检测
               <select
                 value={voice.vadProvider}
                 onChange={(event) => onPatch(voicePatch("vadProvider", event.target.value as VoiceSettings["vadProvider"]))}
               >
-                <option value="ten">TEN</option>
-                <option value="silero">Silero</option>
-                <option value="rms">RMS</option>
+                <option value="ten">TEN 神经端点</option>
+                <option value="silero">Silero 备用端点</option>
+                <option value="rms">RMS 音量门限</option>
               </select>
             </label>
             <label>
-              Send
+              发送模式
               <select
                 value={voice.sendMode}
                 onChange={(event) => onPatch(voicePatch("sendMode", event.target.value as VoiceSettings["sendMode"]))}
               >
-                <option value="streaming_chunks">streaming</option>
-                <option value="buffered_turn">buffered</option>
+                <option value="streaming_chunks">分块流式</option>
+                <option value="buffered_turn">整句缓存</option>
               </select>
             </label>
             <label>
-              Route
+              路线
               <select
                 value={voice.route}
                 onChange={(event) => onPatch(voicePatch("route", event.target.value as VoiceSettings["route"]))}
               >
-                <option value="asr_first">ASR first</option>
-                <option value="live_first">Live first</option>
+                <option value="asr_first">先本地识别</option>
+                <option value="live_first">先实时通道</option>
               </select>
             </label>
             <label>
-              Gain
+              输入增益
               {numberInput(voice.inputGain, (inputGain) => onPatch(voicePatch("inputGain", inputGain)), {
                 min: 0.2,
                 max: 4,
@@ -175,7 +175,7 @@ export function SettingsPanel({ open, settings, onClose, onPatch }: SettingsPane
               })}
             </label>
             <label>
-              Tail ms
+              尾部静音（毫秒）
               {numberInput(
                 voice.silenceAfterSpeechMs,
                 (silenceAfterSpeechMs) => onPatch(voicePatch("silenceAfterSpeechMs", silenceAfterSpeechMs)),
@@ -183,7 +183,7 @@ export function SettingsPanel({ open, settings, onClose, onPatch }: SettingsPane
               )}
             </label>
             <label>
-              Max ms
+              单轮最长（毫秒）
               {numberInput(voice.maxTurnMs, (maxTurnMs) => onPatch(voicePatch("maxTurnMs", maxTurnMs)), {
                 min: 5000,
                 max: 60000,
@@ -195,7 +195,7 @@ export function SettingsPanel({ open, settings, onClose, onPatch }: SettingsPane
           <fieldset className="settings-group">
             <legend>
               <MessageCircle size={16} />
-              Proactive
+              主动聊天
             </legend>
             <label className="check-row">
               <input
@@ -203,7 +203,7 @@ export function SettingsPanel({ open, settings, onClose, onPatch }: SettingsPane
                 checked={proactive.enabled}
                 onChange={(event) => onPatch({ proactiveChat: { enabled: event.target.checked } })}
               />
-              Enabled
+              启用
             </label>
             <label className="check-row">
               <input
@@ -211,10 +211,10 @@ export function SettingsPanel({ open, settings, onClose, onPatch }: SettingsPane
                 checked={proactive.petBubbleFirst}
                 onChange={(event) => onPatch({ proactiveChat: { petBubbleFirst: event.target.checked } })}
               />
-              Pet first
+              先弹桌宠气泡
             </label>
             <label>
-              Min m
+              最短间隔 分钟
               {numberInput(
                 proactive.minIntervalMinutes,
                 (minIntervalMinutes) => onPatch({ proactiveChat: { minIntervalMinutes } }),
@@ -222,7 +222,7 @@ export function SettingsPanel({ open, settings, onClose, onPatch }: SettingsPane
               )}
             </label>
             <label>
-              Max m
+              最长间隔 分钟
               {numberInput(
                 proactive.maxIntervalMinutes,
                 (maxIntervalMinutes) => onPatch({ proactiveChat: { maxIntervalMinutes } }),

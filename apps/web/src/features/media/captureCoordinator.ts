@@ -1,20 +1,9 @@
 // Shared visual-capture coordinator.
 //
-// Camera and screen capture run as independent timer loops. Without a shared
-// gate they can fire frames at the same instant, and together with a voice turn
-// starting they overwhelm the server's single-concurrency vision path, which
-// then defers / drops / cools-down in a cascade — observed as a race when the
-// avatar, camera and screen are all active at once.
-//
-// This module is a tiny, dependency-free coordinator that every visual source
-// funnels through. It guarantees:
-//   1. Only one capture+upload runs at a time across ALL sources (mutex).
-//   2. A minimum spacing between any two uploads, regardless of source, so two
-//      loops cannot burst-submit back to back.
-//   3. A hard staleness guard so a hung capture can never wedge the mutex.
-//
-// It is intentionally redundant on top of each panel's own in-flight guard:
-// defense in depth against the cross-source race.
+// Camera and screen capture run as independent timer loops. They should be able
+// to progress in parallel, but each individual source still needs its own guard
+// so a slow capture cannot pile up stale frames. The legacy runExclusiveCapture
+// API is kept for tests and older callers; panels use runVisualSourceCapture.
 
 const MIN_GAP_MS = 180;
 // If a single capture somehow never resolves, release the lock anyway after
@@ -24,6 +13,13 @@ const MAX_HOLD_MS = 8000;
 let busy = false;
 let lastRunAt = 0;
 let lockedAt = 0;
+
+const SOURCE_MIN_GAP_MS = 160;
+const SOURCE_MAX_HOLD_MS = 8000;
+const MAX_PARALLEL_SOURCES = 2;
+
+const sourceBusy = new Map<string, number>();
+const sourceLastRunAt = new Map<string, number>();
 
 function now(): number {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
@@ -67,9 +63,44 @@ export async function runExclusiveCapture<T>(fn: () => Promise<T>): Promise<T | 
   }
 }
 
+function cleanupStaleSourceLocks(t: number): void {
+  for (const [source, startedAt] of sourceBusy) {
+    if (t - startedAt > SOURCE_MAX_HOLD_MS) {
+      sourceBusy.delete(source);
+      sourceLastRunAt.set(source, t);
+    }
+  }
+}
+
+/**
+ * Run one capture for a named source. Camera and screen may run at the same
+ * time, while repeated captures from the same source are skipped until the
+ * previous one finishes. This gives us real camera/screen parallelism without
+ * allowing a single stream to backlog.
+ */
+export async function runVisualSourceCapture<T>(
+  source: "camera" | "screen",
+  fn: () => Promise<T>,
+): Promise<T | null> {
+  const t = now();
+  cleanupStaleSourceLocks(t);
+  if (sourceBusy.has(source)) return null;
+  if (sourceBusy.size >= MAX_PARALLEL_SOURCES) return null;
+  if (t - (sourceLastRunAt.get(source) ?? 0) < SOURCE_MIN_GAP_MS) return null;
+  sourceBusy.set(source, t);
+  try {
+    return await fn();
+  } finally {
+    sourceBusy.delete(source);
+    sourceLastRunAt.set(source, now());
+  }
+}
+
 // Test-only reset so unit tests start from a clean slot.
 export function __resetCaptureCoordinator(): void {
   busy = false;
   lastRunAt = 0;
   lockedAt = 0;
+  sourceBusy.clear();
+  sourceLastRunAt.clear();
 }

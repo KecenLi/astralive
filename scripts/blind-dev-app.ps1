@@ -14,6 +14,13 @@ $Root = Split-Path -Parent $PSScriptRoot
 $Common = Join-Path $PSScriptRoot "common.ps1"
 $RootLiteral = $Root.Replace("'", "''")
 $CommonLiteral = $Common.Replace("'", "''")
+$WebCommand = @"
+. '$CommonLiteral'
+Add-ProcessPathEntry -Path (Join-Path `$env:ProgramFiles 'nodejs')
+`$WebDir = Join-Path '$RootLiteral' 'apps\web'
+Set-Location `$WebDir
+Invoke-NodePackageScript -PackagePrefix 'vite' -RelativeScriptPath 'node_modules\vite\bin\vite.js' -Arguments @('--host', '127.0.0.1', '--port', '5173')
+"@
 $DesktopCommand = @"
 . '$CommonLiteral'
 `$env:MODVII_RENDERER_URL='http://127.0.0.1:5173'
@@ -43,7 +50,7 @@ if (Test-ViteReady) {
 } else {
     Start-Process powershell -ArgumentList @(
         "-NoProfile", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command",
-        ". '$CommonLiteral'; Set-Location '$RootLiteral'; Invoke-Pnpm @('--filter', '@modvii/web', 'dev')"
+        $WebCommand
     ) -WorkingDirectory $Root
 }
 

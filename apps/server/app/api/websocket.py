@@ -75,6 +75,7 @@ class VisualRuntimeState:
         self.latest_sequence: int = 0
         self.latest_sequence_by_source: dict[str, int] = {}
         self.applied_sequence: int = 0
+        self.applied_sequence_by_source: dict[str, int] = {}
         self.dropped_pending_frames: int = 0
         self.provider_cooldown_until: float = 0.0
         self.provider_failure_count: int = 0
@@ -335,7 +336,7 @@ async def _handle_event(
     if event.type == "client.wake.detected":
         _cancel_task(response_task)
         await _close_audio_runtime(audio_runtime)
-        _cancel_visual_runtime(visual_runtime)
+        _clear_pending_visual_runtime(visual_runtime)
         wake.wake(session)
         await _send(
             websocket,
@@ -557,7 +558,31 @@ async def _handle_event(
             ),
             send_lock,
         )
-        asr_result = await audio.transcribe(turn_audio, _audio_metadata(payload))
+        try:
+            asr_result = await audio.transcribe(turn_audio, _audio_metadata(payload))
+        except Exception as exc:  # noqa: BLE001
+            detail = str(exc) or type(exc).__name__
+            logger.warning("ASR failed; returning to listening: %s", detail)
+            session.response_in_progress = False
+            session.status = "listening"
+            await _send_error(websocket, session.session_id, "asr_failed", detail, send_lock)
+            await _send(
+                websocket,
+                avatar.state_event(
+                    session.session_id,
+                    "listening",
+                    "concerned",
+                    "语音识别失败了，请再说一次。",
+                ),
+                send_lock,
+            )
+            await _send(
+                websocket,
+                make_event("server.session.state", session.session_id, _session_payload(session, settings)),
+                send_lock,
+            )
+            await _send_cost(websocket, session, send_lock)
+            return response_task
         session.cost_meter.asr_calls += 1
         _record_estimated_cost(session, settings, raw=asr_result.raw, output_text=asr_result.text)
         await _send(
@@ -570,6 +595,37 @@ async def _handle_event(
             send_lock,
         )
         await _send_cost(websocket, session, send_lock)
+        if not _transcript_has_language_content(asr_result.text):
+            logger.info("ASR produced no language content; ignoring turn: %r", asr_result.text)
+            session.response_in_progress = False
+            session.status = "listening"
+            await _send(
+                websocket,
+                make_event(
+                    "debug.log",
+                    session.session_id,
+                    {
+                        "message": "ASR transcript ignored because it contains no language content.",
+                        "trace_id": trace_id,
+                        "text": asr_result.text,
+                    },
+                ),
+                send_lock,
+            )
+            await _send(
+                websocket,
+                avatar.state_event(session.session_id, "listening", "concerned", "这段我没听清。"),
+                send_lock,
+            )
+            await _send(
+                websocket,
+                make_event("server.session.state", session.session_id, _session_payload(session, settings)),
+                send_lock,
+            )
+            if visual_runtime is not None:
+                await _flush_deferred_visual_summaries(websocket, session, visual_runtime, send_lock)
+            await _send_cost(websocket, session, send_lock)
+            return response_task
         return await _handle_user_text(
             websocket,
             session,
@@ -819,6 +875,56 @@ async def _handle_user_text(
 
 
 async def _run_dialogue_response(
+    websocket: WebSocket,
+    session: SessionState,
+    dialogue: DialogueService,
+    audio: AudioService,
+    avatar: AvatarService,
+    settings: Settings,
+    user_text: str,
+    started: float,
+    send_lock: asyncio.Lock,
+    visual_runtime: VisualRuntimeState | None = None,
+) -> None:
+    # Overall turn watchdog: if the LLM stream or TTS hangs (provider stall, GPU
+    # contention), force the turn to end so the session never wedges in
+    # "thinking". On timeout we run the same recovery as any failure: error +
+    # audio.done + return to listening.
+    timeout_s = getattr(settings, "dialogue_turn_max_seconds", 75.0)
+    try:
+        await asyncio.wait_for(
+            _run_dialogue_response_body(
+                websocket, session, dialogue, audio, avatar, settings,
+                user_text, started, send_lock, visual_runtime,
+            ),
+            timeout=timeout_s,
+        )
+    except asyncio.CancelledError:
+        raise
+    except (TimeoutError, asyncio.TimeoutError):
+        logger.warning("dialogue turn exceeded %.0fs watchdog; forcing return to listening", timeout_s)
+        session.response_in_progress = False
+        session.status = "listening"
+        with suppress(WebSocketDisconnect, RuntimeError):
+            await _send_error(
+                websocket, session.session_id, "dialogue_timeout",
+                f"Dialogue turn exceeded {timeout_s:g}s.", send_lock,
+            )
+            await _send(
+                websocket,
+                make_event("assistant.audio.done", session.session_id,
+                           {"source": "tts", "chunks": 0, "error": "dialogue_timeout"}),
+                send_lock,
+            )
+            await _send(
+                websocket,
+                make_event("server.session.state", session.session_id, _session_payload(session, settings)),
+                send_lock,
+            )
+            await _send_cost(websocket, session, send_lock)
+
+
+async def _run_dialogue_response_body(
     websocket: WebSocket,
     session: SessionState,
     dialogue: DialogueService,
@@ -1525,6 +1631,10 @@ def _should_defer_visual_frame(session: SessionState, audio_runtime: AudioRuntim
     )
 
 
+def _transcript_has_language_content(text: str) -> bool:
+    return any(char.isalnum() for char in text)
+
+
 def _session_busy_for_visual(session: SessionState) -> bool:
     return session.response_in_progress or session.status in {"thinking", "speaking"}
 
@@ -1782,9 +1892,10 @@ async def _run_visual_frame_analysis(
         visual_runtime.provider_cooldown_until = 0.0
         result_age = time.perf_counter() - job.received_at
         latest_for_source = visual_runtime.latest_sequence_by_source.get(job.source, job.sequence)
+        applied_for_source = visual_runtime.applied_sequence_by_source.get(job.source, 0)
         if (
             job.sequence < latest_for_source
-            or job.sequence < visual_runtime.applied_sequence
+            or job.sequence < applied_for_source
             or result_age > settings.vision_result_max_age_seconds
         ):
             session.cost_meter.stale_visual_results_discarded += 1
@@ -1800,6 +1911,7 @@ async def _run_visual_frame_analysis(
                         "sequence": job.sequence,
                         "latest_sequence": latest_for_source,
                         "applied_sequence": visual_runtime.applied_sequence,
+                        "applied_sequence_for_source": applied_for_source,
                         "age_seconds": round(result_age, 3),
                         "trace": _visual_trace(job, state="stale_discarded", from_cache=from_cache),
                     },
@@ -1811,6 +1923,10 @@ async def _run_visual_frame_analysis(
 
         vision.apply_frame_result(session, frame, result)
         visual_runtime.applied_sequence = max(visual_runtime.applied_sequence, job.sequence)
+        visual_runtime.applied_sequence_by_source[job.source] = max(
+            visual_runtime.applied_sequence_by_source.get(job.source, 0),
+            job.sequence,
+        )
         if _vision_result_needs_focus(result):
             session.cost_meter.focus_requests += 1
             if getattr(result, "confidence", 0.0) < 0.55:
@@ -1918,11 +2034,19 @@ def _cancel_visual_runtime(visual_runtime: VisualRuntimeState) -> None:
 
 
 def _clear_pending_visual_runtime(visual_runtime: VisualRuntimeState) -> int:
-    dropped_sources = set(visual_runtime.pending)
+    dropped_sources = {
+        source
+        for source, job in visual_runtime.pending.items()
+        if not _frame_bypasses_visual_cooldown(job.frame)
+    }
     dropped = len(dropped_sources)
-    visual_runtime.pending.clear()
     for source in dropped_sources:
-        visual_runtime.latest_sequence_by_source[source] = visual_runtime.applied_sequence
+        visual_runtime.pending.pop(source, None)
+    for source in dropped_sources:
+        visual_runtime.latest_sequence_by_source[source] = visual_runtime.applied_sequence_by_source.get(
+            source,
+            visual_runtime.applied_sequence,
+        )
     visual_runtime.dropped_pending_frames += dropped
     return dropped
 
@@ -2269,6 +2393,8 @@ def _session_payload(session: SessionState, settings: Settings) -> dict:
         "realtime_first_response_timeout_seconds": settings.realtime_first_response_timeout_seconds,
         "realtime_stream_gap_timeout_seconds": settings.realtime_stream_gap_timeout_seconds,
         "realtime_turn_max_seconds": settings.realtime_turn_max_seconds,
+        "gpu_serialize_local_audio": settings.gpu_serialize_local_audio,
+        "dialogue_turn_max_seconds": settings.dialogue_turn_max_seconds,
     }
     payload["visual"] = {"scene_change_threshold": settings.scene_change_threshold}
     return payload

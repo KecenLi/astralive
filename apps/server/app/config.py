@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     vertex_ai_realtime_model: str = "gemini-live-2.5-flash-native-audio"
     vertex_ai_tts_model: str = "gemini-3.1-flash-tts-preview"
     vertex_ai_tts_voice: str = "Kore"
-    vertex_ai_request_timeout_seconds: float = 20.0
+    vertex_ai_request_timeout_seconds: float = 35.0
 
     cosyvoice3_python: str = ""
     cosyvoice3_repo_dir: str = str(PROJECT_ROOT / "third_party" / "CosyVoice")
@@ -97,6 +97,15 @@ class Settings(BaseSettings):
     realtime_turn_max_seconds: float = 120.0
     realtime_turn_timeout_seconds: float = 8.0
     realtime_recovery_asr_timeout_seconds: float = 6.0
+    # Hard ceiling on a single text/ASR-first dialogue turn. If the LLM stream or
+    # TTS hangs (e.g. provider stall, GPU contention), the turn is force-ended and
+    # the session returns to listening instead of wedging in "thinking".
+    dialogue_turn_max_seconds: float = 75.0
+    # When local Whisper ASR and CosyVoice TTS share one GPU, running their
+    # inference at the same time can exhaust VRAM and kill a worker. Enabling
+    # this serializes local-GPU ASR and TTS so they stagger instead of colliding.
+    # Surfaced as a runtime setting so it can be toggled from the UI.
+    gpu_serialize_local_audio: bool = True
     conversation_history_max_messages: int = 12
     conversation_history_max_chars: int = 4000
     cost_price_table_json: str = ""
@@ -148,10 +157,10 @@ class Settings(BaseSettings):
     max_frame_width: int = 1280
     max_frame_height: int = 720
     vision_cache_ttl_seconds: int = 30
-    vision_request_timeout_seconds: float = 20.0
-    vision_max_concurrency: int = 1
+    vision_request_timeout_seconds: float = 35.0
+    vision_max_concurrency: int = 2
     vision_pending_frame_limit: int = 2
-    vision_result_max_age_seconds: float = 12.0
+    vision_result_max_age_seconds: float = 35.0
     scene_change_threshold: float = 0.12
 
     data_dir: Path = Field(default=Path("data"))

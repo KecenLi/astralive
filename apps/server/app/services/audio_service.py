@@ -1,10 +1,25 @@
+import asyncio
 import base64
+import contextlib
+from collections.abc import AsyncIterator
 
 from app.config import Settings
 from app.contracts.model_io import ASRResult, AudioChunkPayload, RealtimeTurnResult, TTSInput, TTSResult
 from app.providers.asr.base import ASRProvider
 from app.providers.realtime.base import RealtimeAudioStream, RealtimeProvider
 from app.providers.tts.base import TTSProvider
+
+
+# Process-global GPU compute lock. ASR and TTS run in separate per-session
+# AudioService instances but share one physical GPU, so the lock must be shared
+# across the whole process — not per instance. When local Whisper and CosyVoice
+# both hold the GPU, running inference concurrently can exhaust VRAM and kill a
+# worker; serializing here makes them stagger.
+_GPU_AUDIO_LOCK = asyncio.Lock()
+
+# Providers that actually run heavy local GPU inference and therefore contend.
+_LOCAL_GPU_ASR = {"local_whisper"}
+_LOCAL_GPU_TTS = {"cosyvoice3"}
 
 
 class AudioService:
@@ -20,11 +35,30 @@ class AudioService:
         self.realtime_provider = realtime_provider
         self.settings = settings
 
+    def _gpu_contended(self) -> bool:
+        """True when local ASR and TTS would compete for the same GPU and
+        serialization is enabled."""
+        return (
+            getattr(self.settings, "gpu_serialize_local_audio", True)
+            and self.settings.asr_provider in _LOCAL_GPU_ASR
+            and self.settings.tts_provider in _LOCAL_GPU_TTS
+        )
+
+    @contextlib.asynccontextmanager
+    async def _gpu_slot(self) -> AsyncIterator[None]:
+        if self._gpu_contended():
+            async with _GPU_AUDIO_LOCK:
+                yield
+        else:
+            yield
+
     async def synthesize(self, text: str, emotion: str) -> TTSResult:
-        return await self.tts_provider.synthesize(TTSInput(text=text, emotion=emotion))
+        async with self._gpu_slot():
+            return await self.tts_provider.synthesize(TTSInput(text=text, emotion=emotion))
 
     async def transcribe(self, audio_bytes: bytes, metadata: dict | None = None) -> ASRResult:
-        return await self.asr_provider.transcribe(audio_bytes, metadata)
+        async with self._gpu_slot():
+            return await self.asr_provider.transcribe(audio_bytes, metadata)
 
     async def prewarm(self) -> None:
         for provider in (self.asr_provider, self.tts_provider):

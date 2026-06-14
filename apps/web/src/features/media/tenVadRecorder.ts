@@ -191,6 +191,7 @@ export class TenVadRecorder {
         this.lastVoiceAt = now;
         const initialFrames = [...this.preRoll, frame];
         this.speechSampleCount = initialFrames.reduce((sum, item) => sum + item.length, 0);
+        this.options.onSpeechStart?.();
         if (this.options.streamChunks && this.options.onSpeechChunk) {
           this.options.onSpeechChunk(concatInt16Frames(initialFrames));
           this.segment = [];
@@ -199,7 +200,6 @@ export class TenVadRecorder {
           this.segment = initialFrames;
         }
         this.preRoll = [];
-        this.options.onSpeechStart?.();
         return;
       }
       if (now - this.turnStartedAt >= this.initialSilenceMs) {

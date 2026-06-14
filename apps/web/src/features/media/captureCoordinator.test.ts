@@ -4,6 +4,7 @@ import {
   __resetCaptureCoordinator,
   releaseCaptureSlot,
   runExclusiveCapture,
+  runVisualSourceCapture,
   tryAcquireCaptureSlot,
 } from "./captureCoordinator";
 
@@ -58,5 +59,37 @@ describe("captureCoordinator", () => {
     // them from running concurrently. Whichever loses simply skips.
     await Promise.all([runExclusiveCapture(work), runExclusiveCapture(work)]);
     expect(maxActive).toBeLessThanOrEqual(1);
+  });
+
+  it("allows camera and screen captures to run in parallel", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const work = async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await Promise.resolve();
+      active -= 1;
+    };
+
+    await Promise.all([runVisualSourceCapture("camera", work), runVisualSourceCapture("screen", work)]);
+
+    expect(maxActive).toBe(2);
+  });
+
+  it("does not queue two captures from the same visual source", async () => {
+    let release: (() => void) | undefined;
+    const first = runVisualSourceCapture(
+      "camera",
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+
+    const skipped = await runVisualSourceCapture("camera", async () => "late");
+    release?.();
+    await first;
+
+    expect(skipped).toBeNull();
   });
 });
