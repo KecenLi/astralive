@@ -2,9 +2,28 @@
 
 - Repository: https://github.com/KecenLi/astralive
 - Branch: main
-- Latest feature commit for this round: `87bff77` (`Harden real API smoke and dialogue marker parsing`)
+- Latest feature commit for this round: `e286ce6` (`Polish final desktop interaction timing`)
 - To check the current latest commit: `git rev-parse --short HEAD`
 - Reminder: after each implementation and test round, commit and push intentional source changes, then report the commit hash, latest packaged exe path, timestamp, and SHA256.
+
+## 2026-06-14 Final DDL Polish Round
+
+- GitHub reminder: push only intentional source changes to `https://github.com/KecenLi/astralive` on `main`; do not commit `.env`, `data/`, packaged `dist/`, local model weights, logs, or tokens.
+- Visual summary panel: `融合 / 摄像头 / 屏幕` summary area is now taller by default and vertically resizable with the browser resize handle; it sits above chat history so expanding it pushes chat down instead of compressing text into a tiny box.
+- Subtitle timing: normal ASR -> LLM -> TTS dialogue now sends each assistant text segment only after its matching TTS segment has synthesized successfully. This keeps visible subtitles aligned with voice readiness instead of showing the full answer long before audio starts.
+- Claude fixes included in the same package:
+  - Desktop pet avatar region is draggable, so the transparent pet can be grabbed directly.
+  - Live2D built-in pointer auto-interaction is disabled, stopping the character from staring at/following the mouse and preventing the canvas from stealing pet-window drag events.
+  - Idle pulse motion keeps the Live2D model alive after mouse-follow is disabled.
+- Validation:
+  - Backend pytest: `95 passed, 2 warnings`.
+  - Backend lint: `ruff check app` clean.
+  - Frontend Vitest: `54 passed`.
+  - Frontend production build: passed.
+  - Packaged portable smoke: passed, backend health `http://127.0.0.1:11851/health`.
+  - Real-provider smoke before final repack with the same source changes: `desktop-interaction-20260614-135958.json`, errors `0`, HTTP 429 `0`, timeout `0`; text delta and first audio chunk were aligned at about `7473ms` / `7505ms`.
+- Latest portable exe: `D:\assist ai\dist\desktop\MODVII 0.1.0.exe`, timestamp `2026-06-14 22:03:06 +0800`, SHA256 `EBE8456C6915D6C1168A506F3074EE35FDF87E1AFCEE013808FA584106ACC8E9`.
+- Latest installer: `D:\assist ai\dist\desktop\MODVII Setup 0.1.0.exe`, timestamp `2026-06-14 22:03:04 +0800`, SHA256 `9E1FE2B3FE900A46C5FC55B565932598C1EC849ECDC2FAC9031BE4CE0F35174C`.
 
 ## 2026-06-14 Final Repackage / Real API Smoke Round
 

@@ -39,6 +39,10 @@ export class Live2DAvatarController implements AvatarController {
   private lipSync = false;
   private targetMouthOpen = 0;
   private mouthOpen = 0;
+  // Drives a gentle preset idle motion on a loop (replaces the removed
+  // mouse-follow interaction) so the pet is never frozen when idle.
+  private currentMode: AvatarMode = "idle";
+  private lastIdlePulseAt = 0;
   private resizeCleanup: (() => void) | null = null;
   private fitOptions: Partial<AvatarLayoutSettings> = {};
   private baseWidth = 0;
@@ -69,6 +73,18 @@ export class Live2DAvatarController implements AvatarController {
       autoStart: true,
     });
     this.model = await Live2DModel.from(modelUrl);
+    // Disable pixi-live2d-display's built-in pointer auto-interaction. It makes
+    // the model track / stare at the cursor and also captures pointer events on
+    // the canvas, which both is unwanted ("盯着鼠标") and blocks dragging the
+    // frameless pet window. We drive idle motion + lip-sync ourselves instead.
+    const interactiveModel = this.model as {
+      autoInteract?: boolean;
+      interactive?: boolean;
+      eventMode?: string;
+    };
+    interactiveModel.autoInteract = false;
+    interactiveModel.interactive = false;
+    interactiveModel.eventMode = "none";
     this.captureBaseDimensions();
     const stage = (this.app as { stage?: { addChild: (model: unknown) => void } }).stage;
     stage?.addChild(this.model);
@@ -246,7 +262,30 @@ export class Live2DAvatarController implements AvatarController {
       const target = this.lipSync ? Math.max(this.targetMouthOpen, fallback) : 0;
       this.mouthOpen += (target - this.mouthOpen) * 0.35;
       this.setMouthOpen(this.mouthOpen);
+      this.maybePulseIdleMotion();
     });
+  }
+
+  // With mouse-follow interaction disabled, replay a preset idle motion every
+  // few seconds while idle/sleeping/listening so the character keeps breathing
+  // and shifting instead of standing perfectly still. Speaking/thinking states
+  // run their own motions and are left alone.
+  private maybePulseIdleMotion() {
+    if (this.lipSync) return;
+    if (this.currentMode === "speaking" || this.currentMode === "thinking") return;
+    const now = performance.now();
+    if (now - this.lastIdlePulseAt < 8000) return;
+    this.lastIdlePulseAt = now;
+    const mapped = motionSpec("idle", this.currentMode);
+    const model = this.model as { motion?: (group: string, index?: number) => void } | null;
+    for (const group of mapped.groups) {
+      try {
+        model?.motion?.(group);
+        return;
+      } catch {
+        // try next group alias
+      }
+    }
   }
 
   private renderOnce() {
@@ -284,6 +323,8 @@ export class Live2DAvatarController implements AvatarController {
   }
 
   private applyMotion(mode: AvatarMode, requestedMotion = "", subtitle = "") {
+    this.currentMode = mode;
+    this.lastIdlePulseAt = performance.now();
     const mapped = motionSpec(requestedMotion, mode);
     const key = `${mapped.groups.join("|")}:${mapped.index ?? "auto"}:${
       mode === "speaking" ? subtitle.slice(0, 32) : ""

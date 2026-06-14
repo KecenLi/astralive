@@ -615,7 +615,7 @@ select {
   padding: 8px;
   overflow: hidden;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
   gap: 6px;
 }
 
@@ -624,15 +624,17 @@ select {
   grid-template-columns: max-content minmax(0, 1fr);
   gap: 8px;
   align-items: start;
-  min-height: 34px;
-  max-height: 96px;
+  height: 132px;
+  min-height: 86px;
+  max-height: min(42vh, 360px);
   padding: 5px 7px;
   background: #ffffe1;
   border: 1px solid #808080;
   border-radius: 0;
   margin-bottom: 0;
   min-width: 0;
-  overflow: hidden;
+  overflow: auto;
+  resize: vertical;
 }
 
 .conversation-observability {
@@ -665,9 +667,7 @@ select {
 
 .visual-summary span {
   min-width: 0;
-  max-height: 28px;
   line-height: 1.35;
-  overflow: auto;
   overflow-wrap: anywhere;
 }
 
@@ -676,11 +676,11 @@ select {
 }
 
 .conversation-panel .visual-summary {
-  order: 3;
+  order: 2;
 }
 
 .conversation-panel .message-list {
-  order: 2;
+  order: 3;
 }
 
 .message-list {
@@ -966,11 +966,21 @@ select {
   pointer-events: none;
 }
 
-/* Interactive elements must NOT be draggable, or their clicks get swallowed by
-   the OS window-move. The avatar stays clickable for tap-to-interact; drag the
-   pet by any empty/background area around it. */
+/* The avatar itself is draggable so the user can grab the character anywhere to
+   move the pet window. A quick tap still fires its click handler (Electron lets
+   clicks through drag regions when the pointer does not move). Only the close
+   button and the speech bubble opt out so their own clicks/selection work. */
+.pet-avatar {
+  -webkit-app-region: drag;
+}
+
+.pet-avatar canvas,
+.pet-avatar .pet-fallback {
+  -webkit-app-region: drag;
+  pointer-events: none;
+}
+
 .pet-close,
-.pet-avatar,
 .pet-bubble {
   -webkit-app-region: no-drag;
 }

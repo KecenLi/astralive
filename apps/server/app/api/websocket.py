@@ -943,6 +943,8 @@ async def _run_dialogue_response_body(
     audio_done_sent = False
     final_text = ""
     audio_requested = False
+    final_emotion = "neutral"
+    saw_segment = False
 
     async def send_dialogue_audio_done(*, cancelled: bool = False, error: str | None = None) -> None:
         nonlocal audio_done_sent
@@ -958,6 +960,31 @@ async def _run_dialogue_response_body(
         }
         with suppress(WebSocketDisconnect, RuntimeError):
             await _send(websocket, make_event("assistant.audio.done", session.session_id, payload), send_lock)
+
+    async def send_ready_text_segment(segment_text: str, segment_emotion: str, should_speak: bool) -> None:
+        nonlocal saw_segment
+        if not segment_text:
+            return
+        if not saw_segment:
+            saw_segment = True
+        session.status = "speaking"
+        await _send(
+            websocket,
+            avatar.state_event(
+                session.session_id,
+                "speaking",
+                segment_emotion,
+                segment_text,
+                _motion_for_response_text(segment_text, segment_emotion),
+                settings.tts_provider != "mock" and should_speak,
+            ),
+            send_lock,
+        )
+        await _send(
+            websocket,
+            make_event("assistant.text.delta", session.session_id, {"delta": segment_text}),
+            send_lock,
+        )
 
     async def run_tts_worker(queue: asyncio.Queue[tuple[str, str] | None]) -> None:
         nonlocal sent_audio_chunks, tts_error
@@ -975,6 +1002,7 @@ async def _run_dialogue_response_body(
                 session.cost_meter.add_estimate(
                     cost_estimator.estimate(raw=tts_result.raw, input_text=segment_text)
                 )
+                await send_ready_text_segment(segment_text, segment_emotion, True)
                 sent_audio_chunks += await _send_tts_audio_chunks(
                     websocket,
                     session,
@@ -1009,37 +1037,21 @@ async def _run_dialogue_response_body(
             tts_task = asyncio.create_task(run_tts_worker(tts_queue))
             tts_task.add_done_callback(_log_task_exception)
 
-        final_emotion = "neutral"
-        saw_segment = False
-
         async for segment in dialogue.stream_reply(session, user_text):
             if not segment.text:
                 continue
             final_text += segment.text
             final_emotion = segment.emotion
-            if not saw_segment:
-                saw_segment = True
-                session.status = "speaking"
-                await _send(
-                    websocket,
-                    avatar.state_event(
-                        session.session_id,
-                        "speaking",
-                        final_emotion,
-                        segment.text,
-                        _motion_for_response_text(segment.text, final_emotion),
-                        settings.tts_provider != "mock" and segment.should_speak,
-                    ),
-                    send_lock,
-                )
-            await _send(
-                websocket,
-                make_event("assistant.text.delta", session.session_id, {"delta": segment.text}),
-                send_lock,
-            )
             if tts_queue is not None and segment.should_speak:
                 audio_requested = True
                 await tts_queue.put((segment.text, final_emotion))
+            else:
+                await send_ready_text_segment(segment.text, final_emotion, segment.should_speak)
+
+        if tts_queue is not None:
+            await tts_queue.put(None)
+            if tts_task is not None:
+                await tts_task
 
         await _send(
             websocket,
@@ -1066,12 +1078,8 @@ async def _run_dialogue_response_body(
                 ),
                 send_lock,
             )
-        if tts_queue is not None:
-            await tts_queue.put(None)
-            if tts_task is not None:
-                await tts_task
-            if audio_requested:
-                await send_dialogue_audio_done(error=tts_error)
+        if tts_queue is not None and audio_requested:
+            await send_dialogue_audio_done(error=tts_error)
         session.response_in_progress = False
         session.status = "listening"
         session.cost_meter.last_latency_ms = int((time.perf_counter() - started) * 1000)
