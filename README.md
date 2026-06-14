@@ -1,5 +1,9 @@
 # MODVII
 
+b站介绍链接:
+
+https://www.bilibili.com/video/BV1Z1JK6eErJ/?spm_id_from=333.1387.upload.video_card.click&vd_source=01cd767ba73540f14ab9c5d6024eef52
+
 MODVII, also called Xiaoqi / 小七, is a Windows desktop AI companion built as a
 practical MVP: an Electron shell, a React interface, a FastAPI backend, webcam
 and screen perception, wake-word style voice input, local ASR/TTS options,
