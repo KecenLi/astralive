@@ -90,8 +90,14 @@ class Settings(BaseSettings):
     audio_route: str = "asr_first"
     audio_prewarm_enabled: bool = True
     realtime_input_idle_timeout_seconds: float = 8.0
+    realtime_first_response_timeout_seconds: float = 20.0
+    realtime_stream_gap_timeout_seconds: float = 12.0
+    realtime_turn_max_seconds: float = 120.0
     realtime_turn_timeout_seconds: float = 8.0
     realtime_recovery_asr_timeout_seconds: float = 6.0
+    conversation_history_max_messages: int = 12
+    conversation_history_max_chars: int = 4000
+    cost_price_table_json: str = ""
 
     wake_word: str = "小七"
     persona_prompt: str = (

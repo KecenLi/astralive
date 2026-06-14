@@ -5,6 +5,7 @@ import logging
 from app.config import Settings
 from app.contracts.media import FramePayload
 from app.contracts.model_io import VisionInput, VisionResult
+from app.core.cost_estimator import CostEstimator
 from app.core.session_state import SessionState
 from app.providers.vision.base import VisionProvider
 
@@ -16,13 +17,14 @@ class VisionService:
     def __init__(self, provider: VisionProvider, settings: Settings) -> None:
         self.provider = provider
         self.settings = settings
+        self.cost_estimator = CostEstimator.from_settings(settings)
 
     def _cache_valid(self, session: SessionState, scene_hash: str | None) -> bool:
         if not scene_hash or not session.last_scene_hash:
             return False
         if not session.last_visual_summary or not session.last_visual_summary_at:
             return False
-        if scene_hash != session.last_scene_hash:
+        if _normalized_hash_distance(scene_hash, session.last_scene_hash) > self.settings.scene_change_threshold:
             return False
         expires_at = session.last_visual_summary_at + timedelta(
             seconds=self.settings.vision_cache_ttl_seconds
@@ -80,6 +82,13 @@ class VisionService:
             return result, False
 
         session.cost_meter.vision_calls += 1
+        session.cost_meter.add_estimate(
+            self.cost_estimator.estimate(
+                raw=result.raw,
+                input_text=prompt,
+                output_text=result.summary,
+            )
+        )
         if commit:
             self.apply_frame_result(session, frame, result)
         return result, False
@@ -89,3 +98,14 @@ class VisionService:
         session.last_visual_summary_at = datetime.now(timezone.utc)
         session.last_scene_hash = frame.scene_hash
         session.cost_meter.mode = "focus" if frame.capture_reason in {"focus_roi", "screen_focus"} else "active"
+
+
+def _normalized_hash_distance(a: str, b: str) -> float:
+    if not a or not b:
+        return 1.0
+    length = min(len(a), len(b))
+    distance = abs(len(a) - len(b))
+    for index in range(length):
+        if a[index] != b[index]:
+            distance += 1
+    return distance / max(len(a), len(b))

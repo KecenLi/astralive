@@ -15,8 +15,9 @@ from app.config import get_settings
 from app.contracts.events import EventEnvelope, make_event
 from app.contracts.media import FramePayload
 from app.contracts.model_io import AudioChunkPayload, TTSResult
+from app.core.cost_estimator import CostEstimator
 from app.core.session_state import SessionState
-from app.providers.registry import ProviderRegistry
+from app.providers.provider_container import get_provider_container
 from app.providers.realtime.base import RealtimeAudioStream
 from app.services.audio_service import AudioService
 from app.services.avatar_service import AvatarService
@@ -51,6 +52,8 @@ class AudioRuntimeState:
         self.turn_bytes: int = 0
         self.input_finished: bool = False
         self.input_finished_at: float = 0.0
+        self.first_response_received: bool = False
+        self.last_stream_event_at: float = 0.0
 
 
 class VisualRuntimeState:
@@ -100,23 +103,20 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
     await websocket.accept()
     settings = get_settings()
     session = sessions.setdefault(session_id, SessionState(session_id=session_id, wake_word=settings.wake_word))
-    registry = ProviderRegistry(settings)
-    vision = VisionService(registry.vision(), settings)
-    dialogue = DialogueService(registry.llm(), settings)
-    audio = AudioService(registry.tts(), registry.asr(), settings, registry.realtime())
+    container = get_provider_container(websocket.app)
+    vision = container.vision_service()
+    dialogue = container.dialogue_service()
+    audio = container.audio_service()
     avatar = AvatarService()
     wake = WakeService()
 
     send_lock = asyncio.Lock()
     response_task: asyncio.Task[None] | None = None
-    prewarm_task: asyncio.Task[None] | None = None
     audio_runtime = AudioRuntimeState()
     visual_runtime = VisualRuntimeState()
 
     await _send(websocket, make_event("server.session.ready", session_id, _session_payload(session, settings)), send_lock)
     await _send_cost(websocket, session, send_lock)
-    if settings.audio_prewarm_enabled:
-        prewarm_task = asyncio.create_task(_prewarm_audio(audio, session_id))
 
     try:
         while True:
@@ -170,11 +170,8 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
     except WebSocketDisconnect:
         if response_task and not response_task.done():
             response_task.cancel()
-        if prewarm_task and not prewarm_task.done():
-            prewarm_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await prewarm_task
         await _close_audio_runtime(audio_runtime)
+        await container.close_realtime_provider(audio.realtime_provider)
         _cancel_visual_runtime(visual_runtime)
         logger.info("websocket disconnected: %s", session_id)
 
@@ -422,6 +419,7 @@ async def _handle_event(
         )
         asr_result = await audio.transcribe(turn_audio, _audio_metadata(payload))
         session.cost_meter.asr_calls += 1
+        _record_estimated_cost(session, settings, raw=asr_result.raw, output_text=asr_result.text)
         await _send(
             websocket,
             make_event(
@@ -539,6 +537,8 @@ async def _handle_realtime_audio_chunk(
             return None
         audio_runtime.input_finished = False
         audio_runtime.input_finished_at = 0.0
+        audio_runtime.first_response_received = False
+        audio_runtime.last_stream_event_at = 0.0
         await _send(
             websocket,
             avatar.state_event(session.session_id, "listening", "curious", "正在接收实时语音。"),
@@ -563,6 +563,8 @@ async def _handle_realtime_audio_chunk(
             await audio_runtime.stream.finish_audio()
             audio_runtime.input_finished = True
             audio_runtime.input_finished_at = time.perf_counter()
+            audio_runtime.first_response_received = False
+            audio_runtime.last_stream_event_at = 0.0
             if audio_runtime.receive_task is None:
                 audio_runtime.receive_task = asyncio.create_task(
                     _run_realtime_stream_receiver(
@@ -676,6 +678,43 @@ async def _run_dialogue_response(
     started: float,
     send_lock: asyncio.Lock,
 ) -> None:
+    tts_queue: asyncio.Queue[tuple[str, str] | None] | None = None
+    tts_task: asyncio.Task[None] | None = None
+    sent_audio_chunks = 0
+    tts_error: str | None = None
+
+    async def run_tts_worker(queue: asyncio.Queue[tuple[str, str] | None]) -> None:
+        nonlocal sent_audio_chunks, tts_error
+        cost_estimator = CostEstimator.from_settings(settings)
+        while True:
+            item = await queue.get()
+            if item is None:
+                return
+            segment_text, segment_emotion = item
+            if tts_error:
+                continue
+            try:
+                tts_result = await audio.synthesize(segment_text, segment_emotion)
+                session.cost_meter.tts_calls += 1
+                session.cost_meter.add_estimate(
+                    cost_estimator.estimate(raw=tts_result.raw, input_text=segment_text)
+                )
+                sent_audio_chunks += await _send_tts_audio_chunks(
+                    websocket,
+                    session,
+                    [tts_result],
+                    "tts",
+                    send_lock,
+                    start_index=sent_audio_chunks,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                tts_error = str(exc)
+                logger.exception("tts synthesis failed")
+                await _send_error(websocket, session.session_id, "tts_failed", str(exc), send_lock)
+                return
+
     try:
         session.status = "thinking"
         session.response_in_progress = True
@@ -689,67 +728,82 @@ async def _run_dialogue_response(
             make_event("server.session.state", session.session_id, _session_payload(session, settings)),
             send_lock,
         )
-        result = await dialogue.reply(session, user_text)
-        session.status = "speaking"
-        await _send(
-            websocket,
-            avatar.state_event(session.session_id, "thinking", result.emotion, "正在组织回答。"),
-            send_lock,
-        )
-        async for chunk in dialogue.stream_text(result.text):
+        if settings.tts_provider != "mock":
+            tts_queue = asyncio.Queue()
+            tts_task = asyncio.create_task(run_tts_worker(tts_queue))
+            tts_task.add_done_callback(_log_task_exception)
+
+        final_text = ""
+        final_emotion = "neutral"
+        audio_requested = False
+        saw_segment = False
+
+        async for segment in dialogue.stream_reply(session, user_text):
+            if not segment.text:
+                continue
+            final_text += segment.text
+            final_emotion = segment.emotion
+            if not saw_segment:
+                saw_segment = True
+                session.status = "speaking"
+                await _send(
+                    websocket,
+                    avatar.state_event(
+                        session.session_id,
+                        "speaking",
+                        final_emotion,
+                        segment.text,
+                        _motion_for_response_text(segment.text, final_emotion),
+                        settings.tts_provider != "mock" and segment.should_speak,
+                    ),
+                    send_lock,
+                )
             await _send(
                 websocket,
-                make_event("assistant.text.delta", session.session_id, {"delta": chunk}),
+                make_event("assistant.text.delta", session.session_id, {"delta": segment.text}),
                 send_lock,
             )
+            if tts_queue is not None and segment.should_speak:
+                audio_requested = True
+                await tts_queue.put((segment.text, final_emotion))
+
         await _send(
             websocket,
             make_event(
                 "assistant.text.final",
                 session.session_id,
                 {
-                    "text": result.text,
-                    "audio_expected": settings.tts_provider != "mock" and result.should_speak,
+                    "text": final_text,
+                    "audio_expected": audio_requested,
                 },
             ),
             send_lock,
         )
-        await _send(
-            websocket,
-            avatar.state_event(
-                session.session_id,
-                "speaking",
-                result.emotion,
-                result.text,
-                _motion_for_response_text(result.text, result.emotion),
-                True,
-            ),
-            send_lock,
-        )
-        if settings.tts_provider != "mock" and result.should_speak:
-            try:
-                tts_result = await audio.synthesize(result.text, result.emotion)
-                session.cost_meter.tts_calls += 1
-                await _send_tts_audio(
-                    websocket,
-                    session,
-                    [tts_result],
-                    "tts",
-                    send_lock,
-                    fallback_text=result.text,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("tts synthesis failed")
-                await _send_error(websocket, session.session_id, "tts_failed", str(exc), send_lock)
-                await _send(
-                    websocket,
-                    make_event(
-                        "assistant.audio.done",
-                        session.session_id,
-                        {"source": "tts", "chunks": 0, "fallback_text": result.text, "error": str(exc)},
-                    ),
-                    send_lock,
-                )
+        if saw_segment:
+            await _send(
+                websocket,
+                avatar.state_event(
+                    session.session_id,
+                    "speaking",
+                    final_emotion,
+                    final_text,
+                    _motion_for_response_text(final_text, final_emotion),
+                    audio_requested,
+                ),
+                send_lock,
+            )
+        if tts_queue is not None:
+            await tts_queue.put(None)
+            if tts_task is not None:
+                await tts_task
+            if audio_requested:
+                payload = {
+                    "source": "tts",
+                    "chunks": sent_audio_chunks,
+                    **({"fallback_text": final_text} if sent_audio_chunks == 0 and final_text else {}),
+                    **({"error": tts_error} if tts_error else {}),
+                }
+                await _send(websocket, make_event("assistant.audio.done", session.session_id, payload), send_lock)
         session.response_in_progress = False
         session.cost_meter.last_latency_ms = int((time.perf_counter() - started) * 1000)
         await _send(
@@ -759,9 +813,28 @@ async def _run_dialogue_response(
         )
         await _send_cost(websocket, session, send_lock)
     except asyncio.CancelledError:
+        if tts_task and not tts_task.done():
+            tts_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await tts_task
         session.response_in_progress = False
         session.status = "listening"
         raise
+    except Exception as exc:  # noqa: BLE001
+        if tts_task and not tts_task.done():
+            tts_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await tts_task
+        logger.exception("dialogue response failed")
+        session.response_in_progress = False
+        session.status = "listening"
+        await _send_error(websocket, session.session_id, "dialogue_failed", str(exc), send_lock)
+        await _send(
+            websocket,
+            make_event("server.session.state", session.session_id, _session_payload(session, settings)),
+            send_lock,
+        )
+        await _send_cost(websocket, session, send_lock)
 
 
 async def _run_realtime_stream_receiver(
@@ -907,6 +980,7 @@ async def _run_realtime_stream_receiver(
                     websocket,
                     session,
                     audio,
+                    settings,
                     output_text,
                     "neutral",
                     send_lock,
@@ -1042,6 +1116,7 @@ async def _recover_realtime_stream_failure(
             timeout=settings.realtime_recovery_asr_timeout_seconds,
         )
         session.cost_meter.asr_calls += 1
+        _record_estimated_cost(session, settings, raw=asr_result.raw, output_text=asr_result.text)
     except asyncio.TimeoutError as exc:
         logger.exception("realtime fallback ASR timed out")
         await _send_realtime_failure_notice(
@@ -1484,6 +1559,13 @@ async def _run_realtime_audio_response(
         result = await audio.respond_realtime_audio(audio_bytes, _realtime_metadata(session, payload, settings))
         session.cost_meter.asr_calls += 1
         session.cost_meter.llm_calls += 1
+        _record_estimated_cost(
+            session,
+            settings,
+            raw=result.raw,
+            input_text=result.input_text,
+            output_text=result.output_text,
+        )
 
         if result.input_text:
             session.last_user_text = result.input_text
@@ -1528,6 +1610,7 @@ async def _run_realtime_audio_response(
                 websocket,
                 session,
                 audio,
+                settings,
                 result.output_text,
                 result.emotion,
                 send_lock,
@@ -1572,6 +1655,7 @@ async def _send_fallback_tts_audio(
     websocket: WebSocket,
     session: SessionState,
     audio: AudioService,
+    settings: Settings,
     text: str,
     emotion: str,
     send_lock: asyncio.Lock,
@@ -1580,6 +1664,7 @@ async def _send_fallback_tts_audio(
     try:
         tts_result = await audio.synthesize(tts_text, emotion)
         session.cost_meter.tts_calls += 1
+        _record_estimated_cost(session, settings, raw=tts_result.raw, input_text=tts_text)
         return await _send_tts_audio(websocket, session, [tts_result], "tts", send_lock, fallback_text=tts_text)
     except Exception as exc:  # noqa: BLE001
         logger.exception("realtime tts fallback failed")
@@ -1632,16 +1717,7 @@ async def _send_tts_audio(
     send_lock: asyncio.Lock,
     fallback_text: str = "",
 ) -> int:
-    sent = 0
-    for index, chunk in enumerate(chunks):
-        if not chunk.audio_base64:
-            continue
-        await _send(
-            websocket,
-            make_event("assistant.audio.chunk", session.session_id, _audio_event_payload(chunk, source, index)),
-            send_lock,
-        )
-        sent += 1
+    sent = await _send_tts_audio_chunks(websocket, session, chunks, source, send_lock)
     await _send(
         websocket,
         make_event(
@@ -1655,6 +1731,28 @@ async def _send_tts_audio(
         ),
         send_lock,
     )
+    return sent
+
+
+async def _send_tts_audio_chunks(
+    websocket: WebSocket,
+    session: SessionState,
+    chunks: list[TTSResult],
+    source: str,
+    send_lock: asyncio.Lock,
+    *,
+    start_index: int = 0,
+) -> int:
+    sent = 0
+    for index, chunk in enumerate(chunks, start=start_index):
+        if not chunk.audio_base64:
+            continue
+        await _send(
+            websocket,
+            make_event("assistant.audio.chunk", session.session_id, _audio_event_payload(chunk, source, index)),
+            send_lock,
+        )
+        sent += 1
     return sent
 
 
@@ -1681,6 +1779,23 @@ async def _send_cost(websocket: WebSocket, session: SessionState, send_lock: asy
         websocket,
         make_event("cost.update", session.session_id, session.cost_meter.model_dump()),
         send_lock,
+    )
+
+
+def _record_estimated_cost(
+    session: SessionState,
+    settings: Settings,
+    *,
+    raw: Any = None,
+    input_text: Any = None,
+    output_text: Any = None,
+) -> None:
+    session.cost_meter.add_estimate(
+        CostEstimator.from_settings(settings).estimate(
+            raw=raw,
+            input_text=input_text,
+            output_text=output_text,
+        )
     )
 
 
@@ -1755,7 +1870,11 @@ def _session_payload(session: SessionState, settings: Settings) -> dict:
         "server_tts": settings.tts_provider != "mock",
         "server_realtime_audio": settings.realtime_provider != "none" or settings.asr_provider != "mock",
         "realtime_input_idle_timeout_seconds": settings.realtime_input_idle_timeout_seconds,
+        "realtime_first_response_timeout_seconds": settings.realtime_first_response_timeout_seconds,
+        "realtime_stream_gap_timeout_seconds": settings.realtime_stream_gap_timeout_seconds,
+        "realtime_turn_max_seconds": settings.realtime_turn_max_seconds,
     }
+    payload["visual"] = {"scene_change_threshold": settings.scene_change_threshold}
     return payload
 
 
@@ -1827,6 +1946,8 @@ async def _close_audio_runtime(audio_runtime: AudioRuntimeState) -> None:
     audio_runtime.turn_bytes = 0
     audio_runtime.input_finished = False
     audio_runtime.input_finished_at = 0.0
+    audio_runtime.first_response_received = False
+    audio_runtime.last_stream_event_at = 0.0
 
     if input_idle_task and input_idle_task is not current_task and not input_idle_task.done():
         input_idle_task.cancel()
@@ -1854,14 +1975,30 @@ async def _next_realtime_stream_event(
         while True:
             timeout = 0.25
             if audio_runtime.input_finished_at:
-                elapsed = time.perf_counter() - audio_runtime.input_finished_at
-                remaining = settings.realtime_turn_timeout_seconds - elapsed
-                if remaining <= 0:
-                    raise TimeoutError("Gemini Live turn timed out while waiting for a streaming response.")
-                timeout = min(timeout, remaining)
+                now = time.perf_counter()
+                turn_remaining = settings.realtime_turn_max_seconds - (now - audio_runtime.input_finished_at)
+                if turn_remaining <= 0:
+                    raise TimeoutError("Gemini Live turn exceeded maximum streaming duration.")
+
+                if audio_runtime.first_response_received:
+                    anchor = audio_runtime.last_stream_event_at or audio_runtime.input_finished_at
+                    phase_remaining = settings.realtime_stream_gap_timeout_seconds - (now - anchor)
+                    phase_name = "stream gap"
+                else:
+                    phase_remaining = settings.realtime_first_response_timeout_seconds - (
+                        now - audio_runtime.input_finished_at
+                    )
+                    phase_name = "first response"
+
+                if phase_remaining <= 0:
+                    raise TimeoutError(f"Gemini Live {phase_name} timed out while waiting for a streaming response.")
+                timeout = min(timeout, turn_remaining, phase_remaining)
             done, _ = await asyncio.wait({next_task}, timeout=timeout)
             if done:
-                return next_task.result()
+                event = next_task.result()
+                audio_runtime.first_response_received = True
+                audio_runtime.last_stream_event_at = time.perf_counter()
+                return event
     except BaseException:
         if not next_task.done():
             next_task.cancel()

@@ -4,6 +4,7 @@ import {
   activityFromStatus,
   captureOptionsFor,
   captureReasonFor,
+  DEFAULT_SCENE_HASH_THRESHOLD,
   getFrameIntervalMs,
   shouldSendSceneHash,
 } from "./frameSampler";
@@ -44,9 +45,17 @@ describe("frameSampler", () => {
     });
   });
 
-  it("skips exact duplicate scene hashes except in focus mode", () => {
-    expect(shouldSendSceneHash("abc", "abc", "active")).toBe(false);
-    expect(shouldSendSceneHash("abc", "def", "active")).toBe(true);
-    expect(shouldSendSceneHash("abc", "abc", "focus")).toBe(true);
+  it("uses normalized scene hash distance for duplicate filtering", () => {
+    expect(DEFAULT_SCENE_HASH_THRESHOLD).toBe(0.12);
+    expect(shouldSendSceneHash(null, "0000", "active")).toBe(true);
+    expect(shouldSendSceneHash("0000000000000000", "1000000000000000", "active")).toBe(false);
+    expect(shouldSendSceneHash("00000000", "10000000", "active")).toBe(true);
+  });
+
+  it("honors custom scene hash thresholds while focus always sends", () => {
+    expect(shouldSendSceneHash("0000", "1000", "active", 0.5)).toBe(false);
+    expect(shouldSendSceneHash("0000", "1000", "active", 0.25)).toBe(false);
+    expect(shouldSendSceneHash("0000", "1000", "active", 0.24)).toBe(true);
+    expect(shouldSendSceneHash("0000", "0000", "focus", 1)).toBe(true);
   });
 });

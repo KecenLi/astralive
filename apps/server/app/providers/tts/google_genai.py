@@ -5,6 +5,7 @@ from typing import Any, Literal
 from app.config import Settings
 from app.contracts.model_io import TTSInput, TTSResult
 from app.providers.google_genai_client import GoogleGenAIClientFactory
+from app.providers.raw_usage import raw_usage_payload
 from app.providers.tts.base import TTSProvider
 
 
@@ -59,7 +60,12 @@ class GoogleGenAITTSProvider(TTSProvider):
             channels=self.settings.audio_channels,
             encoding="pcm_s16le" if _is_pcm_mime(mime) else "unknown",
             duration_ms=_pcm_duration_ms(byte_count, sample_rate, self.settings.audio_channels),
-            raw={"provider": self.provider_name, "model": self.model, "voice": voice},
+            raw={
+                "provider": self.provider_name,
+                "model": self.model,
+                "voice": voice,
+                **raw_usage_payload(response),
+            },
         )
 
     def _get_client(self):

@@ -7,6 +7,7 @@ import requests
 from app.config import Settings
 from app.contracts.model_io import ASRResult
 from app.providers.asr.base import ASRProvider
+from app.providers.raw_usage import raw_usage_payload
 
 
 class OpenAICompatibleASRProvider(ASRProvider):
@@ -51,7 +52,12 @@ class OpenAICompatibleASRProvider(ASRProvider):
             text=text,
             confidence=0.72 if text else 0.0,
             is_final=True,
-            raw={"provider": self.provider_name, "model": self.model, "mime": content_type},
+            raw={
+                "provider": self.provider_name,
+                "model": self.model,
+                "mime": content_type,
+                **raw_usage_payload(payload),
+            },
         )
 
 

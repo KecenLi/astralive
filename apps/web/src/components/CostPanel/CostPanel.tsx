@@ -2,6 +2,18 @@ import { Gauge } from "lucide-react";
 
 import { useAppStore } from "../../app/store";
 
+function isFiniteNumber(value: number | null | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function formatCount(value: number | null | undefined) {
+  return isFiniteNumber(value) ? Math.round(value).toLocaleString("en-US") : "0";
+}
+
+function formatUsd(value: number | null | undefined) {
+  return isFiniteNumber(value) ? `$${value.toFixed(4)}` : "$0.0000";
+}
+
 export function CostPanel() {
   const cost = useAppStore((state) => state.cost);
   const status = useAppStore((state) => state.status);
@@ -34,12 +46,20 @@ export function CostPanel() {
           <dd>{cost.llm_calls}</dd>
         </div>
         <div>
+          <dt>输入 tokens</dt>
+          <dd>{formatCount(cost.estimated_input_tokens)}</dd>
+        </div>
+        <div>
+          <dt>输出 tokens</dt>
+          <dd>{formatCount(cost.estimated_output_tokens)}</dd>
+        </div>
+        <div>
           <dt>延迟</dt>
           <dd>{cost.last_latency_ms ?? 0} ms</dd>
         </div>
         <div>
           <dt>估算费用</dt>
-          <dd>${cost.estimated_cost_usd?.toFixed(4) ?? "0.0000"}</dd>
+          <dd>{formatUsd(cost.estimated_cost_usd)}</dd>
         </div>
       </dl>
       <ul className="policy-list">
@@ -50,4 +70,3 @@ export function CostPanel() {
     </section>
   );
 }
-

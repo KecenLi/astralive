@@ -44,6 +44,15 @@ class DialogueResult(BaseModel):
     raw: dict = Field(default_factory=dict)
 
 
+class DialogueStreamChunk(BaseModel):
+    delta: str = ""
+    text: str = ""
+    emotion: str | None = None
+    should_speak: bool = True
+    done: bool = False
+    raw: dict = Field(default_factory=dict)
+
+
 class ASRResult(BaseModel):
     text: str
     confidence: float = 0.0

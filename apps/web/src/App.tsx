@@ -13,6 +13,7 @@ import { MicPanel } from "./components/MicPanel/MicPanel";
 import { ScreenCapturePanel } from "./components/ScreenCapturePanel/ScreenCapturePanel";
 import { SettingsPanel } from "./components/SettingsPanel/SettingsPanel";
 import { assistantAudioPlayer } from "./features/media/pcmPlayer";
+import { shouldFinishResponseTurn } from "./features/realtime/responseAudioTurn";
 import { shouldStopRealtimeAudioOnError } from "./features/realtime/serverErrorActions";
 import { useDesktopSettings } from "./hooks/useDesktopSettings";
 import { API_BASE_URL, APP_MODE } from "./lib/env";
@@ -25,6 +26,7 @@ import {
   createEvent,
   EventEnvelope,
   FramePayload,
+  VisualCapabilities,
 } from "./lib/events";
 import { wsClient } from "./lib/wsClient";
 
@@ -38,6 +40,8 @@ interface ServerEventEffects {
   stopRealtimeAudio?: () => void;
   onResponseStarted?: () => void;
   onResponseFinished?: (reason: string) => void;
+  onAssistantAudioExpected?: () => void;
+  onAssistantAudioStreamDone?: () => void;
   onAssistantAudioDone?: () => void;
 }
 
@@ -77,15 +81,27 @@ function speak(text: string, onDone?: () => void) {
 function handleServerEvent(event: EventEnvelope<unknown>, effects: ServerEventEffects = {}) {
   const store = useAppStore.getState();
   if (event.type === "server.session.ready") {
-    const payload = event.payload as { status?: string; audio?: AudioCapabilities; response_in_progress?: boolean };
+    const payload = event.payload as {
+      status?: string;
+      audio?: AudioCapabilities;
+      visual?: VisualCapabilities;
+      response_in_progress?: boolean;
+    };
     if (payload.status) store.setStatus(payload.status);
     if (payload.audio) store.setAudioCapabilities(payload.audio);
+    if (payload.visual) store.setVisualCapabilities(payload.visual);
     if (payload.response_in_progress) effects.onResponseStarted?.();
   }
   if (event.type === "server.session.state") {
-    const payload = event.payload as { status?: string; audio?: AudioCapabilities; response_in_progress?: boolean };
+    const payload = event.payload as {
+      status?: string;
+      audio?: AudioCapabilities;
+      visual?: VisualCapabilities;
+      response_in_progress?: boolean;
+    };
     if (payload.status) store.setStatus(payload.status);
     if (payload.audio) store.setAudioCapabilities(payload.audio);
+    if (payload.visual) store.setVisualCapabilities(payload.visual);
     if (payload.response_in_progress) {
       effects.onResponseStarted?.();
     } else if (!assistantAudioPlayer.isActive()) {
@@ -101,13 +117,16 @@ function handleServerEvent(event: EventEnvelope<unknown>, effects: ServerEventEf
     const text = payload.text ?? "";
     effects.onResponseStarted?.();
     store.finalizeAssistant(text);
-    if (!payload.audio_expected) {
+    if (payload.audio_expected) {
+      effects.onAssistantAudioExpected?.();
+    } else {
       const speaking = speak(text, () => effects.onResponseFinished?.("speech_synthesis_done"));
       if (!speaking) effects.onResponseFinished?.("text_final_no_audio");
     }
   }
   if (event.type === "assistant.audio.chunk") {
     effects.onResponseStarted?.();
+    effects.onAssistantAudioExpected?.();
     cancelSpeech();
     void assistantAudioPlayer.play(event.payload as AssistantAudioPayload).catch((error) => {
       store.addMessage("system", error instanceof Error ? error.message : String(error));
@@ -117,6 +136,7 @@ function handleServerEvent(event: EventEnvelope<unknown>, effects: ServerEventEf
   if (event.type === "assistant.audio.done") {
     const payload = event.payload as { chunks?: number; fallback_text?: string };
     if ((payload.chunks ?? 0) === 0 && payload.fallback_text) {
+      effects.onAssistantAudioStreamDone?.();
       const speaking = speak(payload.fallback_text, () => effects.onResponseFinished?.("fallback_speech_done"));
       if (!speaking) effects.onResponseFinished?.("fallback_text_no_audio");
     } else {
@@ -171,6 +191,7 @@ function MainApp() {
   const conversationModeRef = useRef(false);
   const listenModeRef = useRef<"keyword" | "live">("keyword");
   const assistantAudioDoneRef = useRef(false);
+  const responseAudioTurnInProgressRef = useRef(false);
   const restartListenTimerRef = useRef(0);
   const reconnectTimerRef = useRef(0);
   const proactiveTimerRef = useRef(0);
@@ -186,6 +207,7 @@ function MainApp() {
     assistantAudioPlayer.reset();
     audioTurnActiveRef.current = false;
     assistantAudioDoneRef.current = false;
+    responseAudioTurnInProgressRef.current = false;
     voiceResponsePendingRef.current = false;
     setVoiceResponsePending(false);
     useAppStore.getState().setUserSpeechDraft("");
@@ -225,8 +247,17 @@ function MainApp() {
 
   const markResponseFinished = useCallback(
     (reason: string) => {
-      if (!voiceResponsePendingRef.current && !assistantAudioDoneRef.current) return;
-      if (assistantAudioPlayer.isActive()) return;
+      if (
+        !shouldFinishResponseTurn({
+          voiceResponsePending: voiceResponsePendingRef.current,
+          assistantAudioDone: assistantAudioDoneRef.current,
+          responseAudioTurnInProgress: responseAudioTurnInProgressRef.current,
+          playerActive: assistantAudioPlayer.isActive(),
+        })
+      ) {
+        return;
+      }
+      responseAudioTurnInProgressRef.current = false;
       assistantAudioDoneRef.current = false;
       voiceResponsePendingRef.current = false;
       setVoiceResponsePending(false);
@@ -235,9 +266,24 @@ function MainApp() {
     [rearmContinuousListening],
   );
 
+  const markAssistantAudioExpected = useCallback(() => {
+    assistantAudioDoneRef.current = false;
+    responseAudioTurnInProgressRef.current = true;
+  }, []);
+
+  const markAssistantAudioStreamDone = useCallback(() => {
+    responseAudioTurnInProgressRef.current = false;
+  }, []);
+
   const handleAssistantAudioDone = useCallback(() => {
+    responseAudioTurnInProgressRef.current = false;
     assistantAudioDoneRef.current = true;
     markResponseFinished("assistant_audio_done");
+  }, [markResponseFinished]);
+
+  const handleAssistantAudioIdle = useCallback(() => {
+    if (responseAudioTurnInProgressRef.current) return;
+    markResponseFinished("audio_playback_idle");
   }, [markResponseFinished]);
 
   const scheduleReconnect = useCallback(() => {
@@ -259,7 +305,7 @@ function MainApp() {
 
   useEffect(() => {
     assistantAudioPlayer.setLipSyncSink((level) => useAppStore.getState().setAvatarLipSync(level));
-    assistantAudioPlayer.setIdleCallback(() => markResponseFinished("audio_playback_idle"));
+    assistantAudioPlayer.setIdleCallback(handleAssistantAudioIdle);
     let cleanup: () => void = () => {};
     let disposed = false;
     async function bootstrap() {
@@ -275,6 +321,8 @@ function MainApp() {
             stopRealtimeAudio: stopClientAudio,
             onResponseStarted: markResponseStarted,
             onResponseFinished: markResponseFinished,
+            onAssistantAudioExpected: markAssistantAudioExpected,
+            onAssistantAudioStreamDone: markAssistantAudioStreamDone,
             onAssistantAudioDone: handleAssistantAudioDone,
           }),
         );
@@ -287,6 +335,7 @@ function MainApp() {
         socket.onclose = () => {
           if (disposed) return;
           useAppStore.getState().setConnection("idle");
+          responseAudioTurnInProgressRef.current = false;
           voiceResponsePendingRef.current = false;
           setVoiceResponsePending(false);
           useAppStore.getState().addMessage("system", "WebSocket 已断开，正在重连。");
@@ -310,6 +359,9 @@ function MainApp() {
     };
   }, [
     handleAssistantAudioDone,
+    handleAssistantAudioIdle,
+    markAssistantAudioExpected,
+    markAssistantAudioStreamDone,
     markResponseFinished,
     markResponseStarted,
     scheduleReconnect,
@@ -323,6 +375,7 @@ function MainApp() {
     cancelSpeech();
     assistantAudioPlayer.reset();
     assistantAudioDoneRef.current = false;
+    responseAudioTurnInProgressRef.current = false;
     voiceResponsePendingRef.current = false;
     setVoiceResponsePending(false);
     const sent = wsClient.send(
@@ -377,6 +430,7 @@ function MainApp() {
     assistantAudioPlayer.reset();
     audioTurnActiveRef.current = false;
     assistantAudioDoneRef.current = false;
+    responseAudioTurnInProgressRef.current = false;
     voiceResponsePendingRef.current = false;
     setVoiceResponsePending(false);
     setConversationActive(Boolean(options.keepConversation));
@@ -467,6 +521,7 @@ function MainApp() {
     const sent = wsClient.send(createEvent("client.media.audio_chunk", actions.sessionId, payload));
     if (sent && payload.is_final) {
       assistantAudioDoneRef.current = false;
+      responseAudioTurnInProgressRef.current = false;
       markResponseStarted();
     }
     return sent;

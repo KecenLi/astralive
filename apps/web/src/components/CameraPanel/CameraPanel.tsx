@@ -36,6 +36,7 @@ export function CameraPanel({ autoStartSignal, onFrameSent, suspendAutoUpload = 
   const sessionId = useAppStore((state) => state.sessionId);
   const status = useAppStore((state) => state.status);
   const lastFrameInfo = useAppStore((state) => state.lastFrameInfo);
+  const sceneChangeThreshold = useAppStore((state) => state.visualCapabilities.scene_change_threshold);
 
   const stopCamera = useCallback(() => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -72,7 +73,14 @@ export function CameraPanel({ autoStartSignal, onFrameSent, suspendAutoUpload = 
       captureInFlightRef.current = true;
       try {
         const frame = await captureVideoFrame(video, reason, prompt, captureOptionsFor(mode, activity));
-        if (!shouldSendSceneHash(lastSceneHashRef.current, frame.scene_hash, activity)) {
+        if (
+          !shouldSendSceneHash(
+            lastSceneHashRef.current,
+            frame.scene_hash,
+            activity,
+            sceneChangeThreshold,
+          )
+        ) {
           setCameraState("重复画面跳过");
           return;
         }
@@ -88,7 +96,7 @@ export function CameraPanel({ autoStartSignal, onFrameSent, suspendAutoUpload = 
         captureInFlightRef.current = false;
       }
     },
-    [mode, onFrameSent, sessionId],
+    [mode, onFrameSent, sceneChangeThreshold, sessionId],
   );
 
   const sendMockFrame = useCallback(() => {

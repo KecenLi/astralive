@@ -1,8 +1,11 @@
 import { FramePayload } from "../../lib/events";
+import { normalizedHashDistance } from "./sceneHash";
 
 export type VisualCaptureMode = "low_fps" | "continuous";
 export type VisualCaptureActivity = "idle" | "active" | "focus";
 export type VisualCaptureSource = "screen" | "camera";
+
+export const DEFAULT_SCENE_HASH_THRESHOLD = 0.12;
 
 export interface VisualCaptureProfile {
   idleFps: number;
@@ -79,6 +82,13 @@ export function captureOptionsFor(mode: VisualCaptureMode, activity: VisualCaptu
   };
 }
 
-export function shouldSendSceneHash(previous: string | null, next: string, activity: VisualCaptureActivity) {
-  return activity === "focus" || previous !== next;
+export function shouldSendSceneHash(
+  previous: string | null,
+  next: string,
+  activity: VisualCaptureActivity,
+  threshold = DEFAULT_SCENE_HASH_THRESHOLD,
+) {
+  if (activity === "focus") return true;
+  if (!previous || !next) return true;
+  return normalizedHashDistance(previous, next) > threshold;
 }

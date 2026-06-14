@@ -2,6 +2,7 @@ import asyncio
 
 from app.config import Settings
 from app.contracts.model_io import VisionInput, VisionResult
+from app.providers.raw_usage import raw_usage_payload
 from app.providers.vertex_ai_client import VertexAIClient
 from app.providers.vision.base import VisionProvider
 
@@ -44,7 +45,12 @@ class VertexAIVisionProvider(VisionProvider):
         return VisionResult(
             summary=summary,
             confidence=0.72 if data.mode == "focus" else 0.66,
-            raw={"provider": self.provider_name, "model": self.model, "mode": data.mode},
+            raw={
+                "provider": self.provider_name,
+                "model": self.model,
+                "mode": data.mode,
+                **raw_usage_payload(result),
+            },
         )
 
     def _extract_text(self, result: dict) -> str:

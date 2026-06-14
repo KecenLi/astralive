@@ -2,12 +2,14 @@ import asyncio
 import base64
 from collections.abc import AsyncIterator
 from contextlib import suppress
+import inspect
 import time
 from typing import Any, Literal
 
 from app.config import Settings
 from app.contracts.model_io import RealtimeStreamEvent, RealtimeTurnResult, TTSResult
 from app.providers.google_genai_client import GoogleGenAIClientFactory
+from app.providers.raw_usage import to_plain_data
 from app.providers.realtime.base import RealtimeAudioStream, RealtimeProvider
 
 
@@ -82,6 +84,18 @@ class GoogleGenAILiveProvider(RealtimeProvider):
             self._client = self._make_client()
         return self._client
 
+    async def close(self) -> None:
+        client = self._client
+        self._client = None
+        if client is None:
+            return
+        close = getattr(client, "close", None)
+        if not close:
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+
     def _config(self, metadata: dict):
         from google.genai import types
 
@@ -107,14 +121,39 @@ class GoogleGenAILiveProvider(RealtimeProvider):
         started = time.monotonic()
         iterator = session.receive().__aiter__()
         result = RealtimeTurnResult(raw={"provider": self.provider_name, "model": self.model})
+        received_any = False
         while True:
-            remaining = self.settings.realtime_turn_timeout_seconds - (time.monotonic() - started)
-            if remaining <= 0:
-                raise TimeoutError("Gemini Live turn timed out while waiting for a response.")
+            max_remaining = self.settings.realtime_turn_max_seconds - (time.monotonic() - started)
+            if max_remaining <= 0:
+                raise TimeoutError(
+                    f"Gemini Live turn exceeded {self.settings.realtime_turn_max_seconds:g} seconds."
+                )
+            phase_timeout = (
+                self.settings.realtime_stream_gap_timeout_seconds
+                if received_any
+                else self.settings.realtime_first_response_timeout_seconds
+            )
+            timeout = min(max_remaining, phase_timeout)
+            timeout_reason = "turn_max" if max_remaining <= phase_timeout else "stream_gap"
             try:
-                message = await asyncio.wait_for(iterator.__anext__(), timeout=remaining)
+                message = await asyncio.wait_for(iterator.__anext__(), timeout=timeout)
+            except TimeoutError as exc:
+                if timeout_reason == "turn_max":
+                    raise TimeoutError(
+                        f"Gemini Live turn exceeded {self.settings.realtime_turn_max_seconds:g} seconds."
+                    ) from exc
+                if received_any:
+                    raise TimeoutError(
+                        "Gemini Live stream gap timed out after "
+                        f"{self.settings.realtime_stream_gap_timeout_seconds:g} seconds."
+                    ) from exc
+                raise TimeoutError(
+                    "Gemini Live timed out waiting for the first response after "
+                    f"{self.settings.realtime_first_response_timeout_seconds:g} seconds."
+                ) from exc
             except StopAsyncIteration:
                 break
+            received_any = True
             _merge_live_message(result, message, self.settings)
             server_content = _get_field(message, "server_content") or _get_field(message, "serverContent")
             if _get_field(server_content, "turn_complete") or _get_field(server_content, "turnComplete"):
@@ -214,7 +253,7 @@ def _merge_live_message(
 
     usage = _get_field(message, "usage_metadata") or _get_field(message, "usageMetadata")
     if usage:
-        result.raw["usage_seen"] = True
+        result.raw["usage_metadata"] = to_plain_data(usage)
 
 
 def _stream_event_from_live_message(message: Any, settings: Settings) -> RealtimeStreamEvent:

@@ -22,6 +22,7 @@ from app.contracts.model_io import (
     ChatMessage,
     DialogueInput,
     DialogueResult,
+    DialogueStreamChunk,
     RealtimeStreamEvent,
     TTSInput,
     TTSResult,
@@ -118,10 +119,29 @@ class CountingLLMProvider(LLMProvider):
     def __init__(self, text: str = "正常回复") -> None:
         self.text = text
         self.calls = 0
+        self.inputs: list[DialogueInput] = []
 
     async def complete(self, data: DialogueInput):
         self.calls += 1
+        self.inputs.append(data)
         return DialogueResult(text=self.text, raw={"provider": "counting"})
+
+
+class StreamingLLMProvider(LLMProvider):
+    def __init__(self, chunks: list[str], *, raw: dict | None = None) -> None:
+        self.chunks = chunks
+        self.raw = raw or {"provider": "counting", "model": "stream"}
+        self.inputs: list[DialogueInput] = []
+
+    async def complete(self, data: DialogueInput):
+        self.inputs.append(data)
+        return DialogueResult(text="".join(self.chunks), raw=self.raw)
+
+    async def stream_complete(self, data: DialogueInput):
+        self.inputs.append(data)
+        for chunk in self.chunks:
+            yield DialogueStreamChunk(delta=chunk, raw={"provider": "counting", "model": "stream"})
+        yield DialogueStreamChunk(done=True, raw=self.raw)
 
 
 async def test_dialogue_blocks_system_prompt_exfiltration_without_llm_call() -> None:
@@ -163,6 +183,51 @@ async def test_dialogue_allows_normal_api_test_language() -> None:
     assert provider.calls == 1
     assert session.cost_meter.llm_calls == 1
     assert result.text == "API 连通性正常。"
+
+
+async def test_dialogue_stream_strips_emotion_marker_before_tts_text() -> None:
+    settings = Settings()
+    provider = StreamingLLMProvider(
+        ["[[emotion:happy]]你好，", "我已经处理好了。"],
+        raw={
+            "provider": "counting",
+            "model": "stream",
+            "usage": {"prompt_tokens": 10, "completion_tokens": 6},
+        },
+    )
+    session = SessionState(wake_word=settings.wake_word)
+    service = DialogueService(provider, settings)
+
+    chunks = [chunk async for chunk in service.reply_stream(session, "小七，测试流式回复。")]
+
+    deltas = [chunk.delta for chunk in chunks if chunk.delta]
+    assert "".join(deltas) == "你好，我已经处理好了。"
+    assert all("[[emotion:" not in delta for delta in deltas)
+    assert chunks[-1].done is True
+    assert chunks[-1].emotion == "happy"
+    assert session.history[-1].content == "你好，我已经处理好了。"
+    assert session.cost_meter.estimated_input_tokens == 10
+    assert session.cost_meter.estimated_output_tokens == 6
+
+
+async def test_dialogue_second_turn_includes_sliding_history() -> None:
+    settings = Settings(conversation_history_max_messages=4, conversation_history_max_chars=200)
+    provider = CountingLLMProvider("第一轮完成。")
+    session = SessionState(wake_word=settings.wake_word)
+    service = DialogueService(provider, settings)
+
+    await service.reply(session, "第一轮问题")
+    provider.text = "第二轮完成。"
+    await service.reply(session, "第二轮问题")
+
+    second_messages = provider.inputs[-1].messages
+    assert [message.content for message in second_messages] == [
+        second_messages[0].content,
+        "第一轮问题",
+        "第一轮完成。",
+        "第二轮问题",
+    ]
+    assert session.public_dict()["history_turns"] == 2
 
 
 async def test_dialogue_filters_secret_like_model_output() -> None:
@@ -717,7 +782,7 @@ async def test_realtime_stream_wait_does_not_timeout_before_final_audio() -> Non
         yield RealtimeStreamEvent(input_text="ok")
 
     runtime = AudioRuntimeState()
-    settings = Settings(realtime_turn_timeout_seconds=0.001)
+    settings = Settings(realtime_first_response_timeout_seconds=0.001)
 
     event = await _next_realtime_stream_event(events().__aiter__(), runtime, settings)
 
@@ -732,7 +797,7 @@ async def test_realtime_stream_wait_times_out_after_final_audio() -> None:
     runtime = AudioRuntimeState()
     runtime.input_finished = True
     runtime.input_finished_at = time.perf_counter() - 1
-    settings = Settings(realtime_turn_timeout_seconds=0.001)
+    settings = Settings(realtime_first_response_timeout_seconds=0.001)
 
     with pytest.raises(TimeoutError):
         await _next_realtime_stream_event(events().__aiter__(), runtime, settings)
@@ -1089,7 +1154,7 @@ async def test_realtime_stream_timeout_falls_back_to_batch_asr_dialogue() -> Non
         realtime_provider="mock",
         llm_provider="mock",
         tts_provider="mock",
-        realtime_turn_timeout_seconds=0.001,
+        realtime_first_response_timeout_seconds=0.001,
     )
     send_lock = asyncio.Lock()
     audio = StubStreamingAudioService(stream)
@@ -1162,7 +1227,7 @@ async def test_realtime_stream_timeout_recovery_asr_has_own_timeout() -> None:
         realtime_provider="mock",
         llm_provider="mock",
         tts_provider="mock",
-        realtime_turn_timeout_seconds=0.001,
+        realtime_first_response_timeout_seconds=0.001,
         realtime_recovery_asr_timeout_seconds=0.001,
     )
     send_lock = asyncio.Lock()

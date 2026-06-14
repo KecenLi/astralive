@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from app.contracts.model_io import ChatMessage
 from app.core.cost_meter import CostMeter
 
 
@@ -22,6 +23,55 @@ class SessionState(BaseModel):
     response_in_progress: bool = False
     interrupted_count: int = 0
     cost_meter: CostMeter = Field(default_factory=CostMeter)
+    history: list[ChatMessage] = Field(default_factory=list)
+
+    def append_history_turn(
+        self,
+        user_text: str,
+        assistant_text: str,
+        *,
+        max_messages: int = 12,
+        max_chars: int = 4000,
+    ) -> None:
+        if user_text.strip():
+            self.history.append(ChatMessage(role="user", content=user_text.strip()))
+        if assistant_text.strip():
+            self.history.append(ChatMessage(role="assistant", content=assistant_text.strip()))
+        self.trim_history(max_messages=max_messages, max_chars=max_chars)
+
+    def history_window(self, *, max_messages: int = 12, max_chars: int = 4000) -> list[ChatMessage]:
+        max_messages = max(0, max_messages)
+        max_chars = max(0, max_chars)
+        if max_messages == 0 or max_chars == 0:
+            return []
+
+        window: list[ChatMessage] = []
+        total_chars = 0
+        for item in reversed(self.history[-max_messages:]):
+            content = item.content.strip()
+            if not content:
+                continue
+            if total_chars + len(content) > max_chars:
+                if window:
+                    break
+                content = content[-max_chars:]
+                item = ChatMessage(role=item.role, content=content)
+            window.append(item)
+            total_chars += len(item.content)
+            if len(window) >= max_messages:
+                break
+        return list(reversed(window))
+
+    def trim_history(self, *, max_messages: int = 12, max_chars: int = 4000) -> None:
+        max_messages = max(0, max_messages)
+        max_chars = max(0, max_chars)
+        if max_messages == 0 or max_chars == 0:
+            self.history.clear()
+            return
+        if len(self.history) > max_messages:
+            self.history = self.history[-max_messages:]
+        while self.history and sum(len(item.content) for item in self.history) > max_chars:
+            self.history.pop(0)
 
     def public_dict(self) -> dict:
         return {
@@ -32,5 +82,6 @@ class SessionState(BaseModel):
             "last_visual_summary": self.last_visual_summary,
             "response_in_progress": self.response_in_progress,
             "interrupted_count": self.interrupted_count,
+            "history_turns": len(self.history) // 2,
             "cost": self.cost_meter.model_dump(),
         }

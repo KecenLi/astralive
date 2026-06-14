@@ -100,3 +100,17 @@
 - Audio provider prewarm is enabled by `AUDIO_PREWARM_ENABLED=true`; WebSocket session ready starts local ASR/TTS workers in the background without playing any prompt.
 - Current local TTS limitation is CPU inference speed, not missing script or API latency. Two-round local soak passed with no errors, but CosyVoice3 audio done after audio-final still took about `38-45s` hot on this machine. For fast spoken replies, next round should either move CosyVoice3 to GPU if available or add a faster local TTS route while keeping CosyVoice3 as high-quality mode.
 - Validation before push this round: backend pytest/ruff/py_compile, `verify-local-asr.ps1`, `verify-local-tts.ps1`, `verify-real-realtime-soak.ps1` with local providers, `scripts/package.ps1 -SkipLive2D`, and packaged `verify-desktop-interaction.mjs`.
+
+## 2026-06-14 Streaming / Cost / Provider Lifecycle Round Notes
+
+- This round must be pushed after validation. Commit only source, tests, env example, and tracked docs; do not commit `.env`, `data/`, `.installers/`, packaged `dist/`, Live2D local assets, or API logs.
+- Subagents used:
+  - Halley: frontend scene-hash threshold, CostPanel token display, and `assistant.audio.done` response-turn gate.
+  - Curie: LLM streaming provider work and DialogueService streaming/parser draft. Agent 0 reviewed and completed missing parser/integration.
+  - Dirac: provider container, app lifespan, per-session realtime provider isolation, and realtime timeout provider tests.
+  - Kepler: cost estimator, raw usage helpers, and cost tests. Agent 0 reviewed and connected service-level accounting.
+- Agent 0 owns final integration: `websocket.py` streaming LLM -> sentence TTS queue, one `assistant.audio.done`, provider container usage, ASR/TTS/Vision cost recording, WebSocket realtime timeout split, frontend visual threshold store wiring, tests, package smoke, commit, and push.
+- Important risk handled: frontend audio idle cannot finish a response turn while sentence TTS is between chunks. `assistant.audio.chunk` and `assistant.text.final(audio_expected=true)` both open the turn gate; only `assistant.audio.done` plus idle playback can close it.
+- Important risk handled: realtime providers are not app-level shared. ASR/TTS/LLM/Vision providers are shared through `ProviderContainer`; realtime providers remain per WebSocket session and are closed on disconnect.
+- Cost note: built-in Gemini 2.5 Flash prices are fallback display estimates only. Override with `COST_PRICE_TABLE_JSON` when using a paid provider route that needs accurate dollar display.
+- Validation before push this round: backend `ruff check app`, backend `pytest`, web `tsc -b`, web `vitest run`, package smoke, desktop interaction smoke, and public-tree guard.

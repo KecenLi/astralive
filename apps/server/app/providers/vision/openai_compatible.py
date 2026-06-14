@@ -4,6 +4,7 @@ from urllib import request
 
 from app.config import Settings
 from app.contracts.model_io import VisionInput, VisionResult
+from app.providers.raw_usage import raw_usage_payload
 from app.providers.vision.base import VisionProvider
 
 
@@ -71,6 +72,7 @@ class OpenAICompatibleVisionProvider(VisionProvider):
                 "provider": self.provider_name,
                 "model": self.model,
                 "mode": data.mode,
+                **raw_usage_payload(result),
             },
         )
 

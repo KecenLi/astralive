@@ -35,6 +35,7 @@ export function ScreenCapturePanel({ autoStartSignal, onFrameSent, suspendAutoUp
   const [lastFrameInfo, setLastFrameInfo] = useState("尚未上传");
   const sessionId = useAppStore((state) => state.sessionId);
   const status = useAppStore((state) => state.status);
+  const sceneChangeThreshold = useAppStore((state) => state.visualCapabilities.scene_change_threshold);
 
   const stopScreen = useCallback(() => {
     stopMediaStream(streamRef.current);
@@ -83,7 +84,14 @@ export function ScreenCapturePanel({ autoStartSignal, onFrameSent, suspendAutoUp
           activity === "focus" ? "用户要求看清楚屏幕内容。" : "连续屏幕视觉上下文。",
           captureOptionsFor(mode, activity),
         );
-        if (!shouldSendSceneHash(lastSceneHashRef.current, frame.scene_hash, activity)) {
+        if (
+          !shouldSendSceneHash(
+            lastSceneHashRef.current,
+            frame.scene_hash,
+            activity,
+            sceneChangeThreshold,
+          )
+        ) {
           setCaptureState("重复画面跳过");
           return;
         }
@@ -102,7 +110,7 @@ export function ScreenCapturePanel({ autoStartSignal, onFrameSent, suspendAutoUp
         captureInFlightRef.current = false;
       }
     },
-    [mode, onFrameSent, sessionId],
+    [mode, onFrameSent, sceneChangeThreshold, sessionId],
   );
 
   const focusScreen = useCallback(() => {

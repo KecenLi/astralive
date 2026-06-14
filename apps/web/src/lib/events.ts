@@ -51,6 +51,13 @@ export interface AudioCapabilities {
   server_tts: boolean;
   server_realtime_audio: boolean;
   realtime_input_idle_timeout_seconds?: number;
+  realtime_first_response_timeout_seconds?: number;
+  realtime_stream_gap_timeout_seconds?: number;
+  realtime_turn_max_seconds?: number;
+}
+
+export interface VisualCapabilities {
+  scene_change_threshold: number;
 }
 
 export interface FramePayload {

@@ -8,6 +8,7 @@ from app.config import Settings
 from app.contracts.model_io import ASRResult
 from app.providers.asr.base import ASRProvider
 from app.providers.google_genai_client import GoogleGenAIClientFactory
+from app.providers.raw_usage import raw_usage_payload, to_plain_data
 
 
 ProviderMode = Literal["gemini", "vertex_ai"]
@@ -71,7 +72,12 @@ class GoogleGenAIASRProvider(ASRProvider):
             text=text,
             confidence=0.65 if text else 0.0,
             is_final=True,
-            raw={"provider": self.provider_name, "model": self.batch_model, "mime": mime},
+            raw={
+                "provider": self.provider_name,
+                "model": self.batch_model,
+                "mime": mime,
+                **raw_usage_payload(response),
+            },
         )
 
     def _get_client(self):
@@ -89,23 +95,37 @@ class GoogleGenAIASRProvider(ASRProvider):
             ),
         )
         started = time.monotonic()
+        last_event_at = started
+        first_response_received = False
         transcript = ""
         timed_out = False
+        latest_usage: dict | None = None
         async with self._get_client().aio.live.connect(model=self.model, config=config) as session:
             await session.send_realtime_input(audio=types.Blob(data=audio_bytes, mime_type=mime))
             await session.send_realtime_input(audio_stream_end=True)
             iterator = session.receive().__aiter__()
             while True:
-                remaining = self.settings.realtime_turn_timeout_seconds - (time.monotonic() - started)
-                if remaining <= 0:
-                    raise TimeoutError("Gemini Live ASR timed out while waiting for transcription.")
+                now = time.monotonic()
+                max_remaining = self.settings.realtime_turn_max_seconds - (now - started)
+                if max_remaining <= 0:
+                    raise TimeoutError("Gemini Live ASR exceeded maximum turn duration.")
+                if first_response_received:
+                    phase_remaining = self.settings.realtime_stream_gap_timeout_seconds - (now - last_event_at)
+                    phase_name = "stream gap"
+                else:
+                    phase_remaining = self.settings.realtime_first_response_timeout_seconds - (now - started)
+                    phase_name = "first response"
+                if phase_remaining <= 0:
+                    raise TimeoutError(f"Gemini Live ASR timed out waiting for {phase_name}.")
                 try:
-                    message = await asyncio.wait_for(iterator.__anext__(), timeout=remaining)
+                    message = await asyncio.wait_for(iterator.__anext__(), timeout=min(max_remaining, phase_remaining))
                 except TimeoutError:
                     timed_out = True
                     break
                 except StopAsyncIteration:
                     break
+                first_response_received = True
+                last_event_at = time.monotonic()
                 server_content = _get_field(message, "server_content") or _get_field(
                     message, "serverContent"
                 )
@@ -115,6 +135,9 @@ class GoogleGenAIASRProvider(ASRProvider):
                 text = _get_field(input_transcription, "text")
                 if text:
                     transcript += str(text)
+                usage = _get_field(message, "usage_metadata") or _get_field(message, "usageMetadata")
+                if usage:
+                    latest_usage = to_plain_data(usage)
                 if _get_field(input_transcription, "finished"):
                     break
                 if _get_field(server_content, "turn_complete") or _get_field(
@@ -128,7 +151,13 @@ class GoogleGenAIASRProvider(ASRProvider):
             text=transcript,
             confidence=0.75 if transcript else 0.0,
             is_final=True,
-            raw={"provider": self.provider_name, "model": self.model, "mime": mime, "mode": "live"},
+            raw={
+                "provider": self.provider_name,
+                "model": self.model,
+                "mime": mime,
+                "mode": "live",
+                **({"usage_metadata": latest_usage} if latest_usage else {}),
+            },
         )
 
 
