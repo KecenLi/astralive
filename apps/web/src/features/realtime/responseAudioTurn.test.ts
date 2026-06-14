@@ -46,4 +46,16 @@ describe("response audio turn gate", () => {
       }),
     ).toBe(true);
   });
+
+  it("lets the watchdog force the rearm path when response completion is stuck", () => {
+    expect(
+      shouldFinishResponseTurn({
+        voiceResponsePending: true,
+        assistantAudioDone: false,
+        responseAudioTurnInProgress: true,
+        playerActive: true,
+        force: true,
+      }),
+    ).toBe(true);
+  });
 });

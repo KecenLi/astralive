@@ -13,12 +13,16 @@ import { MicPanel } from "./components/MicPanel/MicPanel";
 import { ScreenCapturePanel } from "./components/ScreenCapturePanel/ScreenCapturePanel";
 import { SettingsPanel } from "./components/SettingsPanel/SettingsPanel";
 import { assistantAudioPlayer } from "./features/media/pcmPlayer";
+import {
+  nextRealSpeechInputActive,
+  shouldSuspendVisualAutoUpload,
+  SpeechInputTransition,
+} from "./features/realtime/conversationGates";
 import { shouldFinishResponseTurn } from "./features/realtime/responseAudioTurn";
 import { shouldStopRealtimeAudioOnError } from "./features/realtime/serverErrorActions";
 import { useDesktopSettings } from "./hooks/useDesktopSettings";
 import { API_BASE_URL, APP_MODE } from "./lib/env";
 import {
-  AudioCapabilities,
   AssistantAudioPayload,
   AudioChunkPayload,
   AvatarStatePayload,
@@ -28,11 +32,11 @@ import {
   FramePayload,
   SessionStatePayload,
   VisionNeedFocusPayload,
-  VisualCapabilities,
 } from "./lib/events";
 import { wsClient } from "./lib/wsClient";
 
 const RESPONSE_AUDIO_DONE_TIMEOUT_MS = 90_000;
+const RESPONSE_TOTAL_WATCHDOG_TIMEOUT_MS = 90_000;
 const FIXED_NOTICE_AUDIO_SOURCE = "fixed_notice";
 
 interface SendUserTextOptions {
@@ -41,10 +45,16 @@ interface SendUserTextOptions {
   visibleText?: string;
 }
 
+interface ResponseFinishedOptions {
+  force?: boolean;
+  resetPlayback?: boolean;
+  turnId?: number;
+}
+
 interface ServerEventEffects {
   stopRealtimeAudio?: () => void;
   onResponseStarted?: () => void;
-  onResponseFinished?: (reason: string) => void;
+  onResponseFinished?: (reason: string, options?: ResponseFinishedOptions) => void;
   onAssistantAudioExpected?: () => void;
   onAssistantAudioStreamDone?: () => void;
   onAssistantAudioDone?: () => void;
@@ -158,10 +168,10 @@ function handleServerEvent(event: EventEnvelope<unknown>, effects: ServerEventEf
   }
   if (event.type === "error") {
     store.addMessage("system", JSON.stringify(event.payload));
+    effects.onResponseFinished?.("server_error", { force: true, resetPlayback: true });
     if (shouldStopRealtimeAudioOnError(event.payload)) {
       effects.stopRealtimeAudio?.();
     }
-    effects.onResponseFinished?.("server_error");
   }
 }
 
@@ -172,12 +182,14 @@ function MainApp() {
   const [keywordListenSignal, setKeywordListenSignal] = useState(0);
   const [deviceStartSignal, setDeviceStartSignal] = useState(0);
   const [liveAudioActive, setLiveAudioActive] = useState(false);
+  const [realSpeechInputActive, setRealSpeechInputActive] = useState(false);
   const [voiceResponsePending, setVoiceResponsePending] = useState(false);
   const [conversationMode, setConversationMode] = useState(false);
   const [sessionRestartSignal, setSessionRestartSignal] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const { settings: desktopSettings, patchSettings } = useDesktopSettings();
   const audioTurnActiveRef = useRef(false);
+  const realSpeechInputActiveRef = useRef(false);
   const voiceResponsePendingRef = useRef(false);
   const conversationModeRef = useRef(false);
   const listenModeRef = useRef<"keyword" | "live">("keyword");
@@ -187,6 +199,9 @@ function MainApp() {
   const reconnectTimerRef = useRef(0);
   const proactiveTimerRef = useRef(0);
   const responseAudioDoneTimeoutRef = useRef(0);
+  const responseTotalWatchdogRef = useRef(0);
+  const responseTurnSerialRef = useRef(0);
+  const activeResponseTurnIdRef = useRef(0);
   const reconnectAttemptsRef = useRef(0);
 
   const providerLabel = useMemo(
@@ -194,18 +209,32 @@ function MainApp() {
     [store.cost.mode],
   );
 
-  const stopClientAudio = useCallback(() => {
-    cancelSpeech();
-    assistantAudioPlayer.reset();
+  const updateRealSpeechInput = useCallback((transition: SpeechInputTransition) => {
+    const next = nextRealSpeechInputActive(realSpeechInputActiveRef.current, transition);
+    if (next === realSpeechInputActiveRef.current) return;
+    realSpeechInputActiveRef.current = next;
+    setRealSpeechInputActive(next);
+  }, []);
+
+  const clearResponseTracking = useCallback(() => {
     audioTurnActiveRef.current = false;
     assistantAudioDoneRef.current = false;
     responseAudioTurnInProgressRef.current = false;
+    activeResponseTurnIdRef.current = 0;
     window.clearTimeout(responseAudioDoneTimeoutRef.current);
+    window.clearTimeout(responseTotalWatchdogRef.current);
     voiceResponsePendingRef.current = false;
     setVoiceResponsePending(false);
+  }, []);
+
+  const stopClientAudio = useCallback(() => {
+    cancelSpeech();
+    assistantAudioPlayer.reset();
+    clearResponseTracking();
+    updateRealSpeechInput({ type: "cancel" });
     useAppStore.getState().setUserSpeechDraft("");
     setAudioStopSignal((value) => value + 1);
-  }, []);
+  }, [clearResponseTracking, updateRealSpeechInput]);
 
   const setConversationActive = useCallback((active: boolean) => {
     conversationModeRef.current = active;
@@ -238,27 +267,54 @@ function MainApp() {
     }, 450);
   }, []);
 
-  const markResponseFinished = useCallback(
-    (reason: string) => {
+  const finishResponseAndRearm = useCallback(
+    (reason: string, options: ResponseFinishedOptions = {}) => {
+      if (typeof options.turnId === "number" && activeResponseTurnIdRef.current !== options.turnId) {
+        return false;
+      }
+      const hasResponseState =
+        voiceResponsePendingRef.current ||
+        assistantAudioDoneRef.current ||
+        responseAudioTurnInProgressRef.current ||
+        activeResponseTurnIdRef.current > 0;
+      if (!hasResponseState) return false;
       if (
         !shouldFinishResponseTurn({
           voiceResponsePending: voiceResponsePendingRef.current,
           assistantAudioDone: assistantAudioDoneRef.current,
           responseAudioTurnInProgress: responseAudioTurnInProgressRef.current,
           playerActive: assistantAudioPlayer.isActive(),
+          force: options.force,
         })
       ) {
-        return;
+        return false;
       }
-      responseAudioTurnInProgressRef.current = false;
-      assistantAudioDoneRef.current = false;
-      window.clearTimeout(responseAudioDoneTimeoutRef.current);
-      voiceResponsePendingRef.current = false;
-      setVoiceResponsePending(false);
+      if (options.resetPlayback) {
+        cancelSpeech();
+        assistantAudioPlayer.reset();
+      }
+      clearResponseTracking();
       rearmContinuousListening(reason);
+      return true;
     },
-    [rearmContinuousListening],
+    [clearResponseTracking, rearmContinuousListening],
   );
+
+  const startResponseTotalWatchdog = useCallback(() => {
+    window.clearTimeout(responseTotalWatchdogRef.current);
+    const turnId = responseTurnSerialRef.current + 1;
+    responseTurnSerialRef.current = turnId;
+    activeResponseTurnIdRef.current = turnId;
+    responseTotalWatchdogRef.current = window.setTimeout(() => {
+      if (activeResponseTurnIdRef.current !== turnId) return;
+      const reason = "response_total_watchdog_timeout";
+      console.warn(`MODVII response total watchdog fired after ${RESPONSE_TOTAL_WATCHDOG_TIMEOUT_MS}ms`);
+      useAppStore
+        .getState()
+        .addMessage("system", "连续对话等待服务端回应超时，已清理等待状态并重新开启监听。");
+      finishResponseAndRearm(reason, { force: true, resetPlayback: true, turnId });
+    }, RESPONSE_TOTAL_WATCHDOG_TIMEOUT_MS);
+  }, [finishResponseAndRearm]);
 
   const markAssistantAudioExpected = useCallback(() => {
     window.clearTimeout(responseAudioDoneTimeoutRef.current);
@@ -269,9 +325,9 @@ function MainApp() {
       console.warn(`MODVII assistant audio.done watchdog fired after ${RESPONSE_AUDIO_DONE_TIMEOUT_MS}ms`);
       responseAudioTurnInProgressRef.current = false;
       assistantAudioDoneRef.current = true;
-      markResponseFinished("assistant_audio_done_timeout");
+      finishResponseAndRearm("assistant_audio_done_timeout");
     }, RESPONSE_AUDIO_DONE_TIMEOUT_MS);
-  }, [markResponseFinished]);
+  }, [finishResponseAndRearm]);
 
   const markAssistantAudioStreamDone = useCallback(() => {
     window.clearTimeout(responseAudioDoneTimeoutRef.current);
@@ -282,13 +338,13 @@ function MainApp() {
     window.clearTimeout(responseAudioDoneTimeoutRef.current);
     responseAudioTurnInProgressRef.current = false;
     assistantAudioDoneRef.current = true;
-    markResponseFinished("assistant_audio_done");
-  }, [markResponseFinished]);
+    finishResponseAndRearm("assistant_audio_done");
+  }, [finishResponseAndRearm]);
 
   const handleAssistantAudioIdle = useCallback(() => {
     if (responseAudioTurnInProgressRef.current) return;
-    markResponseFinished("audio_playback_idle");
-  }, [markResponseFinished]);
+    finishResponseAndRearm("audio_playback_idle");
+  }, [finishResponseAndRearm]);
 
   const scheduleReconnect = useCallback(() => {
     window.clearTimeout(reconnectTimerRef.current);
@@ -326,7 +382,7 @@ function MainApp() {
           handleServerEvent(event, {
             stopRealtimeAudio: stopClientAudio,
             onResponseStarted: markResponseStarted,
-            onResponseFinished: markResponseFinished,
+            onResponseFinished: finishResponseAndRearm,
             onAssistantAudioExpected: markAssistantAudioExpected,
             onAssistantAudioStreamDone: markAssistantAudioStreamDone,
             onAssistantAudioDone: handleAssistantAudioDone,
@@ -341,10 +397,8 @@ function MainApp() {
         socket.onclose = () => {
           if (disposed) return;
           useAppStore.getState().setConnection("idle");
-          window.clearTimeout(responseAudioDoneTimeoutRef.current);
-          responseAudioTurnInProgressRef.current = false;
-          voiceResponsePendingRef.current = false;
-          setVoiceResponsePending(false);
+          clearResponseTracking();
+          updateRealSpeechInput({ type: "error" });
           useAppStore.getState().addMessage("system", "WebSocket 已断开，正在重连。");
           scheduleReconnect();
         };
@@ -360,6 +414,7 @@ function MainApp() {
       disposed = true;
       window.clearTimeout(reconnectTimerRef.current);
       window.clearTimeout(responseAudioDoneTimeoutRef.current);
+      window.clearTimeout(responseTotalWatchdogRef.current);
       assistantAudioPlayer.setLipSyncSink(null);
       assistantAudioPlayer.setIdleCallback(null);
       cleanup();
@@ -368,13 +423,15 @@ function MainApp() {
   }, [
     handleAssistantAudioDone,
     handleAssistantAudioIdle,
+    clearResponseTracking,
+    finishResponseAndRearm,
     markAssistantAudioExpected,
     markAssistantAudioStreamDone,
-    markResponseFinished,
     markResponseStarted,
     scheduleReconnect,
     sessionRestartSignal,
     stopClientAudio,
+    updateRealSpeechInput,
   ]);
 
   const wake = useCallback(() => {
@@ -382,11 +439,8 @@ function MainApp() {
     if (!actions.sessionId) return false;
     cancelSpeech();
     assistantAudioPlayer.reset();
-    assistantAudioDoneRef.current = false;
-    responseAudioTurnInProgressRef.current = false;
-    window.clearTimeout(responseAudioDoneTimeoutRef.current);
-    voiceResponsePendingRef.current = false;
-    setVoiceResponsePending(false);
+    clearResponseTracking();
+    updateRealSpeechInput({ type: "cancel" });
     const sent = wsClient.send(
       createEvent("client.wake.detected", actions.sessionId, { wake_word: actions.wakeWord }),
     );
@@ -397,7 +451,7 @@ function MainApp() {
     actions.markWake();
     actions.addMessage("system", `已听到唤醒词：${actions.wakeWord}`);
     return true;
-  }, []);
+  }, [clearResponseTracking, updateRealSpeechInput]);
 
   const wakeAndListen = useCallback(() => {
     listenModeRef.current = "keyword";
@@ -437,12 +491,8 @@ function MainApp() {
     if (!actions.sessionId) return;
     cancelSpeech();
     assistantAudioPlayer.reset();
-    audioTurnActiveRef.current = false;
-    assistantAudioDoneRef.current = false;
-    responseAudioTurnInProgressRef.current = false;
-    window.clearTimeout(responseAudioDoneTimeoutRef.current);
-    voiceResponsePendingRef.current = false;
-    setVoiceResponsePending(false);
+    clearResponseTracking();
+    updateRealSpeechInput({ type: "cancel" });
     setConversationActive(Boolean(options.keepConversation));
     if (!options.keepConversation) {
       listenModeRef.current = "keyword";
@@ -455,7 +505,7 @@ function MainApp() {
       actions.addMessage("user", text);
     }
     wsClient.send(createEvent("client.user.text", actions.sessionId, { text, proactive: Boolean(options.proactive) }));
-  }, [setConversationActive]);
+  }, [clearResponseTracking, setConversationActive, updateRealSpeechInput]);
 
   useEffect(() => {
     return window.modvii?.pet.onProactiveAccepted?.((payload) => {
@@ -518,10 +568,16 @@ function MainApp() {
 
   const sendAudioChunk = useCallback((payload: AudioChunkPayload) => {
     const actions = useAppStore.getState();
+    if (payload.is_final) {
+      updateRealSpeechInput({ type: "audio_final" });
+    } else if (payload.data_base64) {
+      updateRealSpeechInput({ type: "audio_chunk", isFinal: false, hasAudio: true });
+    }
     if (!actions.sessionId) return false;
     if (!payload.is_final && !audioTurnActiveRef.current) {
       cancelSpeech();
       assistantAudioPlayer.reset();
+      clearResponseTracking();
       actions.setUserSpeechDraft("");
       audioTurnActiveRef.current = true;
     }
@@ -534,9 +590,29 @@ function MainApp() {
       responseAudioTurnInProgressRef.current = false;
       window.clearTimeout(responseAudioDoneTimeoutRef.current);
       markResponseStarted();
+      startResponseTotalWatchdog();
     }
     return sent;
-  }, [markResponseStarted]);
+  }, [clearResponseTracking, markResponseStarted, startResponseTotalWatchdog, updateRealSpeechInput]);
+
+  const handleSpeechInputStateChange = useCallback(
+    (active: boolean, reason: string) => {
+      if (active) {
+        updateRealSpeechInput({ type: "speech_start" });
+        return;
+      }
+      if (reason === "audio_final") {
+        updateRealSpeechInput({ type: "audio_final" });
+      } else if (reason === "error") {
+        updateRealSpeechInput({ type: "error" });
+      } else if (reason === "cancel") {
+        updateRealSpeechInput({ type: "cancel" });
+      } else {
+        updateRealSpeechInput({ type: "stop" });
+      }
+    },
+    [updateRealSpeechInput],
+  );
 
   useEffect(() => {
     return () => {
@@ -544,6 +620,7 @@ function MainApp() {
       window.clearTimeout(reconnectTimerRef.current);
       window.clearTimeout(proactiveTimerRef.current);
       window.clearTimeout(responseAudioDoneTimeoutRef.current);
+      window.clearTimeout(responseTotalWatchdogRef.current);
     };
   }, []);
 
@@ -551,12 +628,13 @@ function MainApp() {
     store.setLastFrameInfo(`${frame.width}x${frame.height} / ${frame.capture_reason}`);
   }
 
-  const mediaUploadSuspended =
-    conversationMode ||
-    liveAudioActive ||
-    voiceResponsePending ||
-    store.status === "thinking" ||
-    store.status === "speaking";
+  const mediaUploadSuspended = shouldSuspendVisualAutoUpload({
+    realSpeechInputActive,
+    conversationMode,
+    liveAudioActive,
+    voiceResponsePending,
+    status: store.status,
+  });
 
   return (
     <main className="app-shell">
@@ -610,6 +688,7 @@ function MainApp() {
             onUserText={sendUserText}
             onAudioChunk={sendAudioChunk}
             onLiveStateChange={setLiveAudioActive}
+            onSpeechInputStateChange={handleSpeechInputStateChange}
             stopSignal={audioStopSignal}
           />
           <CostPanel />

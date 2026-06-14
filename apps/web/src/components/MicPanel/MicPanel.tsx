@@ -26,6 +26,7 @@ interface MicPanelProps {
   onUserText: (text: string, options?: { keepConversation?: boolean }) => void;
   onAudioChunk: (payload: AudioChunkPayload) => boolean;
   onLiveStateChange?: (active: boolean) => void;
+  onSpeechInputStateChange?: (active: boolean, reason: string) => void;
   stopSignal: number;
 }
 
@@ -56,6 +57,7 @@ export function MicPanel({
   onUserText,
   onAudioChunk,
   onLiveStateChange,
+  onSpeechInputStateChange,
   stopSignal,
 }: MicPanelProps) {
   const [micState, setMicState] = useState("未授权");
@@ -73,6 +75,7 @@ export function MicPanel({
   const startLiveAudioRef = useRef<() => Promise<void>>(async () => undefined);
   const startWakeRecognitionRef = useRef<() => void>(() => undefined);
   const audioSentRef = useRef(false);
+  const speechInputActiveRef = useRef(false);
   const traceIdRef = useRef("");
   const startingRef = useRef(false);
   const recognitionWantedRef = useRef(false);
@@ -110,6 +113,15 @@ export function MicPanel({
       ? "开始实时语音"
       : realtimeUnavailableReason;
 
+  const setSpeechInputActive = useCallback(
+    (active: boolean, reason: string) => {
+      if (speechInputActiveRef.current === active) return;
+      speechInputActiveRef.current = active;
+      onSpeechInputStateChange?.(active, reason);
+    },
+    [onSpeechInputStateChange],
+  );
+
   const stopMic = useCallback(() => {
     tenVadRecorderRef.current?.stop();
     tenVadRecorderRef.current = null;
@@ -122,6 +134,7 @@ export function MicPanel({
     recorderRef.current = null;
     audioGateRef.current = null;
     audioSentRef.current = false;
+    setSpeechInputActive(false, "stop");
     setLiveStreaming(false);
     cancelAnimationFrame(rafRef.current);
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -129,7 +142,7 @@ export function MicPanel({
     void audioContextRef.current?.close();
     audioContextRef.current = null;
     setLevel(0);
-  }, []);
+  }, [setSpeechInputActive]);
 
   function stopWakeRecognition() {
     recognitionWantedRef.current = false;
@@ -207,7 +220,10 @@ export function MicPanel({
   );
 
   const sendAudioChunk = useCallback((buffer: ArrayBuffer, isFinal: boolean, metadata: Record<string, unknown> = {}) => {
-    if (!sessionId) return false;
+    if (!sessionId) {
+      setSpeechInputActive(false, isFinal ? "audio_final" : "error");
+      return false;
+    }
     const payload: AudioChunkPayload = {
       chunk_id: createId("aud"),
       mime: `audio/pcm;rate=${LIVE_INPUT_SAMPLE_RATE}`,
@@ -218,8 +234,17 @@ export function MicPanel({
       is_final: isFinal,
       metadata: audioMetadata(metadata),
     };
-    return onAudioChunk(payload);
-  }, [audioMetadata, onAudioChunk, sessionId]);
+    if (!isFinal && buffer.byteLength > 0) {
+      setSpeechInputActive(true, "audio_chunk");
+    }
+    const sent = onAudioChunk(payload);
+    if (isFinal) {
+      setSpeechInputActive(false, "audio_final");
+    } else if (!sent) {
+      setSpeechInputActive(false, "error");
+    }
+    return sent;
+  }, [audioMetadata, onAudioChunk, sessionId, setSpeechInputActive]);
 
   const sendAudioTurn = useCallback((buffer: ArrayBuffer) => {
     let sentAudio = false;
@@ -257,6 +282,7 @@ export function MicPanel({
       audioGateRef.current?.reset();
       audioGateRef.current = null;
       startingRef.current = false;
+      setSpeechInputActive(false, "stop");
       setLiveStreaming(false);
       const shouldSendFinal = sendFinal && (hadRecorder || hadTenVad || hadSileroVad) && audioSentRef.current;
       if (shouldSendFinal) {
@@ -269,7 +295,7 @@ export function MicPanel({
         setMicState("ready");
       }
     },
-    [sendAudioChunk],
+    [sendAudioChunk, setSpeechInputActive],
   );
 
   async function startLiveAudio() {
@@ -308,6 +334,7 @@ export function MicPanel({
         streamChunks: voiceSettings.sendMode === "streaming_chunks",
         onSpeechStart: () => {
           traceIdRef.current = createId("turn");
+          setSpeechInputActive(true, "speech_start");
           setMicState("TEN VAD: 检测到语音");
           console.warn(`MODVII mic TEN VAD speech start ${JSON.stringify({
             traceId: traceIdRef.current,
@@ -320,6 +347,7 @@ export function MicPanel({
           for (const chunk of splitPcm16Buffer(pcm)) {
             const sent = sendAudioChunk(chunk, false, { source: "ten_vad_stream" });
             if (!sent) {
+              setSpeechInputActive(false, "error");
               setMicState("WebSocket 未连接");
               return;
             }
@@ -358,14 +386,17 @@ export function MicPanel({
           window.setTimeout(() => stopLiveAudio(false), 0);
         },
         onVADMisfire: (stats) => {
+          setSpeechInputActive(false, "cancel");
           setMicState("等待语音");
           console.warn(`MODVII mic TEN VAD misfire ${JSON.stringify(stats)}`);
         },
         onNoSpeechTimeout: () => {
+          setSpeechInputActive(false, "cancel");
           stopLiveAudio(false);
           setMicState("未检测到语音");
         },
         onError: (error) => {
+          setSpeechInputActive(false, "error");
           setMicState(error.message);
           console.warn("MODVII mic TEN VAD error", error);
         },
@@ -402,10 +433,12 @@ export function MicPanel({
         pauseStream: async () => undefined,
         resumeStream: async () => stream,
         onSpeechStart: () => {
+          setSpeechInputActive(true, "speech_start");
           setMicState("检测到语音");
           console.warn("MODVII mic Silero speech start");
         },
         onSpeechRealStart: () => {
+          setSpeechInputActive(true, "speech_start");
           setMicState("live streaming");
         },
         onSpeechEnd: (audio) => {
@@ -427,6 +460,7 @@ export function MicPanel({
           window.setTimeout(() => stopLiveAudio(false), 0);
         },
         onVADMisfire: () => {
+          setSpeechInputActive(false, "cancel");
           setMicState("等待语音");
           console.warn("MODVII mic Silero VAD misfire");
         },
@@ -504,7 +538,10 @@ export function MicPanel({
           }
         }
       },
-      onError: (error) => setMicState(error.message),
+      onError: (error) => {
+        setSpeechInputActive(false, "error");
+        setMicState(error.message);
+      },
     });
     recorderRef.current = recorder;
     try {

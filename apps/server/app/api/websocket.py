@@ -71,6 +71,7 @@ class VisualRuntimeState:
     def __init__(self) -> None:
         self.pending: dict[str, VisualFrameJob] = {}
         self.active_tasks: set[asyncio.Task[None]] = set()
+        self.deferred_summaries: list[dict[str, Any]] = []
         self.latest_sequence: int = 0
         self.latest_sequence_by_source: dict[str, int] = {}
         self.applied_sequence: int = 0
@@ -176,6 +177,7 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
                     send_lock,
                     response_task,
                 )
+                await _flush_deferred_visual_summaries(websocket, session, visual_runtime, send_lock)
             except WebSocketDisconnect:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -398,31 +400,6 @@ async def _handle_event(
     if event.type == "client.media.frame":
         frame = FramePayload.model_validate(event.payload)
         _record_visual_frame_candidate(session, frame.frame_id)
-        if _should_defer_visual_frame(session, audio_runtime):
-            dropped_count = 1 + len(visual_runtime.pending)
-            session.cost_meter.voice_priority_deferred_frames += dropped_count
-            _record_saved_vision_call(
-                session,
-                settings,
-                prompt=str(event.payload.get("prompt") or session.last_user_text or "请描述画面。"),
-                output_text=session.last_visual_summary,
-                count=dropped_count,
-            )
-            visual_runtime.pending.clear()
-            await _send(
-                websocket,
-                make_event(
-                    "debug.log",
-                    session.session_id,
-                    {
-                        "message": "Visual frame skipped while a voice response is in progress.",
-                        "status": session.status,
-                    },
-                ),
-                send_lock,
-            )
-            await _send_cost(websocket, session, send_lock)
-            return response_task
         if _visual_provider_cooling_down(visual_runtime):
             dropped_count = 1 + len(visual_runtime.pending)
             session.cost_meter.visual_cooldown_drops += dropped_count
@@ -484,7 +461,7 @@ async def _handle_event(
         return response_task
 
     if event.type == "client.media.audio_chunk":
-        _cancel_visual_runtime(visual_runtime)
+        _clear_pending_visual_runtime(visual_runtime)
         payload = AudioChunkPayload.model_validate(event.payload)
         try:
             audio_bytes = audio.decode_audio_chunk(payload)
@@ -506,6 +483,7 @@ async def _handle_event(
                 started,
                 send_lock,
                 response_task,
+                visual_runtime,
             )
 
         audio_runtime.buffer.extend(audio_bytes)
@@ -552,6 +530,7 @@ async def _handle_event(
                     payload,
                     started,
                     send_lock,
+                    visual_runtime,
                 )
             )
             task.add_done_callback(_log_task_exception)
@@ -602,11 +581,12 @@ async def _handle_event(
             started,
             send_lock,
             None,
+            visual_runtime,
         )
 
     if event.type in {"client.user.text", "client.user.speech.final"}:
         await _close_audio_runtime(audio_runtime)
-        _cancel_visual_runtime(visual_runtime)
+        _clear_pending_visual_runtime(visual_runtime)
         user_text = str(event.payload.get("text", "")).strip()
         return await _handle_user_text(
             websocket,
@@ -619,6 +599,7 @@ async def _handle_event(
             started,
             send_lock,
             response_task,
+            visual_runtime,
         )
 
     await _send_error(websocket, session.session_id, "unsupported_event", event.type, send_lock)
@@ -638,6 +619,7 @@ async def _handle_realtime_audio_chunk(
     started: float,
     send_lock: asyncio.Lock,
     response_task: asyncio.Task[None] | None,
+    visual_runtime: VisualRuntimeState | None = None,
 ) -> asyncio.Task[None] | None:
     if not _is_realtime_pcm(payload, settings):
         await _close_audio_runtime(audio_runtime)
@@ -737,6 +719,7 @@ async def _handle_realtime_audio_chunk(
                         settings,
                         audio_runtime,
                         send_lock,
+                        visual_runtime,
                     )
                 )
                 audio_runtime.receive_task.add_done_callback(_log_task_exception)
@@ -760,6 +743,7 @@ async def _handle_user_text(
     started: float,
     send_lock: asyncio.Lock,
     response_task: asyncio.Task[None] | None,
+    visual_runtime: VisualRuntimeState | None = None,
 ) -> asyncio.Task[None] | None:
     if not user_text:
         await _send_error(websocket, session.session_id, "empty_text", "User text is empty.", send_lock)
@@ -779,6 +763,7 @@ async def _handle_user_text(
                 user_text,
                 started,
                 send_lock,
+                visual_runtime,
             )
         )
         task.add_done_callback(_log_task_exception)
@@ -826,6 +811,7 @@ async def _handle_user_text(
             user_text,
             started,
             send_lock,
+            visual_runtime,
         )
     )
     task.add_done_callback(_log_task_exception)
@@ -842,6 +828,7 @@ async def _run_dialogue_response(
     user_text: str,
     started: float,
     send_lock: asyncio.Lock,
+    visual_runtime: VisualRuntimeState | None = None,
 ) -> None:
     tts_queue: asyncio.Queue[tuple[str, str] | None] | None = None
     tts_task: asyncio.Task[None] | None = None
@@ -980,12 +967,15 @@ async def _run_dialogue_response(
             if audio_requested:
                 await send_dialogue_audio_done(error=tts_error)
         session.response_in_progress = False
+        session.status = "listening"
         session.cost_meter.last_latency_ms = int((time.perf_counter() - started) * 1000)
         await _send(
             websocket,
             make_event("server.session.state", session.session_id, _session_payload(session, settings)),
             send_lock,
         )
+        if visual_runtime is not None:
+            await _flush_deferred_visual_summaries(websocket, session, visual_runtime, send_lock)
         await _send_cost(websocket, session, send_lock)
     except asyncio.CancelledError:
         if tts_task and not tts_task.done():
@@ -1011,6 +1001,8 @@ async def _run_dialogue_response(
             make_event("server.session.state", session.session_id, _session_payload(session, settings)),
             send_lock,
         )
+        if visual_runtime is not None:
+            await _flush_deferred_visual_summaries(websocket, session, visual_runtime, send_lock)
         await _send_cost(websocket, session, send_lock)
 
 
@@ -1023,6 +1015,7 @@ async def _run_realtime_stream_receiver(
     settings: Settings,
     audio_runtime: AudioRuntimeState,
     send_lock: asyncio.Lock,
+    visual_runtime: VisualRuntimeState | None = None,
 ) -> None:
     stream = audio_runtime.stream
     if stream is None:
@@ -1123,6 +1116,7 @@ async def _run_realtime_stream_receiver(
                 input_text,
                 started,
                 send_lock,
+                visual_runtime,
             )
             return
         fallback_audio_attempted = False
@@ -1186,6 +1180,8 @@ async def _run_realtime_stream_receiver(
             make_event("server.session.state", session.session_id, _session_payload(session, settings)),
             send_lock,
         )
+        if visual_runtime is not None:
+            await _flush_deferred_visual_summaries(websocket, session, visual_runtime, send_lock)
         await _send_cost(websocket, session, send_lock)
     except asyncio.CancelledError:
         session.response_in_progress = False
@@ -1208,11 +1204,14 @@ async def _run_realtime_stream_receiver(
             exc,
             started,
             send_lock,
+            visual_runtime,
         )
         if not recovered:
             session.response_in_progress = False
             session.status = "listening"
             await _send_error(websocket, session.session_id, "realtime_stream_failed", str(exc), send_lock)
+            if visual_runtime is not None:
+                await _flush_deferred_visual_summaries(websocket, session, visual_runtime, send_lock)
             await _send_cost(websocket, session, send_lock)
     finally:
         if audio_runtime.stream is stream:
@@ -1240,6 +1239,7 @@ async def _recover_realtime_stream_failure(
     original_exc: Exception,
     started: float,
     send_lock: asyncio.Lock,
+    visual_runtime: VisualRuntimeState | None = None,
 ) -> bool:
     transcript = input_text.strip()
     if transcript:
@@ -1264,6 +1264,7 @@ async def _recover_realtime_stream_failure(
             transcript,
             started,
             send_lock,
+            visual_runtime,
         )
         return True
 
@@ -1278,6 +1279,7 @@ async def _recover_realtime_stream_failure(
             send_lock,
             "我这边听到实时语音通道断开了，但没有收到可识别的音频。请再说一次。",
             original_exc,
+            visual_runtime,
         )
         return True
 
@@ -1306,6 +1308,7 @@ async def _recover_realtime_stream_failure(
             send_lock,
             "我听到你说话了，但备用识别超时了。请再说一次，或者先用文本输入。",
             exc,
+            visual_runtime,
         )
         return True
     except Exception as exc:  # noqa: BLE001
@@ -1320,6 +1323,7 @@ async def _recover_realtime_stream_failure(
             send_lock,
             "我听到你说话了，但实时通道和备用识别都没有返回结果。请再说一次，或者先用文本输入。",
             exc,
+            visual_runtime,
         )
         return True
 
@@ -1335,6 +1339,7 @@ async def _recover_realtime_stream_failure(
             send_lock,
             "我听到你说话了，但这次没有识别出清楚内容。请离麦克风近一点再说一次。",
             original_exc,
+            visual_runtime,
         )
         return True
 
@@ -1363,6 +1368,7 @@ async def _recover_realtime_stream_failure(
         transcript,
         started,
         send_lock,
+        visual_runtime,
     )
     return True
 
@@ -1377,6 +1383,7 @@ async def _run_recovered_dialogue_response(
     user_text: str,
     started: float,
     send_lock: asyncio.Lock,
+    visual_runtime: VisualRuntimeState | None = None,
 ) -> None:
     try:
         await _run_dialogue_response(
@@ -1389,6 +1396,7 @@ async def _run_recovered_dialogue_response(
             user_text,
             started,
             send_lock,
+            visual_runtime,
         )
     except asyncio.CancelledError:
         raise
@@ -1404,6 +1412,7 @@ async def _run_recovered_dialogue_response(
             send_lock,
             "我识别到了你的话，但生成回复时失败了。请稍后再试，或者先切换到文本输入。",
             exc,
+            visual_runtime,
         )
 
 
@@ -1417,6 +1426,7 @@ async def _send_realtime_failure_notice(
     send_lock: asyncio.Lock,
     message: str,
     exc: Exception,
+    visual_runtime: VisualRuntimeState | None = None,
 ) -> None:
     session.response_in_progress = False
     session.status = "listening"
@@ -1475,6 +1485,8 @@ async def _send_realtime_failure_notice(
         make_event("server.session.state", session.session_id, _session_payload(session, settings)),
         send_lock,
     )
+    if visual_runtime is not None:
+        await _flush_deferred_visual_summaries(websocket, session, visual_runtime, send_lock)
     await _send_cost(websocket, session, send_lock)
 
 
@@ -1513,6 +1525,10 @@ def _should_defer_visual_frame(session: SessionState, audio_runtime: AudioRuntim
     )
 
 
+def _session_busy_for_visual(session: SessionState) -> bool:
+    return session.response_in_progress or session.status in {"thinking", "speaking"}
+
+
 def _visual_source_key(capture_reason: str) -> str:
     if capture_reason.startswith("screen_") or capture_reason == "scene_changed":
         return "screen"
@@ -1547,6 +1563,80 @@ def _record_client_visual_metric(session: SessionState, payload: Any, settings: 
         _record_visual_frame_candidate(session, frame_id)
         session.cost_meter.sleep_blocked_frames += 1
         _record_saved_vision_call(session, settings, output_text=session.last_visual_summary)
+
+
+def _visual_trace(job: VisualFrameJob, *, state: str, from_cache: bool | None = None) -> dict[str, Any]:
+    trace: dict[str, Any] = {
+        "frame_id": job.frame.frame_id,
+        "source": job.source,
+        "sequence": job.sequence,
+        "capture_reason": job.frame.capture_reason,
+        "state": state,
+    }
+    if from_cache is not None:
+        trace["from_cache"] = from_cache
+    return trace
+
+
+def _vision_summary_payload(job: VisualFrameJob, result: Any, *, from_cache: bool, deferred: bool) -> dict[str, Any]:
+    return {
+        "summary_id": f"vis_{int(time.time() * 1000)}",
+        "frame_id": job.frame.frame_id,
+        "summary": result.summary,
+        "objects": [obj.model_dump() for obj in result.objects],
+        "ocr_text": result.ocr_text,
+        "confidence": result.confidence,
+        "need_focus": _vision_result_needs_focus(result),
+        "focus_reason": getattr(result, "focus_reason", None),
+        "from_cache": from_cache,
+        "deferred": deferred,
+        "trace": _visual_trace(job, state="deferred" if deferred else "sent", from_cache=from_cache),
+    }
+
+
+def _vision_need_focus_payload(job: VisualFrameJob, result: Any, focus_reason: str) -> dict[str, Any]:
+    return {
+        "reason": focus_reason,
+        "frame_id": job.frame.frame_id,
+        "confidence": getattr(result, "confidence", 0.0),
+        "summary": result.summary,
+        "objects": [obj.model_dump() for obj in result.objects],
+        "ocr_text": result.ocr_text,
+        "trace": _visual_trace(job, state="need_focus"),
+    }
+
+
+def _defer_visual_summary(visual_runtime: VisualRuntimeState, payload: dict[str, Any]) -> None:
+    visual_runtime.deferred_summaries.append(payload)
+    del visual_runtime.deferred_summaries[:-4]
+
+
+async def _flush_deferred_visual_summaries(
+    websocket: WebSocket,
+    session: SessionState,
+    visual_runtime: VisualRuntimeState,
+    send_lock: asyncio.Lock,
+) -> None:
+    if not visual_runtime.deferred_summaries or _session_busy_for_visual(session):
+        return
+    summaries = list(visual_runtime.deferred_summaries)
+    visual_runtime.deferred_summaries.clear()
+    for payload in summaries:
+        trace = dict(payload.get("trace") or {})
+        trace["state"] = "flushed"
+        await _send(
+            websocket,
+            make_event(
+                "vision.summary",
+                session.session_id,
+                {
+                    **payload,
+                    "deferred": True,
+                    "trace": trace,
+                },
+            ),
+            send_lock,
+        )
 
 
 def _record_saved_vision_call(
@@ -1598,8 +1688,6 @@ def _start_visual_tasks(
     visual_runtime: VisualRuntimeState,
     send_lock: asyncio.Lock,
 ) -> None:
-    if _should_defer_visual_frame(session, audio_runtime):
-        return
     if _visual_provider_cooling_down(visual_runtime):
         dropped = len(visual_runtime.pending)
         visual_runtime.dropped_pending_frames += dropped
@@ -1655,6 +1743,7 @@ async def _run_visual_frame_analysis(
                         "cooldown_seconds": round(cooldown_seconds, 1),
                         "failure_count": visual_runtime.provider_failure_count,
                         "detail": str(result.raw.get("error", ""))[:240],
+                        "trace": _visual_trace(job, state="provider_failed", from_cache=from_cache),
                     },
                 ),
                 send_lock,
@@ -1684,6 +1773,7 @@ async def _run_visual_frame_analysis(
                         "latest_sequence": latest_for_source,
                         "applied_sequence": visual_runtime.applied_sequence,
                         "age_seconds": round(result_age, 3),
+                        "trace": _visual_trace(job, state="stale_discarded", from_cache=from_cache),
                     },
                 ),
                 send_lock,
@@ -1706,19 +1796,16 @@ async def _run_visual_frame_analysis(
                 make_event(
                     "vision.need_focus",
                     session.session_id,
-                    {
-                        "reason": focus_reason,
-                        "frame_id": frame.frame_id,
-                        "confidence": getattr(result, "confidence", 0.0),
-                        "summary": result.summary,
-                        "objects": [obj.model_dump() for obj in result.objects],
-                        "ocr_text": result.ocr_text,
-                    },
+                    _vision_need_focus_payload(job, result, focus_reason),
                 ),
                 send_lock,
             )
         if _should_defer_visual_frame(session, audio_runtime):
             session.cost_meter.voice_priority_deferred_frames += 1
+            _defer_visual_summary(
+                visual_runtime,
+                _vision_summary_payload(job, result, from_cache=from_cache, deferred=True),
+            )
             await _send(
                 websocket,
                 make_event(
@@ -1728,6 +1815,7 @@ async def _run_visual_frame_analysis(
                         "message": "Visual summary retained but UI update deferred because voice is active.",
                         "frame_id": frame.frame_id,
                         "status": session.status,
+                        "trace": _visual_trace(job, state="retained_deferred", from_cache=from_cache),
                     },
                 ),
                 send_lock,
@@ -1740,17 +1828,7 @@ async def _run_visual_frame_analysis(
             make_event(
                 "vision.summary",
                 session.session_id,
-                {
-                    "summary_id": f"vis_{int(time.time() * 1000)}",
-                    "frame_id": frame.frame_id,
-                    "summary": result.summary,
-                    "objects": [obj.model_dump() for obj in result.objects],
-                    "ocr_text": result.ocr_text,
-                    "confidence": result.confidence,
-                    "need_focus": _vision_result_needs_focus(result),
-                    "focus_reason": getattr(result, "focus_reason", None),
-                    "from_cache": from_cache,
-                },
+                _vision_summary_payload(job, result, from_cache=from_cache, deferred=False),
             ),
             send_lock,
         )
@@ -1811,6 +1889,16 @@ def _cancel_visual_runtime(visual_runtime: VisualRuntimeState) -> None:
             task.cancel()
 
 
+def _clear_pending_visual_runtime(visual_runtime: VisualRuntimeState) -> int:
+    dropped_sources = set(visual_runtime.pending)
+    dropped = len(dropped_sources)
+    visual_runtime.pending.clear()
+    for source in dropped_sources:
+        visual_runtime.latest_sequence_by_source[source] = visual_runtime.applied_sequence
+    visual_runtime.dropped_pending_frames += dropped
+    return dropped
+
+
 async def _run_realtime_audio_response(
     websocket: WebSocket,
     session: SessionState,
@@ -1821,6 +1909,7 @@ async def _run_realtime_audio_response(
     payload: AudioChunkPayload,
     started: float,
     send_lock: asyncio.Lock,
+    visual_runtime: VisualRuntimeState | None = None,
 ) -> None:
     try:
         session.status = "thinking"
@@ -1906,12 +1995,15 @@ async def _run_realtime_audio_response(
             send_lock,
         )
         session.response_in_progress = False
+        session.status = "listening"
         session.cost_meter.last_latency_ms = int((time.perf_counter() - started) * 1000)
         await _send(
             websocket,
             make_event("server.session.state", session.session_id, _session_payload(session, settings)),
             send_lock,
         )
+        if visual_runtime is not None:
+            await _flush_deferred_visual_summaries(websocket, session, visual_runtime, send_lock)
         await _send_cost(websocket, session, send_lock)
     except asyncio.CancelledError:
         session.response_in_progress = False
@@ -1922,6 +2014,8 @@ async def _run_realtime_audio_response(
         session.response_in_progress = False
         session.status = "listening"
         await _send_error(websocket, session.session_id, "realtime_failed", str(exc), send_lock)
+        if visual_runtime is not None:
+            await _flush_deferred_visual_summaries(websocket, session, visual_runtime, send_lock)
         await _send_cost(websocket, session, send_lock)
 
 

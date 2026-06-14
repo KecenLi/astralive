@@ -1,4 +1,4 @@
-param(
+﻿param(
     [int]$DurationMinutes = 20,
     [int]$MaxRounds = 0,
     [int]$Port = 0,
@@ -9,9 +9,15 @@ param(
     [string]$TtsProvider = "vertex_ai",
     [string]$RealtimeProvider = "vertex_ai",
     [string]$FakeMicWav = "",
+    [string]$SpeechSourceWav = "",
+    [string[]]$NoiseProfiles = @(),
     [switch]$GenerateTtsCorpus,
     [switch]$AllowSyntheticTone,
-    [string]$TtsText = "MODVII real API soak test. Please confirm you heard this voice input with one brief sentence.",
+    [string]$WakeWord = "小七",
+    [string]$RequestText = "请简短介绍一下你现在能做什么。",
+    [string]$TtsText = "",
+    [double]$LeadNoiseSeconds = 1.0,
+    [double]$TailNoiseSeconds = 1.8,
     [string]$ScreenFrameJpeg = "",
     [switch]$DisableScreenFrames,
     [int]$ChunkMillis = 100,
@@ -38,6 +44,15 @@ if (-not $ReportPath) {
 }
 if (-not $FakeMicWav) {
     $FakeMicWav = Join-Path $CacheDir "modvii-real-realtime-soak.wav"
+}
+if (-not $TtsText) {
+    $TtsText = "$WakeWord，$RequestText"
+}
+if (-not $NoiseProfiles -or $NoiseProfiles.Count -eq 0) {
+    $NoiseProfiles = @("quiet", "low_noise", "white_noise", "fan_low", "keyboard_bursts", "low_voice")
+}
+if (-not $SpeechSourceWav) {
+    $SpeechSourceWav = Join-Path $CacheDir "modvii-real-realtime-soak-speech.wav"
 }
 
 function Get-FreeTcpPort {
@@ -80,6 +95,33 @@ function ConvertTo-PythonLiteral {
         return "False"
     }
     return ($Value | ConvertTo-Json -Compress)
+}
+
+function Resolve-NoiseProfileList {
+    param([string[]]$Profiles)
+
+    $Allowed = @("quiet", "low_noise", "white_noise", "fan_low", "keyboard_bursts", "low_voice")
+    $Requested = @()
+    foreach ($Profile in $Profiles) {
+        foreach ($Part in ($Profile -split ",")) {
+            $Name = $Part.Trim()
+            if (-not $Name) {
+                continue
+            }
+            if ($Name -eq "all") {
+                $Requested += $Allowed
+                continue
+            }
+            if ($Allowed -notcontains $Name) {
+                throw "Unsupported noise profile '$Name'. Supported profiles: $($Allowed -join ', ')"
+            }
+            $Requested += $Name
+        }
+    }
+    if ($Requested.Count -eq 0) {
+        throw "At least one noise profile is required."
+    }
+    return @($Requested | Select-Object -Unique)
 }
 
 function Stop-ProcessTree {
@@ -153,6 +195,7 @@ $ClientScript = Join-Path $env:TEMP "modvii_real_realtime_soak_$([guid]::NewGuid
 $AudioPrep = @'
 import asyncio
 import base64
+import io
 import json
 import math
 import struct
@@ -207,6 +250,26 @@ def write_wav(path: Path, pcm: bytes, sample_rate: int = TARGET_RATE, channels: 
         wav.writeframes(pcm)
 
 
+def decode_wav_bytes(audio_bytes: bytes) -> tuple[bytes, int, int]:
+    with wave.open(io.BytesIO(audio_bytes), "rb") as wav:
+        sample_width = wav.getsampwidth()
+        if sample_width != 2:
+            raise RuntimeError(f"TTS WAV corpus generation requires PCM16 WAV, got sample width {sample_width}.")
+        channels = wav.getnchannels()
+        sample_rate = wav.getframerate()
+        frames = wav.readframes(wav.getnframes())
+    samples = pcm16_samples(frames)
+    if channels > 1:
+        mixed = []
+        for index in range(0, len(samples), channels):
+            frame = samples[index : index + channels]
+            if frame:
+                mixed.append(int(sum(frame) / len(frame)))
+        samples = mixed
+        channels = 1
+    return pack_pcm16(samples), sample_rate, channels
+
+
 def write_synthetic_tone(path: Path) -> dict:
     duration_seconds = 8.0
     samples = []
@@ -255,14 +318,17 @@ async def write_tts_corpus(path: Path) -> dict:
     result = await provider.synthesize(TTSInput(text=TEXT))
     if not result.audio_base64:
         raise RuntimeError("TTS returned no audio data for soak corpus generation.")
-    if result.encoding != "pcm_s16le":
+    source_pcm = base64.b64decode(result.audio_base64)
+    if result.encoding == "wav" or result.mime == "audio/wav" or source_pcm[:4] == b"RIFF":
+        source_pcm, source_rate, source_channels = decode_wav_bytes(source_pcm)
+    elif result.encoding == "pcm_s16le":
+        source_rate = int(result.sample_rate or 24000)
+        source_channels = int(result.channels or 1)
+    else:
         raise RuntimeError(
-            f"TTS corpus generation requires pcm_s16le audio, got {result.encoding}. "
+            f"TTS corpus generation requires pcm_s16le or wav audio, got {result.encoding}. "
             "Provide -FakeMicWav or configure a PCM TTS response format."
         )
-    source_pcm = base64.b64decode(result.audio_base64)
-    source_rate = int(result.sample_rate or 24000)
-    source_channels = int(result.channels or 1)
     if source_channels != 1:
         raise RuntimeError(f"TTS corpus generation requires mono audio, got {source_channels} channels.")
     samples = pcm16_samples(source_pcm)
@@ -302,7 +368,7 @@ async def main() -> None:
 asyncio.run(main())
 '@
 
-$AudioPrep = $AudioPrep.Replace("__OUTPUT_JSON__", ($FakeMicWav | ConvertTo-Json -Compress))
+$AudioPrep = $AudioPrep.Replace("__OUTPUT_JSON__", ($SpeechSourceWav | ConvertTo-Json -Compress))
 $AudioPrep = $AudioPrep.Replace("__TEXT_JSON__", ($TtsText | ConvertTo-Json -Compress))
 $AudioPrep = $AudioPrep.Replace("__GENERATE_TTS_JSON__", (ConvertTo-PythonLiteral $GenerateTtsCorpus.IsPresent))
 $AudioPrep = $AudioPrep.Replace("__ALLOW_SYNTHETIC_TONE_JSON__", (ConvertTo-PythonLiteral $AllowSyntheticTone.IsPresent))
@@ -335,6 +401,49 @@ try {
     Restore-ProcessEnv -Previous $PreviousAudioEnv
 }
 
+$AudioCorpusHelper = Join-Path $PSScriptRoot "modvii_audio_corpus.py"
+if (-not (Test-Path $AudioCorpusHelper)) {
+    throw "MODVII audio corpus helper not found: $AudioCorpusHelper"
+}
+
+$ResolvedNoiseProfiles = Resolve-NoiseProfileList -Profiles $NoiseProfiles
+$AudioFixtures = @()
+foreach ($NoiseProfile in $ResolvedNoiseProfiles) {
+    $ProfileAudioPath = $FakeMicWav
+    if ($ResolvedNoiseProfiles.Count -gt 1) {
+        $ProfileAudioPath = Join-Path $CacheDir "modvii-real-realtime-soak-$NoiseProfile.wav"
+    }
+    $ProfileMetadataPath = [System.IO.Path]::ChangeExtension($ProfileAudioPath, ".json")
+    $CorpusArgs = @(
+        $AudioCorpusHelper,
+        "--output", $ProfileAudioPath,
+        "--profile", $NoiseProfile,
+        "--source-wav", $SpeechSourceWav,
+        "--wake-word", $WakeWord,
+        "--request-text", $RequestText,
+        "--text", $TtsText,
+        "--lead-seconds", ([string]$LeadNoiseSeconds),
+        "--tail-seconds", ([string]$TailNoiseSeconds),
+        "--metadata-output", $ProfileMetadataPath
+    )
+    if ($Python) {
+        Invoke-CmdExecutable -Executable $Python -Arguments $CorpusArgs
+    } else {
+        Push-Location (Join-Path $Root "apps\server")
+        try {
+            Invoke-CmdExecutable -Executable $Uv -Arguments (@("run", "python") + $CorpusArgs)
+        } finally {
+            Pop-Location
+        }
+    }
+    $ProfileMetadata = Get-Content -Path $ProfileMetadataPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $AudioFixtures += [ordered]@{
+        profile = $NoiseProfile
+        path = $ProfileAudioPath
+        metadata = $ProfileMetadata
+    }
+}
+
 if ($Port -le 0) {
     $Port = Get-FreeTcpPort
 }
@@ -361,7 +470,7 @@ import websockets
 
 BASE_URL = __BASE_URL_JSON__
 REPORT_PATH = Path(__REPORT_PATH_JSON__)
-AUDIO_PATH = Path(__AUDIO_PATH_JSON__)
+AUDIO_FIXTURES = __AUDIO_FIXTURES_JSON__
 SCREEN_FRAME_BASE64 = __SCREEN_FRAME_BASE64_JSON__
 SCREEN_FRAME_WIDTH = __SCREEN_FRAME_WIDTH_JSON__
 SCREEN_FRAME_HEIGHT = __SCREEN_FRAME_HEIGHT_JSON__
@@ -476,6 +585,11 @@ def is_429(payload: dict) -> bool:
     )
 
 
+def is_timeout(payload: dict) -> bool:
+    text = json.dumps(payload, ensure_ascii=False).lower()
+    return "timeout" in text or "timed out" in text or "deadline" in text
+
+
 def percentile(values: list[float], percent: float) -> float | None:
     if not values:
         return None
@@ -495,6 +609,8 @@ def summarize_latencies(rounds: list[dict]) -> dict:
     keys = [
         "asr_final",
         "asr_final_after_audio_final",
+        "first_assistant_text_delta_after_audio_final",
+        "first_assistant_audio_chunk_after_audio_final",
         "assistant_text_final",
         "assistant_text_final_after_audio_final",
         "assistant_audio_done",
@@ -528,6 +644,25 @@ def compact_payload(payload: dict) -> dict:
     return compact
 
 
+def compact_cost(payload: dict) -> dict:
+    keys = [
+        "mode",
+        "frame_candidates",
+        "frames_uploaded",
+        "bytes_uploaded",
+        "vision_calls",
+        "llm_calls",
+        "asr_calls",
+        "tts_calls",
+        "estimated_input_tokens",
+        "estimated_output_tokens",
+        "estimated_cost_usd",
+        "estimated_visual_cost_saved_usd",
+        "last_latency_ms",
+    ]
+    return {key: payload.get(key) for key in keys if key in payload}
+
+
 async def wait_health() -> dict:
     started = time.monotonic()
     while time.monotonic() - started < 45:
@@ -541,7 +676,10 @@ async def wait_health() -> dict:
     raise RuntimeError(f"Server health timeout at {BASE_URL}")
 
 
-async def send_audio(websocket, session_id: str, round_index: int, pcm: bytes, round_data: dict) -> None:
+async def send_audio(websocket, session_id: str, round_index: int, fixture: dict, round_data: dict) -> None:
+    pcm = fixture["pcm"]
+    profile = fixture["profile"]
+    fixture_metadata = fixture.get("metadata") or {}
     chunk_bytes = max(2, int(16000 * 2 * CHUNK_MS / 1000))
     chunk_bytes -= chunk_bytes % 2
     for offset in range(0, len(pcm), chunk_bytes):
@@ -553,26 +691,39 @@ async def send_audio(websocket, session_id: str, round_index: int, pcm: bytes, r
         round_data["audio_chunks_sent"] += 1
         round_data["audio_bytes_sent"] += len(chunk)
         await websocket.send(json.dumps(make_event("client.media.audio_chunk", session_id, {
-            "chunk_id": f"real_soak_{round_index}_{offset // chunk_bytes}",
+            "chunk_id": f"real_soak_{round_index}_{profile}_{offset // chunk_bytes}",
             "mime": "audio/pcm;rate=16000",
             "sample_rate": 16000,
             "channels": 1,
             "encoding": "pcm_s16le",
             "data_base64": base64.b64encode(chunk).decode("ascii"),
             "is_final": False,
-            "metadata": {"source": "real_realtime_soak", "round": round_index},
+            "metadata": {
+                "source": "real_realtime_soak",
+                "round": round_index,
+                "noise_profile": profile,
+                "speech_start_ms": fixture_metadata.get("speech_start_ms"),
+                "speech_end_ms": fixture_metadata.get("speech_end_ms"),
+            },
         })))
         await asyncio.sleep(max(0.005, CHUNK_MS / 1000))
     round_data["final_audio_sent_perf"] = time.perf_counter()
     await websocket.send(json.dumps(make_event("client.media.audio_chunk", session_id, {
-        "chunk_id": f"real_soak_{round_index}_final",
+        "chunk_id": f"real_soak_{round_index}_{profile}_final",
         "mime": "audio/pcm;rate=16000",
         "sample_rate": 16000,
         "channels": 1,
         "encoding": "pcm_s16le",
         "data_base64": "",
         "is_final": True,
-        "metadata": {"source": "real_realtime_soak", "round": round_index, "final": True},
+        "metadata": {
+            "source": "real_realtime_soak",
+            "round": round_index,
+            "noise_profile": profile,
+            "speech_start_ms": fixture_metadata.get("speech_start_ms"),
+            "speech_end_ms": fixture_metadata.get("speech_end_ms"),
+            "final": True,
+        },
     })))
 
 
@@ -613,6 +764,32 @@ def record_event(round_data: dict, event: dict, round_started: float) -> None:
         round_data["api_error_codes"][code] = round_data["api_error_codes"].get(code, 0) + 1
         if isinstance(payload, dict) and is_429(payload):
             round_data["rate_limit_429_count"] += 1
+        if isinstance(payload, dict) and is_timeout(payload):
+            round_data["timeout_count"] += 1
+    elif event_type == "cost.update":
+        if isinstance(payload, dict):
+            cost = compact_cost(payload)
+            round_data["cost_updates"].append(cost)
+            round_data["last_cost_update"] = cost
+            if round_data.get("assistant_audio_done") and round_data.get("auto_returned_to_listening"):
+                round_data["final_cost_after_completion"] = True
+    elif event_type == "server.session.state":
+        if isinstance(payload, dict):
+            round_data["last_session_state"] = compact_payload(payload)
+            if payload.get("status") == "listening" and not payload.get("response_in_progress"):
+                round_data["auto_returned_to_listening"] = True
+    elif event_type == "vision.summary":
+        round_data["vision_summary_updates"] += 1
+        if isinstance(payload, dict):
+            round_data["last_vision_summary"] = compact_payload(payload)
+    elif event_type == "assistant.text.delta":
+        if "first_assistant_text_delta_perf" not in round_data:
+            round_data["first_assistant_text_delta_perf"] = time.perf_counter()
+            if "final_audio_sent_perf" in round_data:
+                round_data["latencies_ms"]["first_assistant_text_delta_after_audio_final"] = round(
+                    (round_data["first_assistant_text_delta_perf"] - round_data["final_audio_sent_perf"]) * 1000,
+                    3,
+                )
     elif event_type == "asr.transcript.final":
         round_data["asr_final"] = str(payload.get("text") or "") if isinstance(payload, dict) else ""
         if "first_audio_sent_perf" in round_data:
@@ -651,18 +828,31 @@ def record_event(round_data: dict, event: dict, round_started: float) -> None:
             )
     elif event_type == "assistant.audio.chunk":
         round_data["assistant_audio_chunks"] += 1
+        if "first_assistant_audio_chunk_perf" not in round_data:
+            round_data["first_assistant_audio_chunk_perf"] = time.perf_counter()
+            if "final_audio_sent_perf" in round_data:
+                round_data["latencies_ms"]["first_assistant_audio_chunk_after_audio_final"] = round(
+                    (round_data["first_assistant_audio_chunk_perf"] - round_data["final_audio_sent_perf"]) * 1000,
+                    3,
+                )
 
 
-async def run_round(websocket, session_id: str, round_index: int, pcm: bytes) -> dict:
+async def run_round(websocket, session_id: str, round_index: int, fixture: dict) -> dict:
     started = time.perf_counter()
+    fixture_metadata = fixture.get("metadata") or {}
     round_data = {
         "round": round_index,
+        "noise_profile": fixture["profile"],
+        "audio_path": fixture["path"],
+        "speech_start_ms": fixture_metadata.get("speech_start_ms"),
+        "speech_end_ms": fixture_metadata.get("speech_end_ms"),
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "trace": [],
         "event_counts": {},
         "error_events": [],
         "api_error_codes": {},
         "rate_limit_429_count": 0,
+        "timeout_count": 0,
         "asr_final": "",
         "assistant_text_final": "",
         "assistant_audio_done": None,
@@ -670,14 +860,29 @@ async def run_round(websocket, session_id: str, round_index: int, pcm: bytes) ->
         "audio_chunks_sent": 0,
         "audio_bytes_sent": 0,
         "screen_frames_sent": 0,
+        "vision_summary_updates": 0,
+        "last_vision_summary": None,
+        "auto_returned_to_listening": False,
+        "last_session_state": None,
+        "cost_updates": [],
+        "last_cost_update": None,
+        "final_cost_after_completion": False,
         "latencies_ms": {},
     }
     await websocket.send(json.dumps(make_event("client.debug.ping", session_id, {"source": "real_realtime_soak", "round": round_index})))
-    audio_task = asyncio.create_task(send_audio(websocket, session_id, round_index, pcm, round_data))
+    audio_task = asyncio.create_task(send_audio(websocket, session_id, round_index, fixture, round_data))
     frame_task = asyncio.create_task(send_screen_frames(websocket, session_id, round_index, round_data))
     deadline = time.monotonic() + ROUND_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
-        if audio_task.done() and frame_task.done() and round_data["assistant_audio_done"]:
+        complete = (
+            audio_task.done()
+            and frame_task.done()
+            and round_data["assistant_audio_done"]
+            and round_data["auto_returned_to_listening"]
+            and round_data["final_cost_after_completion"]
+            and (not SCREEN_FRAMES_ENABLED or round_data["vision_summary_updates"] > 0)
+        )
+        if complete:
             break
         try:
             raw = await asyncio.wait_for(websocket.recv(), timeout=0.5)
@@ -692,12 +897,21 @@ async def run_round(websocket, session_id: str, round_index: int, pcm: bytes) ->
     round_data["latencies_ms"]["round_done"] = round((time.perf_counter() - started) * 1000, 3)
     round_data.pop("first_audio_sent_perf", None)
     round_data.pop("final_audio_sent_perf", None)
+    round_data.pop("first_assistant_text_delta_perf", None)
+    round_data.pop("first_assistant_audio_chunk_perf", None)
     if not round_data["asr_final"]:
         round_data["error_events"].append({"code": "missing_asr_final", "detail": "No asr.transcript.final received before round timeout."})
     if not round_data["assistant_text_final"]:
         round_data["error_events"].append({"code": "missing_assistant_text_final", "detail": "No assistant.text.final received before round timeout."})
     if not round_data["assistant_audio_done"]:
         round_data["error_events"].append({"code": "missing_assistant_audio_done", "detail": "No assistant.audio.done received before round timeout."})
+        round_data["timeout_count"] += 1
+    if not round_data["auto_returned_to_listening"]:
+        round_data["error_events"].append({"code": "missing_listening_state", "detail": "No listening server.session.state received before round timeout."})
+        round_data["timeout_count"] += 1
+    if SCREEN_FRAMES_ENABLED and round_data["vision_summary_updates"] <= 0:
+        round_data["error_events"].append({"code": "missing_vision_summary", "detail": "No vision.summary received before round timeout."})
+        round_data["timeout_count"] += 1
     return round_data
 
 
@@ -707,27 +921,52 @@ def summarize(report: dict) -> None:
     api_error_codes = {}
     error_events = []
     rate_limit_429_count = 0
+    timeout_count = 0
+    cost_update_count = 0
+    final_cost_update = None
     for round_data in rounds:
         for key, value in round_data["event_counts"].items():
             event_counts[key] = event_counts.get(key, 0) + value
         for key, value in round_data["api_error_codes"].items():
             api_error_codes[key] = api_error_codes.get(key, 0) + value
         rate_limit_429_count += int(round_data.get("rate_limit_429_count") or 0)
+        timeout_count += int(round_data.get("timeout_count") or 0)
+        cost_update_count += len(round_data.get("cost_updates") or [])
+        if round_data.get("last_cost_update"):
+            final_cost_update = round_data["last_cost_update"]
         for event in round_data["error_events"]:
             error_events.append({"round": round_data["round"], "payload": event})
     report["summary"] = {
         "rounds": len(rounds),
         "failed_rounds": sum(1 for round_data in rounds if round_data["error_events"]),
+        "noise_profiles": sorted({round_data.get("noise_profile") for round_data in rounds if round_data.get("noise_profile")}),
         "event_counts": event_counts,
         "error_events": error_events,
         "api_error_codes": api_error_codes,
         "rate_limit_429_count": rate_limit_429_count,
+        "timeout_count": timeout_count,
+        "auto_returned_to_listening_rounds": sum(1 for round_data in rounds if round_data.get("auto_returned_to_listening")),
+        "vision_summary_updates": sum(int(round_data.get("vision_summary_updates") or 0) for round_data in rounds),
+        "cost_update_count": cost_update_count,
+        "final_cost_update": final_cost_update,
         "latencies_ms": summarize_latencies(rounds),
     }
 
 
 async def main() -> None:
-    pcm, audio_info = read_wav_as_realtime_pcm(AUDIO_PATH)
+    fixtures = []
+    for fixture in AUDIO_FIXTURES:
+        pcm, audio_info = read_wav_as_realtime_pcm(Path(fixture["path"]))
+        metadata = fixture.get("metadata") or {}
+        fixtures.append({
+            "profile": fixture["profile"],
+            "path": fixture["path"],
+            "pcm": pcm,
+            "audio": audio_info,
+            "metadata": metadata,
+        })
+    if not fixtures:
+        raise RuntimeError("No audio fixtures were configured.")
     report = {
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "base_url": BASE_URL,
@@ -737,7 +976,17 @@ async def main() -> None:
         "chunk_ms": CHUNK_MS,
         "round_pause_seconds": ROUND_PAUSE_SECONDS,
         "round_timeout_seconds": ROUND_TIMEOUT_SECONDS,
-        "audio": audio_info,
+        "audio": {
+            "fixtures": [
+                {
+                    "profile": fixture["profile"],
+                    "path": fixture["path"],
+                    "audio": fixture["audio"],
+                    "metadata": fixture["metadata"],
+                }
+                for fixture in fixtures
+            ],
+        },
         "screen": {
             "enabled": SCREEN_FRAMES_ENABLED,
             "mime": "image/jpeg",
@@ -764,7 +1013,8 @@ async def main() -> None:
                 if MAX_ROUNDS and round_index >= MAX_ROUNDS:
                     break
                 round_index += 1
-                round_data = await run_round(websocket, session_id, round_index, pcm)
+                fixture = fixtures[(round_index - 1) % len(fixtures)]
+                round_data = await run_round(websocket, session_id, round_index, fixture)
                 report["rounds"].append(round_data)
                 summarize(report)
                 REPORT_PATH.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -798,7 +1048,8 @@ $Providers = [ordered]@{
 }
 $Client = $Client.Replace("__BASE_URL_JSON__", ("http://127.0.0.1:$Port" | ConvertTo-Json -Compress))
 $Client = $Client.Replace("__REPORT_PATH_JSON__", ($ReportPath | ConvertTo-Json -Compress))
-$Client = $Client.Replace("__AUDIO_PATH_JSON__", ($FakeMicWav | ConvertTo-Json -Compress))
+$AudioFixturesJson = ConvertTo-Json -InputObject @($AudioFixtures) -Depth 12 -Compress
+$Client = $Client.Replace("__AUDIO_FIXTURES_JSON__", $AudioFixturesJson)
 $Client = $Client.Replace("__SCREEN_FRAME_BASE64_JSON__", ($ScreenFrameBase64 | ConvertTo-Json -Compress))
 $Client = $Client.Replace("__SCREEN_FRAME_WIDTH_JSON__", (64 | ConvertTo-Json -Compress))
 $Client = $Client.Replace("__SCREEN_FRAME_HEIGHT_JSON__", (64 | ConvertTo-Json -Compress))

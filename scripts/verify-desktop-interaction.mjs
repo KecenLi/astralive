@@ -25,8 +25,19 @@ const fakeNoiseLevel = Math.max(0, Math.min(0.08, readNumberEnv("MODVII_FAKE_NOI
 const fakeNoiseLeadSeconds = Math.max(0, Math.min(4, readNumberEnv("MODVII_FAKE_NOISE_LEAD_SECONDS", 0.8)));
 const fakeNoiseTailSeconds = Math.max(0.5, Math.min(8, readNumberEnv("MODVII_FAKE_NOISE_TAIL_SECONDS", 2.8)));
 const audioOnly = process.env.MODVII_AUDIO_ONLY === "1";
+const realApi = process.env.MODVII_REAL_API === "1";
 const wakeAutoListenOnly = process.env.MODVII_WAKE_AUTO_LISTEN_ONLY === "1";
 const debugPort = Number(process.env.MODVII_REMOTE_DEBUGGING_PORT || 19323);
+const realNoiseProfile = process.env.MODVII_NOISE_PROFILE || "low_noise";
+const realWakeWord = process.env.MODVII_WAKE_WORD || "小七";
+const realRequestText = process.env.MODVII_REQUEST_TEXT || "请简短介绍一下你现在能做什么。";
+const realProviders = {
+  asr: process.env.MODVII_DESKTOP_ASR_PROVIDER || "local_whisper",
+  vision: process.env.MODVII_DESKTOP_VISION_PROVIDER || "vertex_ai",
+  llm: process.env.MODVII_DESKTOP_LLM_PROVIDER || "vertex_ai",
+  tts: process.env.MODVII_DESKTOP_TTS_PROVIDER || "cosyvoice3",
+  realtime: process.env.MODVII_DESKTOP_REALTIME_PROVIDER || "none",
+};
 const report = {
   exePath,
   debugPort,
@@ -34,6 +45,9 @@ const report = {
   fakeAudioPath,
   fakeAudioSourcePath: testAudioSourcePath || null,
   audioOnly,
+  realApi,
+  realNoiseProfile,
+  realProviders: realApi ? realProviders : null,
   wakeAutoListenOnly,
   startedAt: new Date().toISOString(),
   steps: [],
@@ -43,6 +57,7 @@ const report = {
   live2dScaleChecks: [],
   concurrencyChecks: [],
   audioEvents: [],
+  realApiChecks: [],
   errors: [],
 };
 
@@ -101,6 +116,23 @@ try {
   killExisting();
   const childEnv = { ...process.env };
   delete childEnv.ELECTRON_RUN_AS_NODE;
+  const providerEnv = realApi
+    ? {
+        ASR_PROVIDER: realProviders.asr,
+        VISION_PROVIDER: realProviders.vision,
+        LLM_PROVIDER: realProviders.llm,
+        TTS_PROVIDER: realProviders.tts,
+        REALTIME_PROVIDER: realProviders.realtime,
+        AUDIO_ROUTE: "asr_first",
+        AUDIO_INPUT_SAMPLE_RATE: "16000",
+      }
+    : {
+        ASR_PROVIDER: "mock",
+        VISION_PROVIDER: "mock",
+        LLM_PROVIDER: "mock",
+        TTS_PROVIDER: "mock",
+        REALTIME_PROVIDER: "mock",
+      };
   appProcess = spawn(exePath, [`--remote-debugging-port=${debugPort}`, "--remote-debugging-address=127.0.0.1"], {
     env: {
       ...childEnv,
@@ -108,11 +140,7 @@ try {
       MODVII_USER_DATA_DIR: userDataDir,
       MODVII_FAKE_MEDIA: "1",
       MODVII_FAKE_AUDIO_PATH: fakeAudioPath,
-      ASR_PROVIDER: "mock",
-      VISION_PROVIDER: "mock",
-      LLM_PROVIDER: "mock",
-      TTS_PROVIDER: "mock",
-      REALTIME_PROVIDER: "mock",
+      ...providerEnv,
       WAKE_WORD: "小七",
       APP_NAME: "MODVII",
     },
@@ -140,6 +168,10 @@ try {
   await verifyLive2DReady();
   await screenshot(main, "live2d-ready");
   await verifyLive2DScaling();
+  if (realApi) {
+    await verifyRealApiDesktop(main);
+    return;
+  }
   if (wakeAutoListenOnly) {
     await verifyWakeButtonAutoRealtime(main);
     return;
@@ -316,6 +348,100 @@ async function verifyWakeButtonAutoRealtime(page) {
     fakeAudio: report.fakeAudio,
     body: await bodyExcerpt(page),
   });
+}
+
+async function verifyRealApiDesktop(page) {
+  const capture = await startDesktopWebSocketCapture(page);
+  const check = {
+    providers: realProviders,
+    noiseProfile: realNoiseProfile,
+    speechStartMs: report.fakeAudio?.speech_start_ms ?? report.fakeAudio?.metadata?.speech_start_ms ?? null,
+    speechEndMs: report.fakeAudio?.speech_end_ms ?? report.fakeAudio?.metadata?.speech_end_ms ?? null,
+    startedAt: new Date().toISOString(),
+    errors: [],
+  };
+
+  try {
+    await ensureScreenReady(page);
+    await selectScreenModeContinuous(page);
+    await uploadScreenFrameWithRetry(page);
+    await waitFor(() => capture.receivedTypes["vision.summary"] >= 1, 25_000).catch(() => false);
+
+    await clickByTitle(page, "授权麦克风");
+    await waitForEval(page, `document.querySelector(".mic-panel")?.innerText.includes("ready")`, 20_000);
+    await clickLiveAudio(page);
+    await waitForEval(
+      page,
+      `(() => {
+        const text = document.querySelector(".mic-panel")?.innerText || "";
+        return text.includes("streaming") || text.includes("等待语音") || text.includes("检测到语音");
+      })()`,
+      20_000,
+    );
+
+    await waitFor(
+      () =>
+        capture.sentFinalChunks >= 1 &&
+        capture.receivedTypes["asr.transcript.final"] >= 1 &&
+        capture.receivedTypes["assistant.text.final"] >= 1 &&
+        capture.receivedTypes["assistant.audio.done"] >= 1,
+      140_000,
+    );
+
+    const sentAtDone = capture.sentAudioChunks;
+    await waitFor(async () => {
+      const panel = await page.evaluate(`document.querySelector(".mic-panel")?.innerText || ""`).catch(() => "");
+      return (
+        capture.autoReturnedToListening ||
+        capture.sentAudioChunks > sentAtDone + 1 ||
+        panel.includes("streaming") ||
+        panel.includes("等待语音") ||
+        panel.includes("监听")
+      );
+    }, 25_000).catch(() => false);
+
+    check.finishedAt = new Date().toISOString();
+    check.asrText = capture.asrText;
+    check.assistantText = capture.assistantText;
+    check.sentAudioChunks = capture.sentAudioChunks;
+    check.sentFinalChunks = capture.sentFinalChunks;
+    check.assistantAudioChunks = capture.assistantAudioChunks;
+    check.audioDone = capture.receivedTypes["assistant.audio.done"] || 0;
+    check.autoReturnedToListening = Boolean(capture.autoReturnedToListening || capture.sentAudioChunks > sentAtDone + 1);
+    check.visionSummaryUpdated = (capture.receivedTypes["vision.summary"] || 0) > 0;
+    check.lastVisionSummary = capture.lastVisionSummary;
+    check.costUpdateCount = capture.costUpdates.length;
+    check.finalCostUpdate = capture.costUpdates.at(-1) || null;
+    check.errorCount = capture.errors.length;
+    check.rateLimit429Count = capture.errors.filter((event) => is429Payload(event.payload)).length;
+    check.timeoutCount = capture.errors.filter((event) => isTimeoutPayload(event.payload)).length;
+    check.latenciesMs = capture.latenciesMs();
+    check.sentTypes = capture.sentTypes;
+    check.receivedTypes = capture.receivedTypes;
+    check.micPanel = await page.evaluate(`document.querySelector(".mic-panel")?.innerText || ""`);
+    check.screenPanel = await page.evaluate(`document.querySelector(".screen-panel")?.innerText || ""`);
+
+    if (capture.errors.length > 0) {
+      throw new Error(`Desktop real API emitted ${capture.errors.length} error event(s).`);
+    }
+    if (!check.asrText) throw new Error("Desktop real API did not receive asr.transcript.final text.");
+    if (!check.assistantText) throw new Error("Desktop real API did not receive assistant.text.final text.");
+    if (!check.audioDone) throw new Error("Desktop real API did not receive assistant.audio.done.");
+
+    report.realApiChecks.push(check);
+    await screenshot(page, "desktop-real-api");
+    step("desktop-real-api", "pass", check);
+  } catch (error) {
+    check.finishedAt = new Date().toISOString();
+    check.error = error instanceof Error ? error.message : String(error);
+    check.capture = capture.snapshot();
+    check.micPanel = await page.evaluate(`document.querySelector(".mic-panel")?.innerText || ""`).catch(() => "");
+    check.screenPanel = await page.evaluate(`document.querySelector(".screen-panel")?.innerText || ""`).catch(() => "");
+    report.realApiChecks.push(check);
+    await screenshot(page, "desktop-real-api-failed");
+    step("desktop-real-api", "fail", check);
+    throw error;
+  }
 }
 
 async function verifyDesktopMenu(page) {
@@ -552,11 +678,155 @@ function fetchTargets() {
   });
 }
 
+function parseEventPayload(payloadData) {
+  try {
+    const parsed = JSON.parse(payloadData || "");
+    if (parsed && typeof parsed.type === "string") return parsed;
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function compactCost(payload) {
+  const keys = [
+    "mode",
+    "frame_candidates",
+    "frames_uploaded",
+    "bytes_uploaded",
+    "vision_calls",
+    "llm_calls",
+    "asr_calls",
+    "tts_calls",
+    "estimated_input_tokens",
+    "estimated_output_tokens",
+    "estimated_cost_usd",
+    "estimated_visual_cost_saved_usd",
+    "last_latency_ms",
+  ];
+  const result = {};
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(payload || {}, key)) result[key] = payload[key];
+  }
+  return result;
+}
+
+function is429Payload(payload) {
+  const text = JSON.stringify(payload || {}).toLowerCase();
+  return text.includes("429") || text.includes("resource_exhausted") || text.includes("rate limit") || text.includes("quota");
+}
+
+function isTimeoutPayload(payload) {
+  const text = JSON.stringify(payload || {}).toLowerCase();
+  return text.includes("timeout") || text.includes("timed out") || text.includes("deadline");
+}
+
+async function startDesktopWebSocketCapture(page) {
+  const capture = {
+    startedAt: Date.now(),
+    sentTypes: {},
+    receivedTypes: {},
+    sentAudioChunks: 0,
+    sentFinalChunks: 0,
+    assistantAudioChunks: 0,
+    errors: [],
+    costUpdates: [],
+    asrText: "",
+    assistantText: "",
+    lastVisionSummary: null,
+    autoReturnedToListening: false,
+    marks: {},
+    count(table, type) {
+      table[type] = (table[type] || 0) + 1;
+    },
+    mark(name) {
+      if (!this.marks[name]) this.marks[name] = Date.now();
+    },
+    latenciesMs() {
+      const finalAt = this.marks.finalAudioSentAt;
+      const latency = (mark) => (finalAt && this.marks[mark] ? this.marks[mark] - finalAt : null);
+      return {
+        asr_final_after_audio_final: latency("asrFinalAt"),
+        first_assistant_text_delta_after_audio_final: latency("firstTextDeltaAt"),
+        first_assistant_audio_chunk_after_audio_final: latency("firstAudioChunkAt"),
+        assistant_text_final_after_audio_final: latency("assistantTextFinalAt"),
+        assistant_audio_done_after_audio_final: latency("assistantAudioDoneAt"),
+      };
+    },
+    snapshot() {
+      return {
+        sentTypes: this.sentTypes,
+        receivedTypes: this.receivedTypes,
+        sentAudioChunks: this.sentAudioChunks,
+        sentFinalChunks: this.sentFinalChunks,
+        assistantAudioChunks: this.assistantAudioChunks,
+        asrText: this.asrText,
+        assistantText: this.assistantText,
+        errors: this.errors,
+        costUpdates: this.costUpdates,
+        lastVisionSummary: this.lastVisionSummary,
+        autoReturnedToListening: this.autoReturnedToListening,
+        latenciesMs: this.latenciesMs(),
+      };
+    },
+  };
+
+  page.on("Network.webSocketFrameSent", ({ response }) => {
+    const event = parseEventPayload(response?.payloadData);
+    if (!event) return;
+    capture.count(capture.sentTypes, event.type);
+    if (event.type === "client.media.audio_chunk") {
+      if (event.payload?.is_final) {
+        capture.sentFinalChunks += 1;
+        capture.mark("finalAudioSentAt");
+      } else {
+        capture.sentAudioChunks += 1;
+      }
+    }
+  });
+  page.on("Network.webSocketFrameReceived", ({ response }) => {
+    const event = parseEventPayload(response?.payloadData);
+    if (!event) return;
+    capture.count(capture.receivedTypes, event.type);
+    if (event.type === "error") {
+      capture.errors.push({ ts: Date.now(), payload: event.payload });
+    } else if (event.type === "cost.update") {
+      capture.costUpdates.push(compactCost(event.payload || {}));
+    } else if (event.type === "asr.transcript.final") {
+      capture.asrText = String(event.payload?.text || "");
+      capture.mark("asrFinalAt");
+    } else if (event.type === "assistant.text.delta") {
+      capture.mark("firstTextDeltaAt");
+    } else if (event.type === "assistant.text.final") {
+      capture.assistantText = String(event.payload?.text || "");
+      capture.mark("assistantTextFinalAt");
+    } else if (event.type === "assistant.audio.chunk") {
+      capture.assistantAudioChunks += 1;
+      capture.mark("firstAudioChunkAt");
+    } else if (event.type === "assistant.audio.done") {
+      capture.mark("assistantAudioDoneAt");
+    } else if (event.type === "vision.summary") {
+      capture.lastVisionSummary = {
+        frame_id: event.payload?.frame_id || "",
+        summary: String(event.payload?.summary || "").slice(0, 240),
+        confidence: event.payload?.confidence ?? null,
+      };
+    } else if (event.type === "server.session.state") {
+      if (event.payload?.status === "listening" && !event.payload?.response_in_progress) {
+        capture.autoReturnedToListening = true;
+      }
+    }
+  });
+  await page.send("Network.enable");
+  return capture;
+}
+
 class CdpPage {
   constructor(socket) {
     this.socket = socket;
     this.nextId = 1;
     this.pending = new Map();
+    this.handlers = new Map();
   }
 
   static connect(wsUrl) {
@@ -570,6 +840,12 @@ class CdpPage {
   async enable() {
     await this.send("Page.enable");
     await this.send("Runtime.enable");
+  }
+
+  on(method, handler) {
+    const handlers = this.handlers.get(method) || [];
+    handlers.push(handler);
+    this.handlers.set(method, handlers);
   }
 
   send(method, params = {}, timeoutMs = 30_000) {
@@ -604,7 +880,11 @@ class CdpPage {
 
   handleMessage(raw) {
     const message = JSON.parse(raw);
-    if (!message.id) return;
+    if (!message.id) {
+      const handlers = this.handlers.get(message.method) || [];
+      for (const handler of handlers) handler(message.params || {});
+      return;
+    }
     const pending = this.pending.get(message.id);
     if (!pending) return;
     clearTimeout(pending.timeout);
@@ -958,7 +1238,7 @@ async function fetchJson(url, options) {
 async function waitFor(predicate, timeoutMs) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
-    if (predicate()) return true;
+    if (await predicate()) return true;
     await delay(200);
   }
   throw new Error("Timed out waiting for predicate.");
@@ -979,6 +1259,10 @@ function makePcmSineBase64(sampleRate, durationSeconds) {
 }
 
 function prepareFakeAudio(target, source) {
+  if (realApi) {
+    prepareRealApiFakeAudio(target);
+    return;
+  }
   const noise = {
     level: fakeNoiseLevel,
     leadSeconds: fakeNoiseLeadSeconds,
@@ -1006,6 +1290,78 @@ function prepareFakeAudio(target, source) {
     bytes: fs.statSync(target).size,
     noise,
   };
+}
+
+function prepareRealApiFakeAudio(target) {
+  const helper = path.join(root, "scripts", "modvii_audio_corpus.py");
+  if (!fs.existsSync(helper)) throw new Error(`MODVII audio corpus helper not found: ${helper}`);
+  const metadataPath = `${target}.json`;
+  const speechCache = process.env.MODVII_SPEECH_CACHE
+    ? path.resolve(process.env.MODVII_SPEECH_CACHE)
+    : path.join(root, "data", "cache", "modvii-desktop-real-api-speech.wav");
+  fs.mkdirSync(path.dirname(speechCache), { recursive: true });
+  const args = [
+    helper,
+    "--output",
+    target,
+    "--profile",
+    realNoiseProfile,
+    "--wake-word",
+    realWakeWord,
+    "--request-text",
+    realRequestText,
+    "--generate-tts",
+    "--speech-cache",
+    speechCache,
+    "--metadata-output",
+    metadataPath,
+  ];
+  const env = {
+    ...process.env,
+    TTS_PROVIDER: realProviders.tts,
+    PYTHONIOENCODING: "utf-8",
+  };
+  const result = runPythonHelper(args, env);
+  if (result.status !== 0) {
+    throw new Error(
+      `Failed to generate desktop real API fake audio.\nstdout:\n${result.stdout || ""}\nstderr:\n${result.stderr || ""}`,
+    );
+  }
+  const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
+  report.fakeAudio = {
+    mode: "real-api-noisy-tts",
+    target,
+    bytes: fs.statSync(target).size,
+    profile: realNoiseProfile,
+    speech_start_ms: metadata.speech_start_ms,
+    speech_end_ms: metadata.speech_end_ms,
+    metadata,
+    generator_stdout: String(result.stdout || "").slice(0, 2000),
+  };
+}
+
+function runPythonHelper(args, env) {
+  const serverDir = path.join(root, "apps", "server");
+  const explicitPythonCandidates = [process.env.MODVII_PYTHON, process.env.PYTHON].filter(Boolean);
+  for (const executable of explicitPythonCandidates) {
+    const result = spawnSync(executable, args, { cwd: serverDir, env, encoding: "utf8" });
+    if (!result.error || result.error.code !== "ENOENT") return result;
+  }
+  const uvCandidates = [
+    process.env.MODVII_UV,
+    process.platform === "win32" ? "uv.exe" : "uv",
+    "uv",
+  ].filter(Boolean);
+  for (const executable of uvCandidates) {
+    const result = spawnSync(executable, ["run", "python", ...args], { cwd: serverDir, env, encoding: "utf8" });
+    if (!result.error || result.error.code !== "ENOENT") return result;
+  }
+  const pythonCandidates = [process.platform === "win32" ? "python.exe" : "python3", "python"].filter(Boolean);
+  for (const executable of pythonCandidates) {
+    const result = spawnSync(executable, args, { cwd: serverDir, env, encoding: "utf8" });
+    if (!result.error || result.error.code !== "ENOENT") return result;
+  }
+  return { status: 127, stdout: "", stderr: "Python or uv was not found for MODVII audio corpus generation." };
 }
 
 function copyWavWithNoiseBed(source, target, noise) {

@@ -7,7 +7,9 @@ import pytest
 
 from app.api.websocket import (
     AudioRuntimeState,
+    VisualFrameJob,
     VisualRuntimeState,
+    _clear_pending_visual_runtime,
     _handle_event,
     _handle_realtime_audio_chunk,
     _next_realtime_stream_event,
@@ -936,6 +938,9 @@ class StubStreamingAudioService:
         self.transcribe_calls.append((audio_bytes, metadata))
         return ASRResult(text="备用识别文本", confidence=0.66, is_final=True)
 
+    def decode_audio_chunk(self, payload: AudioChunkPayload) -> bytes:
+        return base64.b64decode(payload.data_base64) if payload.data_base64 else b""
+
 
 class SlowTTSAudioService(StubStreamingAudioService):
     def __init__(self) -> None:
@@ -947,6 +952,25 @@ class SlowTTSAudioService(StubStreamingAudioService):
         self.started.set()
         await asyncio.sleep(60)
         return TTSResult(audio_base64="AAAA")
+
+
+class ControlledTTSAudioService(StubStreamingAudioService):
+    def __init__(self) -> None:
+        super().__init__(OrderSensitiveRealtimeStream())
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def synthesize(self, text: str, emotion: str) -> TTSResult:
+        self.synthesize_calls.append((text, emotion))
+        self.started.set()
+        await self.release.wait()
+        return TTSResult(
+            audio_base64="AAAA",
+            mime="audio/pcm;rate=24000",
+            sample_rate=24000,
+            channels=1,
+            encoding="pcm_s16le",
+        )
 
 
 class CountingFixedNoticeAudioService:
@@ -1460,13 +1484,15 @@ async def test_realtime_stream_timeout_recovery_asr_has_own_timeout() -> None:
     assert runtime.stream is None
 
 
-async def test_visual_frame_is_deferred_during_voice_response() -> None:
+async def test_visual_frame_summary_is_retained_during_voice_response() -> None:
     websocket = StubWebSocket()
     runtime = AudioRuntimeState()
     visual_runtime = VisualRuntimeState()
     session = SessionState(session_id="test_session", response_in_progress=True, status="thinking")
     settings = Settings(realtime_provider="mock", llm_provider="mock", tts_provider="mock")
     send_lock = asyncio.Lock()
+    provider = ControlledVisionProvider()
+    vision = VisionService(provider, settings)
     dialogue = DialogueService(ProviderRegistry(settings).llm(), settings)
     avatar = AvatarService()
     audio = StubStreamingAudioService(OrderSensitiveRealtimeStream())
@@ -1486,7 +1512,7 @@ async def test_visual_frame_is_deferred_during_voice_response() -> None:
             ).model_dump(),
         ),
         session,
-        RaisingVisionService(),  # type: ignore[arg-type]
+        vision,
         dialogue,
         audio,  # type: ignore[arg-type]
         avatar,
@@ -1500,13 +1526,21 @@ async def test_visual_frame_is_deferred_during_voice_response() -> None:
     )
 
     assert task is None
+    assert visual_runtime.task is not None
+    await wait_for_started_frame(provider, "frame_deferred")
+    provider.release_frame("frame_deferred")
+    await asyncio.wait_for(visual_runtime.task, timeout=1)
+    assert session.last_visual_summary == "frame_deferred summary"
+    assert visual_runtime.deferred_summaries
+    assert not [event for event in websocket.events if event["type"] == "vision.summary"]
     assert any(
-        event["type"] == "debug.log" and "Visual frame skipped" in event["payload"]["message"]
+        event["type"] == "debug.log"
+        and "Visual summary retained" in event["payload"]["message"]
+        and event["payload"]["trace"]["state"] == "retained_deferred"
         for event in websocket.events
     )
-    assert session.cost_meter.vision_calls == 0
+    assert session.cost_meter.vision_calls == 1
     assert session.cost_meter.voice_priority_deferred_frames == 1
-    assert session.cost_meter.vision_calls_saved == 1
 
 
 async def test_visual_frame_analysis_does_not_block_realtime_audio() -> None:
@@ -1584,6 +1618,150 @@ async def test_visual_frame_analysis_does_not_block_realtime_audio() -> None:
     visual_runtime.task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await visual_runtime.task
+
+
+async def test_active_visual_result_is_retained_and_flushed_after_voice_turn() -> None:
+    websocket = StubWebSocket()
+    runtime = AudioRuntimeState()
+    visual_runtime = VisualRuntimeState()
+    session = SessionState(session_id="test_session", status="listening")
+    settings = Settings(realtime_provider="none", llm_provider="mock", tts_provider="vertex_ai")
+    send_lock = asyncio.Lock()
+    provider = ControlledVisionProvider()
+    vision = VisionService(provider, settings)
+    dialogue = DialogueService(ProviderRegistry(settings).llm(), settings)
+    avatar = AvatarService()
+    audio = ControlledTTSAudioService()
+
+    await _handle_event(
+        websocket,  # type: ignore[arg-type]
+        EventEnvelope(
+            type="client.media.frame",
+            session_id=session.session_id,
+            payload=FramePayload(
+                frame_id="frame_active_before_voice",
+                width=640,
+                height=360,
+                capture_reason="screen_low_fps",
+                scene_hash="active-before-voice",
+                data_base64="abc123",
+            ).model_dump(),
+        ),
+        session,
+        vision,
+        dialogue,
+        audio,  # type: ignore[arg-type]
+        avatar,
+        WakeService(),
+        settings,
+        runtime,
+        visual_runtime,
+        0.0,
+        send_lock,
+        None,
+    )
+    visual_task = visual_runtime.task
+    assert visual_task is not None
+    await wait_for_started_frame(provider, "frame_active_before_voice")
+
+    audio_data = base64.b64encode(b"\x01\x00" * 320).decode("ascii")
+    first_payload = AudioChunkPayload(
+        chunk_id="audio_1",
+        mime="audio/pcm;rate=16000",
+        sample_rate=16000,
+        channels=1,
+        encoding="pcm_s16le",
+        data_base64=audio_data,
+        is_final=False,
+    )
+    await _handle_event(
+        websocket,  # type: ignore[arg-type]
+        EventEnvelope(type="client.media.audio_chunk", session_id=session.session_id, payload=first_payload.model_dump()),
+        session,
+        vision,
+        dialogue,
+        audio,  # type: ignore[arg-type]
+        avatar,
+        WakeService(),
+        settings,
+        runtime,
+        visual_runtime,
+        time.perf_counter(),
+        send_lock,
+        None,
+    )
+    response_task = await _handle_event(
+        websocket,  # type: ignore[arg-type]
+        EventEnvelope(
+            type="client.media.audio_chunk",
+            session_id=session.session_id,
+            payload=first_payload.model_copy(update={"chunk_id": "audio_final", "data_base64": "", "is_final": True}).model_dump(),
+        ),
+        session,
+        vision,
+        dialogue,
+        audio,  # type: ignore[arg-type]
+        avatar,
+        WakeService(),
+        settings,
+        runtime,
+        visual_runtime,
+        time.perf_counter(),
+        send_lock,
+        None,
+    )
+    assert response_task is not None
+    await asyncio.wait_for(audio.started.wait(), timeout=1)
+
+    provider.release_frame("frame_active_before_voice")
+    await asyncio.wait_for(visual_task, timeout=1)
+    assert session.last_visual_summary == "frame_active_before_voice summary"
+    assert visual_runtime.deferred_summaries
+    assert not [
+        event
+        for event in websocket.events
+        if event["type"] == "vision.summary" and event["payload"]["frame_id"] == "frame_active_before_voice"
+    ]
+
+    audio.release.set()
+    await asyncio.wait_for(response_task, timeout=1)
+    summaries = [
+        event
+        for event in websocket.events
+        if event["type"] == "vision.summary" and event["payload"]["frame_id"] == "frame_active_before_voice"
+    ]
+    assert summaries
+    assert summaries[-1]["payload"]["deferred"] is True
+    assert summaries[-1]["payload"]["trace"]["state"] == "flushed"
+    assert visual_runtime.deferred_summaries == []
+
+
+def test_clearing_pending_visual_frames_does_not_stale_active_source() -> None:
+    visual_runtime = VisualRuntimeState()
+    pending_frame = FramePayload(
+        frame_id="frame_pending_newer",
+        width=640,
+        height=360,
+        capture_reason="screen_low_fps",
+        scene_hash="pending",
+        data_base64="abc123",
+    )
+    visual_runtime.pending["screen"] = VisualFrameJob(
+        sequence=2,
+        source="screen",
+        frame=pending_frame,
+        prompt="请描述画面。",
+        received_at=time.perf_counter(),
+    )
+    visual_runtime.latest_sequence_by_source["screen"] = 2
+    visual_runtime.applied_sequence = 0
+
+    dropped = _clear_pending_visual_runtime(visual_runtime)
+
+    assert dropped == 1
+    assert visual_runtime.pending == {}
+    assert visual_runtime.latest_sequence_by_source["screen"] == 0
+    assert visual_runtime.dropped_pending_frames == 1
 
 
 async def test_visual_scheduler_keeps_latest_pending_screen_frame() -> None:

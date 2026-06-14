@@ -1,8 +1,59 @@
+﻿param(
+    [switch]$RealApi,
+    [switch]$Portable,
+    [string]$NoiseProfile = "low_noise",
+    [string]$RequestText = "请简短介绍一下你现在能做什么。"
+)
+
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
-$DesktopExe = Join-Path $Root "dist\desktop\win-unpacked\MODVII.exe"
+$DesktopExe = if ($Portable) {
+    Join-Path $Root "dist\desktop\MODVII 0.1.0.exe"
+} else {
+    Join-Path $Root "dist\desktop\win-unpacked\MODVII.exe"
+}
 if (-not (Test-Path $DesktopExe)) {
     throw "Desktop exe not found: $DesktopExe"
+}
+
+if ($RealApi) {
+    . (Join-Path $PSScriptRoot "common.ps1")
+    Assert-ApiHoldClear -Provider "vertex-ai"
+    $Node = Resolve-Node
+    if (-not $Node) {
+        throw "Node.js is required for desktop real API verification."
+    }
+    $Python = Resolve-Python
+    $Uv = Resolve-Uv
+    $Previous = @{}
+    $EnvPatch = @{
+        MODVII_REAL_API = "1"
+        MODVII_NOISE_PROFILE = $NoiseProfile
+        MODVII_REQUEST_TEXT = $RequestText
+        MODVII_DESKTOP_EXE = $DesktopExe
+    }
+    if ($Python -and -not $Uv) {
+        $EnvPatch["MODVII_PYTHON"] = $Python
+    }
+    if ($Uv) {
+        $EnvPatch["MODVII_UV"] = $Uv
+    }
+    foreach ($Name in $EnvPatch.Keys) {
+        $Previous[$Name] = [Environment]::GetEnvironmentVariable($Name, "Process")
+        [Environment]::SetEnvironmentVariable($Name, [string]$EnvPatch[$Name], "Process")
+    }
+    try {
+        Invoke-ApiCommand `
+            -Executable $Node `
+            -Arguments @((Join-Path $PSScriptRoot "verify-desktop-interaction.mjs")) `
+            -Provider "vertex-ai" `
+            -CommandName "Desktop real API verification"
+    } finally {
+        foreach ($Name in $Previous.Keys) {
+            [Environment]::SetEnvironmentVariable($Name, $Previous[$Name], "Process")
+        }
+    }
+    return
 }
 
 $ExistingAppPids = @(
