@@ -2,9 +2,29 @@
 
 - Repository: https://github.com/KecenLi/astralive
 - Branch: main
-- Latest feature commit for this round: `08ac79b` (`Split visual summaries by source`)
+- Latest feature commit for this round: `87bff77` (`Harden real API smoke and dialogue marker parsing`)
 - To check the current latest commit: `git rev-parse --short HEAD`
 - Reminder: after each implementation and test round, commit and push intentional source changes, then report the commit hash, latest packaged exe path, timestamp, and SHA256.
+
+## 2026-06-14 Final Repackage / Real API Smoke Round
+
+- GitHub reminder: push only intentional source changes to `https://github.com/KecenLi/astralive` on `main`; do not commit `.env`, `data/`, packaged `dist/`, local model weights, logs, or tokens.
+- Source commits this round:
+  - `6595d5f` Add desktop pet shortcut to restore main window.
+  - `87bff77` Harden real API smoke and dialogue marker parsing.
+- Packaged fix: rebuilt canonical portable and installer after the local Whisper prompt update and dialogue marker parser update.
+- ASR fix: local Whisper Chinese initial prompt now includes MODVII visual terms such as `摄像头摘要`, `屏幕摘要`, `融合摘要`, and `屏幕捕捉`; direct local-ASR verification on the noisy fake mic WAV recognized `摄像头摘要` and `屏幕摘要` correctly.
+- Verification fix: real API desktop smoke now refreshes its generated CosyVoice speech cache for each requested test sentence, so reports no longer reuse stale audio while claiming a new request.
+- Dialogue fix: server strips both `[[emotion:thinking]]` and bare `[[thinking]]` markers before text deltas/TTS, preventing model control tags from leaking into UI or speech.
+- Validation:
+  - Backend targeted tests: `67 passed, 1 warning`.
+  - Backend lint: `ruff check app` clean.
+  - Final packaged real-provider smoke: `desktop-interaction-20260614-134601.json` passed with `local_whisper` ASR, Vertex vision/LLM, CosyVoice3 TTS, and realtime disabled.
+  - Real smoke metrics: errors `0`, HTTP 429 `0`, timeouts `0`, auto-returned to listening `true`, visual summary updated `true`, marker leak `false`.
+  - Real smoke final cost estimate: `$0.0029318`; visual estimated savings `$0.0074046`; vision calls `1`, LLM calls `1`, ASR calls `1`, TTS calls `4`.
+- Latest portable exe: `D:\assist ai\dist\desktop\MODVII 0.1.0.exe`, timestamp `2026-06-14 21:45:37 +0800`, SHA256 `8644DD3EDD4EE6F6EB072CD2C35E47EA1D63EAE584445E60D83A3DC771468C1A`.
+- Latest installer: `D:\assist ai\dist\desktop\MODVII Setup 0.1.0.exe`, timestamp `2026-06-14 21:45:36 +0800`, SHA256 `647FBD91749AE78270D9A023DFFB0A436A89199AE4279F157557782E4E71BE3D`.
+- Known residual: base Whisper still produced one homophone typo in the final packaged smoke (`涉像头` vs `摄像头`), but the downstream LLM answered correctly. For maximum ASR accuracy, switch back to a larger Whisper model; for deadline speed, current default remains `base`.
 
 ## 2026-06-14 Visual Capture / Voice Loop / Chinese UI Round
 
@@ -38,7 +58,7 @@
 ## 2026-06-14 Split Visual Context Round
 
 - GitHub reminder: push only intentional source changes to `https://github.com/KecenLi/astralive` on `main`; do not commit `.env`, `data/`, packaged `dist/`, local model weights, logs, or tokens.
-- Backend visual state now keeps `camera_visual_summary`, `screen_visual_summary`, and `fused_visual_summary` separately. The old `last_visual_summary` remains for compatibility and now mirrors the fused summary.
+- Backend visual state now keeps `camera_visual_summary`, `screen_visual_summary`, and `fused_visual_summary` separately. The old `last_visual_summary` remains for compatibility and stores the latest single-source raw summary.
 - Vision cache is source-aware: camera scene hash/cache no longer overwrites screen scene hash/cache, and screen no longer invalidates camera cache.
 - `vision.summary` and session payloads now include `visual_context` with `camera`, `screen`, `fused`, and per-source timestamps.
 - Dialogue and realtime prompts now include all available visual context: camera recent view, screen recent view, and fused visual summary.
