@@ -5,7 +5,7 @@ function resolveApiBaseUrl() {
 
 function resolveLive2DModelUrl() {
   const fromEnv = import.meta.env.VITE_LIVE2D_MODEL_URL;
-  const modelUrl = fromEnv || "./live2d/haru/haru/runtime/haru.model3.json";
+  const modelUrl = fromEnv || "./live2d/lisette/Lisette.model3.json";
   if (modelUrl.startsWith("/live2d/")) return `.${modelUrl}`;
   return modelUrl;
 }

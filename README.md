@@ -7,10 +7,11 @@ Vertex/Gemini-compatible cloud providers, cost telemetry, and a Live2D desktop
 pet.
 
 This repository is intended to be reproducible from GitHub. The default Live2D
-portrait is included in the repo under `apps/web/public/live2d/haru`, so a fresh
-clone can build the UI with a visible avatar. Large model weights, local secrets,
-logs, packaged executables, and locally downloaded third-party source trees are
-not committed; scripts below reproduce them.
+portrait is now Lisette, included under `apps/web/public/live2d/lisette`, so a
+fresh clone can build the UI with the configured avatar. The official Live2D
+sample Haru is also included as the safer public/commercial fallback. Large
+model weights, local secrets, logs, packaged executables, and locally downloaded
+third-party source trees are not committed; scripts below reproduce them.
 
 ## Current MVP Scope
 
@@ -19,9 +20,11 @@ not committed; scripts below reproduce them.
 - React UI for microphone, camera, screen capture, settings, cost telemetry, and
   conversation.
 - Transparent desktop pet window with Live2D rendering.
-- Default Live2D model: official Live2D sample **Haru**.
-- Optional local non-commercial Lisette can be installed locally but is not
-  redistributed in this public repo.
+- Default Live2D model: **Lisette**.
+- Safer fallback Live2D model: official Live2D sample **Haru**.
+- Lisette is included for this personal/non-commercial MVP configuration, but
+  it carries redistribution and commercial-use risk. Use Haru for commercial,
+  enterprise, or permission-sensitive builds.
 - Voice input with browser media capture, TEN VAD, streaming chunks, and local
   Whisper ASR.
 - Wake word / name: `小七`.
@@ -117,16 +120,67 @@ keys. Real voice/vision/LLM routes need the provider configuration below.
 
 ## Live2D Avatar Assets
 
-The repo includes the default Live2D portrait:
+The repo includes the configured default Live2D portrait:
 
 ```text
-apps/web/public/live2d/haru/haru/runtime/haru.model3.json
+apps/web/public/live2d/lisette/Lisette.model3.json
 ```
 
 The default model URL is:
 
 ```dotenv
+VITE_LIVE2D_MODEL_URL=./live2d/lisette/Lisette.model3.json
+```
+
+### Lisette License And Redistribution Risk
+
+Lisette is bundled to match the current MODVII MVP configuration. It has a
+richer expression/motion set than Haru and includes:
+
+- full-body expression toggles such as angry, frenzy, sad, shy, tear, and
+  tongue-out;
+- idle and breathing motions;
+- greeting, happy, sad, frenzy, jump, walk, run, and other animation groups;
+- a `ParamMouthOpenY` lip-sync group configured for MODVII.
+
+Risk statement:
+
+- The model `READ_ME.txt` states: "Do not use this model for commercial
+  purposes!"
+- The model credits Lisette from *Pocket Mirror*, AstralShift, and the Live2D
+  rigger/animator shiranui_bzw.
+- This repo includes the model for personal/non-commercial reproduction of this
+  MVP. That does not remove copyright, character-IP, platform, or redistribution
+  risk.
+- Do not use the Lisette bundle for commercial, enterprise, client, marketplace,
+  or public distribution builds unless you have explicit permission from the
+  relevant rights holders.
+- For safer public/commercial builds, switch to Haru:
+
+```dotenv
 VITE_LIVE2D_MODEL_URL=./live2d/haru/haru/runtime/haru.model3.json
+```
+
+Lisette local asset path:
+
+```text
+apps/web/public/live2d/lisette/Lisette.model3.json
+```
+
+Lisette source/credit files are retained in the model folder, including:
+
+```text
+apps/web/public/live2d/lisette/READ_ME.txt
+apps/web/public/live2d/lisette/Lisette.model3.json
+apps/web/public/live2d/lisette/Lisette.vtube.json
+```
+
+### Haru Fallback
+
+Haru remains committed as the lower-risk fallback:
+
+```text
+apps/web/public/live2d/haru/haru/runtime/haru.model3.json
 ```
 
 Haru is official Live2D sample data. Required notice:
@@ -147,21 +201,11 @@ The browser Cubism runtime file is committed at:
 apps/web/public/vendor/live2dcubismcore.min.js
 ```
 
-Optional local Lisette:
-
-- Lisette has richer motions and expressions.
-- It is treated as non-commercial local reference material.
-- It is not redistributed in this GitHub repo.
-- After confirming its terms and placing the zip locally, install with:
+The old local Lisette installer remains for refreshing the bundled files from a
+locally downloaded zip:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\install-lisette-live2d.ps1 -AcceptNonCommercialTerms
-```
-
-Then change local `.env`:
-
-```dotenv
-VITE_LIVE2D_MODEL_URL=./live2d/lisette/Lisette.model3.json
 ```
 
 ## Environment Configuration
@@ -414,8 +458,8 @@ Package Windows installer and portable exe:
 powershell -ExecutionPolicy Bypass -File scripts\package.ps1 -SkipLive2D
 ```
 
-`-SkipLive2D` is safe for this repo because Haru is committed. Without the flag,
-the script may re-download the official Live2D sample.
+`-SkipLive2D` is safe for this repo because Lisette and Haru are committed.
+Without the flag, the script may re-download the official Live2D sample.
 
 Output:
 
@@ -431,7 +475,7 @@ Packaged Electron includes:
 - built React UI;
 - packaged FastAPI backend executable;
 - worker scripts needed for local ASR/TTS;
-- committed Live2D Haru assets;
+- committed Live2D Lisette and Haru assets;
 - committed browser-side VAD / ONNX runtime vendor assets.
 
 Large local model weights remain outside the package unless you explicitly place
@@ -544,7 +588,10 @@ uses its own module names and integration logic.
 - Vertex/Gemini quota or regional latency can dominate response time.
 - Continuous screen/camera sampling is intentionally sampled and throttled; it is
   not raw 30 fps video upload.
-- Lisette is not redistributed. Use Haru for a reproducible public build.
+- Lisette is redistributed in this repo for the current personal MVP setup, but
+  it is non-commercial and carries copyright/character-IP/redistribution risk.
+  Use Haru for commercial, enterprise, marketplace, or permission-sensitive
+  builds.
 
 ## Clean GitHub Reproduction Checklist
 
@@ -561,4 +608,5 @@ From a new machine:
 8. Run `scripts\dev.ps1 all` for development.
 9. Run `scripts\package.ps1 -SkipLive2D` for installer/portable output.
 
-The default Live2D Haru portrait is already present in the GitHub checkout.
+The default Live2D Lisette portrait and the Haru fallback are already present in
+the GitHub checkout.
