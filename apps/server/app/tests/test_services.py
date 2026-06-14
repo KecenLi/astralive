@@ -377,6 +377,21 @@ async def test_dialogue_stream_strips_emotion_marker_before_tts_text() -> None:
     assert session.cost_meter.estimated_output_tokens == 6
 
 
+async def test_dialogue_stream_strips_bare_emotion_marker_before_tts_text() -> None:
+    settings = Settings()
+    provider = StreamingLLMProvider(["[[thinking]]我先想一下，", "可以这样处理。"])
+    session = SessionState(wake_word=settings.wake_word)
+    service = DialogueService(provider, settings)
+
+    chunks = [chunk async for chunk in service.reply_stream(session, "小七，测试裸情绪标记。")]
+
+    deltas = [chunk.delta for chunk in chunks if chunk.delta]
+    assert "".join(deltas) == "我先想一下，可以这样处理。"
+    assert all("[[" not in delta and "]]" not in delta for delta in deltas)
+    assert chunks[-1].emotion == "thinking"
+    assert session.history[-1].content == "我先想一下，可以这样处理。"
+
+
 async def test_dialogue_second_turn_includes_sliding_history() -> None:
     settings = Settings(conversation_history_max_messages=4, conversation_history_max_chars=200)
     provider = CountingLLMProvider("第一轮完成。")

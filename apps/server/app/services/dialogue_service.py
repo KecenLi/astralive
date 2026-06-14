@@ -19,6 +19,10 @@ EMOTION_MARKER_RE = re.compile(
     r"^\s*\[\[\s*emotion\s*:\s*(neutral|happy|curious|surprised|confused|concerned|thinking|sleepy)\s*\]\]\s*",
     re.IGNORECASE,
 )
+BARE_EMOTION_MARKER_RE = re.compile(
+    r"^\s*\[\[\s*(neutral|happy|curious|surprised|confused|concerned|thinking|sleepy)\s*\]\]\s*",
+    re.IGNORECASE,
+)
 HARD_SENTENCE_BOUNDARIES = set("。！？!?；;")
 SOFT_SENTENCE_BOUNDARIES = set("，,、")
 
@@ -355,6 +359,8 @@ def _parse_dialogue_payload(
         if "]]" not in stripped and not final:
             return ParsedDialogue("", emotion, fallback_should_speak, waiting=True)
         marker = EMOTION_MARKER_RE.match(stripped)
+        if not marker:
+            marker = BARE_EMOTION_MARKER_RE.match(stripped)
         if marker:
             marker_emotion = normalize_emotion(marker.group(1), fallback=emotion)
             content = stripped[marker.end() :].lstrip()

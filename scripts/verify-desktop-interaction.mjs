@@ -43,7 +43,7 @@ const report = {
   debugPort,
   userDataDir,
   fakeAudioPath,
-  fakeAudioSourcePath: testAudioSourcePath || null,
+  fakeAudioSourcePath: realApi ? null : testAudioSourcePath || null,
   audioOnly,
   realApi,
   realNoiseProfile,
@@ -1394,6 +1394,7 @@ function prepareRealApiFakeAudio(target) {
     "--generate-tts",
     "--speech-cache",
     speechCache,
+    "--refresh-speech-cache",
     "--metadata-output",
     metadataPath,
   ];
