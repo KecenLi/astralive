@@ -1,6 +1,13 @@
 import { create } from "zustand";
 
-import { AudioCapabilities, AvatarStatePayload, CostMeter, createId, VisualCapabilities } from "../lib/events";
+import {
+  AudioCapabilities,
+  AvatarStatePayload,
+  CostMeter,
+  createId,
+  VisualCapabilities,
+  VisualContext,
+} from "../lib/events";
 
 export interface ConversationMessage {
   id: string;
@@ -18,6 +25,9 @@ export interface AppState {
   currentAssistantDraft: string;
   messages: ConversationMessage[];
   visualSummary: string;
+  cameraVisualSummary: string;
+  screenVisualSummary: string;
+  fusedVisualSummary: string;
   lastFrameInfo: string;
   memoryTurns: number;
   visualSelfCheckNotice: string;
@@ -32,6 +42,7 @@ export interface AppState {
   setVisualCapabilities: (visualCapabilities: VisualCapabilities) => void;
   markWake: () => void;
   setVisualSummary: (summary: string) => void;
+  setVisualContext: (context: VisualContext, fallbackSummary?: string) => void;
   setLastFrameInfo: (info: string) => void;
   setMemoryTurns: (turns: number | null | undefined) => void;
   setVisualSelfCheckNotice: (notice: string | null | undefined) => void;
@@ -81,6 +92,9 @@ export const useAppStore = create<AppState>((set) => ({
   currentAssistantDraft: "",
   messages: [],
   visualSummary: "",
+  cameraVisualSummary: "",
+  screenVisualSummary: "",
+  fusedVisualSummary: "",
   lastFrameInfo: "尚未上传",
   memoryTurns: 0,
   visualSelfCheckNotice: "",
@@ -103,7 +117,20 @@ export const useAppStore = create<AppState>((set) => ({
   setAudioCapabilities: (audioCapabilities) => set({ audioCapabilities }),
   setVisualCapabilities: (visualCapabilities) => set({ visualCapabilities }),
   markWake: () => set((state) => ({ wakeSerial: state.wakeSerial + 1, status: "listening" })),
-  setVisualSummary: (visualSummary) => set({ visualSummary }),
+  setVisualSummary: (visualSummary) => set({ visualSummary, fusedVisualSummary: visualSummary }),
+  setVisualContext: (context, fallbackSummary = "") =>
+    set((state) => {
+      const cameraVisualSummary = context.camera?.trim() ?? state.cameraVisualSummary;
+      const screenVisualSummary = context.screen?.trim() ?? state.screenVisualSummary;
+      const fusedVisualSummary =
+        context.fused?.trim() || fallbackSummary.trim() || state.fusedVisualSummary;
+      return {
+        cameraVisualSummary,
+        screenVisualSummary,
+        fusedVisualSummary,
+        visualSummary: fusedVisualSummary,
+      };
+    }),
   setLastFrameInfo: (lastFrameInfo) => set({ lastFrameInfo }),
   setMemoryTurns: (turns) =>
     set({ memoryTurns: typeof turns === "number" && Number.isFinite(turns) ? Math.max(0, Math.round(turns)) : 0 }),

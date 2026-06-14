@@ -19,14 +19,17 @@ class VisionService:
         self.settings = settings
         self.cost_estimator = CostEstimator.from_settings(settings)
 
-    def _cache_valid(self, session: SessionState, scene_hash: str | None) -> bool:
-        if not scene_hash or not session.last_scene_hash:
+    def _cache_valid(self, session: SessionState, source: str, scene_hash: str | None) -> bool:
+        source_hash = session.scene_hash_for_source(source)
+        source_summary = session.visual_summary_for_source(source)
+        source_summary_at = session.visual_summary_at_for_source(source)
+        if not scene_hash or not source_hash:
             return False
-        if not session.last_visual_summary or not session.last_visual_summary_at:
+        if not source_summary or not source_summary_at:
             return False
-        if _normalized_hash_distance(scene_hash, session.last_scene_hash) > self.settings.scene_change_threshold:
+        if _normalized_hash_distance(scene_hash, source_hash) > self.settings.scene_change_threshold:
             return False
-        expires_at = session.last_visual_summary_at + timedelta(
+        expires_at = source_summary_at + timedelta(
             seconds=self.settings.vision_cache_ttl_seconds
         )
         return datetime.now(timezone.utc) < expires_at
@@ -42,20 +45,22 @@ class VisionService:
         encoded_size = len(frame.data_base64)
         session.cost_meter.add_frame(encoded_size)
 
+        source = _frame_visual_source(frame)
         is_focus_frame = frame.capture_reason in {"focus_roi", "screen_focus"}
-        if not is_focus_frame and self._cache_valid(session, frame.scene_hash):
+        source_summary = session.visual_summary_for_source(source)
+        if not is_focus_frame and self._cache_valid(session, source, frame.scene_hash):
             session.cost_meter.scene_cache_hits += 1
             session.cost_meter.add_saved_vision_call(
                 cost_usd=self.cost_estimator.estimate(
                     provider=self.settings.vision_provider,
                     model=_vision_model_name(self.settings),
                     input_text=prompt,
-                    output_text=session.last_visual_summary,
+                    output_text=source_summary,
                 ).cost_usd
             )
             return (
                 VisionResult(
-                    summary=session.last_visual_summary or "",
+                    summary=source_summary or "",
                     confidence=0.72,
                     raw={"cache": True},
                 ),
@@ -85,7 +90,7 @@ class VisionService:
         except TimeoutError as exc:
             detail = f"vision provider timed out after {self.settings.vision_request_timeout_seconds:.1f}s"
             logger.warning("vision provider failed; frame skipped: %s", detail)
-            summary = session.last_visual_summary or "视觉服务暂时不可用，已跳过本帧，不影响语音对话。"
+            summary = source_summary or session.last_visual_summary or "视觉服务暂时不可用，已跳过本帧，不影响语音对话。"
             result = VisionResult(
                 summary=summary,
                 confidence=0.0,
@@ -101,7 +106,7 @@ class VisionService:
         except Exception as exc:  # noqa: BLE001
             detail = str(exc) or type(exc).__name__
             logger.warning("vision provider failed; frame skipped: %s", detail)
-            summary = session.last_visual_summary or "视觉服务暂时不可用，已跳过本帧，不影响语音对话。"
+            summary = source_summary or session.last_visual_summary or "视觉服务暂时不可用，已跳过本帧，不影响语音对话。"
             result = VisionResult(
                 summary=summary,
                 confidence=0.0,
@@ -124,9 +129,7 @@ class VisionService:
         return result, False
 
     def apply_frame_result(self, session: SessionState, frame: FramePayload, result: VisionResult) -> None:
-        session.last_visual_summary = result.summary
-        session.last_visual_summary_at = datetime.now(timezone.utc)
-        session.last_scene_hash = frame.scene_hash
+        session.update_visual_summary(_frame_visual_source(frame), result.summary, frame.scene_hash)
         session.cost_meter.mode = "focus" if frame.capture_reason in {"focus_roi", "screen_focus"} else "active"
 
 
@@ -150,3 +153,12 @@ def _vision_model_name(settings: Settings) -> str:
     if provider == "openai_compatible":
         return settings.openai_compatible_vision_model
     return provider
+
+
+def _frame_visual_source(frame: FramePayload) -> str:
+    reason = frame.capture_reason
+    if reason in {"camera_stream", "focus_roi", "visual_question", "wake_snapshot"}:
+        return "camera"
+    if reason in {"screen_low_fps", "screen_stream", "screen_focus", "scene_changed"}:
+        return "screen"
+    return "general"

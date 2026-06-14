@@ -838,7 +838,7 @@ async def _handle_user_text(
         )
         await _send_cost(websocket, session, send_lock)
         return response_task
-    if dialogue.needs_vision(user_text) and not session.last_visual_summary:
+    if dialogue.needs_vision(user_text) and not session.visual_prompt_context():
         # No visual summary yet (e.g. the first frame has not landed). Surface a
         # non-blocking hint so the UI can nudge the user to aim the camera/screen,
         # but DO NOT dead-end the turn: fall through and let 小七 answer naturally
@@ -1642,10 +1642,8 @@ def _session_busy_for_visual(session: SessionState) -> bool:
 def _visual_source_key(capture_reason: str) -> str:
     if capture_reason.startswith("screen_") or capture_reason == "scene_changed":
         return "screen"
-    if capture_reason.startswith("camera_"):
+    if capture_reason.startswith("camera_") or capture_reason in {"focus_roi", "visual_question", "wake_snapshot"}:
         return "camera"
-    if capture_reason in {"focus_roi", "visual_question"}:
-        return "focus"
     return "general"
 
 
@@ -1692,11 +1690,21 @@ def _frame_bypasses_visual_cooldown(frame: FramePayload) -> bool:
     return frame.capture_reason in {"visual_question", "focus_roi", "screen_focus", "manual_debug"}
 
 
-def _vision_summary_payload(job: VisualFrameJob, result: Any, *, from_cache: bool, deferred: bool) -> dict[str, Any]:
+def _vision_summary_payload(
+    session: SessionState,
+    job: VisualFrameJob,
+    result: Any,
+    *,
+    from_cache: bool,
+    deferred: bool,
+) -> dict[str, Any]:
     return {
         "summary_id": f"vis_{int(time.time() * 1000)}",
         "frame_id": job.frame.frame_id,
+        "source": job.source,
         "summary": result.summary,
+        "fused_summary": session.fused_visual_summary or session.last_visual_summary,
+        "visual_context": session.visual_context_public(),
         "objects": [obj.model_dump() for obj in result.objects],
         "ocr_text": result.ocr_text,
         "confidence": result.confidence,
@@ -1948,7 +1956,7 @@ async def _run_visual_frame_analysis(
             session.cost_meter.voice_priority_deferred_frames += 1
             _defer_visual_summary(
                 visual_runtime,
-                _vision_summary_payload(job, result, from_cache=from_cache, deferred=True),
+                _vision_summary_payload(session, job, result, from_cache=from_cache, deferred=True),
             )
             await _send(
                 websocket,
@@ -1972,7 +1980,7 @@ async def _run_visual_frame_analysis(
             make_event(
                 "vision.summary",
                 session.session_id,
-                _vision_summary_payload(job, result, from_cache=from_cache, deferred=False),
+                _vision_summary_payload(session, job, result, from_cache=from_cache, deferred=False),
             ),
             send_lock,
         )
@@ -2357,8 +2365,9 @@ def _is_realtime_pcm(payload: AudioChunkPayload, settings: Settings) -> bool:
 def _realtime_metadata(session: SessionState, payload: AudioChunkPayload, settings: Settings) -> dict:
     metadata = _audio_metadata(payload)
     system_instruction = settings.persona_prompt
-    if session.last_visual_summary:
-        system_instruction += f"\n当前视觉摘要：{session.last_visual_summary}"
+    visual_context = session.visual_prompt_context()
+    if visual_context:
+        system_instruction += f"\n{visual_context}"
     system_instruction += "\n输出约束：只输出要说给用户听的话；不要输出 Markdown；不要解释内部流程。"
     metadata["system_instruction"] = system_instruction
     return metadata

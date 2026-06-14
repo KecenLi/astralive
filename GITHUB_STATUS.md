@@ -2,7 +2,7 @@
 
 - Repository: https://github.com/KecenLi/astralive
 - Branch: main
-- Latest feature commit for this round: `db6d261` (`Fix visual capture contention and continuous listening`)
+- Latest feature commit for this round: `d78d767` (`Split visual summaries by source`)
 - To check the current latest commit: `git rev-parse --short HEAD`
 - Reminder: after each implementation and test round, commit and push intentional source changes, then report the commit hash, latest packaged exe path, timestamp, and SHA256.
 
@@ -34,6 +34,17 @@
 - Validation before push this round: `npm --prefix apps/web test -- --run` passed with 53 tests; `npm --prefix apps/web run build` passed.
 - Latest portable for this round, built without overwriting the currently running old portable: `D:\assist ai\dist\desktop\MODVII-0.1.0-listeningfix-20260614-2112.exe`, timestamp `2026-06-14 21:10:30 +0800`, SHA256 `B9C1FD65CF69F6C97F8A303A373C1ACF8DA9F376517256F2FC28B035096038B1`.
 - Packaging note: the currently running `D:\assist ai\dist\desktop\MODVII 0.1.0.exe` is still the old packaged build. Use the `listeningfix` portable above for this round, or close MODVII and rebuild the canonical filename later.
+
+## 2026-06-14 Split Visual Context Round
+
+- GitHub reminder: push only intentional source changes to `https://github.com/KecenLi/astralive` on `main`; do not commit `.env`, `data/`, packaged `dist/`, local model weights, logs, or tokens.
+- Backend visual state now keeps `camera_visual_summary`, `screen_visual_summary`, and `fused_visual_summary` separately. The old `last_visual_summary` remains for compatibility and now mirrors the fused summary.
+- Vision cache is source-aware: camera scene hash/cache no longer overwrites screen scene hash/cache, and screen no longer invalidates camera cache.
+- `vision.summary` and session payloads now include `visual_context` with `camera`, `screen`, `fused`, and per-source timestamps.
+- Dialogue and realtime prompts now include all available visual context: camera recent view, screen recent view, and fused visual summary.
+- Frontend conversation panel now displays three rows: `融合`, `摄像头`, and `屏幕`; the store keeps all three fields separately.
+- Validation before push this round: backend `94 passed, 2 warnings`, `ruff check app` clean, web Vitest `54 passed`, web production build passed.
+- Packaging note: not packaged yet in this round; use source/dev build until a new portable is produced.
 
 ## 2026-06-14 Visual Timeout / Manual Capture Round
 

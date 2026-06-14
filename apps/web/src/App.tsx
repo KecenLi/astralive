@@ -32,6 +32,7 @@ import {
   FramePayload,
   SessionStatePayload,
   VisionNeedFocusPayload,
+  VisionSummaryPayload,
 } from "./lib/events";
 import { wsClient } from "./lib/wsClient";
 
@@ -91,6 +92,7 @@ function handleServerEvent(event: EventEnvelope<unknown>, effects: ServerEventEf
     if (payload.status) store.setStatus(payload.status);
     if (payload.audio) store.setAudioCapabilities(payload.audio);
     if (payload.visual) store.setVisualCapabilities(payload.visual);
+    if (payload.visual_context) store.setVisualContext(payload.visual_context, payload.last_visual_summary ?? "");
     store.setMemoryTurns(payload.history_turns);
     store.setVisualSelfCheckNotice(payload.visual_self_check_notice ?? payload.focus_notice);
     if (payload.response_in_progress) effects.onResponseStarted?.();
@@ -100,6 +102,7 @@ function handleServerEvent(event: EventEnvelope<unknown>, effects: ServerEventEf
     if (payload.status) store.setStatus(payload.status);
     if (payload.audio) store.setAudioCapabilities(payload.audio);
     if (payload.visual) store.setVisualCapabilities(payload.visual);
+    if (payload.visual_context) store.setVisualContext(payload.visual_context, payload.last_visual_summary ?? "");
     store.setMemoryTurns(payload.history_turns);
     store.setVisualSelfCheckNotice(payload.visual_self_check_notice ?? payload.focus_notice);
     if (payload.response_in_progress) {
@@ -157,14 +160,12 @@ function handleServerEvent(event: EventEnvelope<unknown>, effects: ServerEventEf
     store.finalizeUserSpeech(text ?? "");
   }
   if (event.type === "vision.summary") {
-    const payload = event.payload as {
-      summary?: string;
-      frame_id?: string;
-      confidence?: number;
-      need_focus?: boolean;
-      focus_reason?: string | null;
-    };
-    store.setVisualSummary(payload.summary ?? "");
+    const payload = event.payload as VisionSummaryPayload;
+    if (payload.visual_context) {
+      store.setVisualContext(payload.visual_context, payload.fused_summary ?? payload.summary ?? "");
+    } else {
+      store.setVisualSummary(payload.fused_summary ?? payload.summary ?? "");
+    }
     store.setLastFrameInfo(`${payload.frame_id ?? "frame"} / ${(payload.confidence ?? 0).toFixed(2)}`);
     if (payload.need_focus) {
       store.setVisualSelfCheckNotice(
@@ -415,6 +416,9 @@ function MainApp() {
         const session = await response.json();
         if (disposed) return;
         actions.setSession(session.session_id, session.wake_word ?? "小七");
+        if (session.visual_context) {
+          actions.setVisualContext(session.visual_context, session.last_visual_summary ?? "");
+        }
         actions.setMemoryTurns(session.history_turns);
         actions.setVisualSelfCheckNotice(session.visual_self_check_notice ?? session.focus_notice);
         cleanup = wsClient.onEvent((event) =>

@@ -99,7 +99,7 @@ class DialogueService:
                 ),
                 ChatMessage(role="user", content=user_text),
             ],
-            visual_summary=session.last_visual_summary,
+            visual_summary=session.fused_visual_summary or session.last_visual_summary,
             system_state=session.public_dict(),
         )
         session.cost_meter.llm_calls += 1
@@ -236,8 +236,9 @@ class DialogueService:
 
     def _system_prompt(self, session: SessionState) -> str:
         parts = [self.settings.persona_prompt]
-        if session.last_visual_summary:
-            parts.append(f"当前视觉摘要：{session.last_visual_summary}")
+        visual_context = session.visual_prompt_context()
+        if visual_context:
+            parts.append(visual_context)
         parts.append(
             "对话输出格式：可以在回复开头输出一个情绪标记，格式必须是 "
             "[[emotion:neutral]]、[[emotion:happy]]、[[emotion:curious]]、"

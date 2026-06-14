@@ -12,7 +12,9 @@ export function ConversationPanel() {
   const messages = useAppStore((state) => state.messages);
   const userDraft = useAppStore((state) => state.currentUserDraft);
   const draft = useAppStore((state) => state.currentAssistantDraft);
-  const visualSummary = useAppStore((state) => state.visualSummary);
+  const fusedVisualSummary = useAppStore((state) => state.fusedVisualSummary || state.visualSummary);
+  const cameraVisualSummary = useAppStore((state) => state.cameraVisualSummary);
+  const screenVisualSummary = useAppStore((state) => state.screenVisualSummary);
   const lastFrameInfo = useAppStore((state) => state.lastFrameInfo);
   const memoryTurns = useAppStore((state) => state.memoryTurns);
   const visualSelfCheckNotice = useAppStore((state) => state.visualSelfCheckNotice);
@@ -46,9 +48,13 @@ export function ConversationPanel() {
           <strong>画面</strong> {lastFrameInfo}
         </span>
       </div>
-      <div className="visual-summary">
-        <strong>视觉摘要</strong>
-        <span>{visualSummary || "尚未看画面"}</span>
+      <div className="visual-summary visual-summary-split">
+        <strong>融合</strong>
+        <span>{fusedVisualSummary || "尚未看画面"}</span>
+        <strong>摄像头</strong>
+        <span>{cameraVisualSummary || "尚未收到摄像头摘要"}</span>
+        <strong>屏幕</strong>
+        <span>{screenVisualSummary || "尚未收到屏幕摘要"}</span>
       </div>
       <div className="message-list">
         {messages.map((message) => (

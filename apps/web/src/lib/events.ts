@@ -72,10 +72,19 @@ export interface VisualCapabilities {
   scene_change_threshold: number;
 }
 
+export interface VisualContext {
+  camera?: string | null;
+  screen?: string | null;
+  fused?: string | null;
+  updated_at?: Record<string, string>;
+}
+
 export interface SessionStatePayload {
   status?: string;
   audio?: AudioCapabilities;
   visual?: VisualCapabilities;
+  visual_context?: VisualContext;
+  last_visual_summary?: string | null;
   response_in_progress?: boolean;
   history_turns?: number | null;
   visual_self_check_notice?: string | null;
@@ -86,6 +95,17 @@ export interface VisionNeedFocusPayload {
   frame_id?: string;
   confidence?: number | null;
   reason?: string | null;
+  focus_reason?: string | null;
+}
+
+export interface VisionSummaryPayload {
+  summary?: string;
+  fused_summary?: string | null;
+  visual_context?: VisualContext;
+  frame_id?: string;
+  source?: "camera" | "screen" | "general" | string;
+  confidence?: number;
+  need_focus?: boolean;
   focus_reason?: string | null;
 }
 

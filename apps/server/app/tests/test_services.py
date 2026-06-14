@@ -159,6 +159,52 @@ class TimeoutVisionProvider(VisionProvider):
         return VisionResult(summary="late visual", confidence=0.8)
 
 
+class SourceEchoVisionProvider(VisionProvider):
+    async def analyze(self, data: VisionInput) -> VisionResult:
+        reason = str(data.metadata.get("capture_reason") or "")
+        if reason.startswith("screen"):
+            return VisionResult(summary="屏幕上打开了浏览器和文档。", confidence=0.82)
+        return VisionResult(summary="摄像头里用户坐在电脑前。", confidence=0.84)
+
+
+async def test_vision_keeps_camera_screen_and_fused_summaries_separate() -> None:
+    settings = Settings(vision_request_timeout_seconds=1)
+    session = SessionState(wake_word=settings.wake_word)
+    service = VisionService(SourceEchoVisionProvider(), settings)
+
+    await service.analyze_frame(
+        session,
+        FramePayload(
+            frame_id="camera_frame",
+            width=640,
+            height=360,
+            capture_reason="camera_stream",
+            scene_hash="camera_hash",
+            data_base64="abc123",
+        ),
+        "摄像头上下文",
+    )
+    await service.analyze_frame(
+        session,
+        FramePayload(
+            frame_id="screen_frame",
+            width=640,
+            height=360,
+            capture_reason="screen_low_fps",
+            scene_hash="screen_hash",
+            data_base64="def456",
+        ),
+        "屏幕上下文",
+    )
+
+    assert session.camera_visual_summary == "摄像头里用户坐在电脑前。"
+    assert session.screen_visual_summary == "屏幕上打开了浏览器和文档。"
+    assert "摄像头：摄像头里用户坐在电脑前。" in (session.fused_visual_summary or "")
+    assert "屏幕：屏幕上打开了浏览器和文档。" in (session.fused_visual_summary or "")
+    assert session.scene_hash_for_source("camera") == "camera_hash"
+    assert session.scene_hash_for_source("screen") == "screen_hash"
+
+
 async def test_vision_failure_returns_degraded_summary_without_counting_call() -> None:
     settings = Settings(vision_request_timeout_seconds=0.1)
     session = SessionState(wake_word=settings.wake_word, last_visual_summary="之前的画面摘要。")
@@ -218,6 +264,22 @@ async def test_mock_dialogue_uses_visual_summary() -> None:
     result = await service.reply(session, "你看到了什么？")
     assert "桌上有一个水杯" in result.text
     assert session.cost_meter.llm_calls == 1
+
+
+async def test_dialogue_prompt_includes_split_visual_context() -> None:
+    settings = Settings()
+    provider = CountingLLMProvider()
+    session = SessionState(wake_word=settings.wake_word)
+    session.update_visual_summary("camera", "用户在摄像头前。", "camera_hash")
+    session.update_visual_summary("screen", "屏幕上是代码编辑器。", "screen_hash")
+    service = DialogueService(provider, settings)
+
+    await service.reply(session, "你同时看到了什么？")
+
+    system_prompt = provider.inputs[0].messages[0].content
+    assert "摄像头最近画面：用户在摄像头前。" in system_prompt
+    assert "屏幕最近画面：屏幕上是代码编辑器。" in system_prompt
+    assert "融合视觉摘要：" in system_prompt
 
 
 class CountingLLMProvider(LLMProvider):
