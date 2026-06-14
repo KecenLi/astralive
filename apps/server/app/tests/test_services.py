@@ -1252,6 +1252,44 @@ class PunctuationOnlyASRAudioService:
         return base64.b64decode(payload.data_base64) if payload.data_base64 else b""
 
 
+class WakeProbeASRAudioService:
+    has_realtime = False
+    can_stream_realtime = False
+
+    def __init__(self, transcript: str) -> None:
+        self.transcript = transcript
+        self.transcribe_calls = 0
+
+    async def transcribe(self, audio_bytes: bytes, metadata: dict | None = None) -> ASRResult:
+        self.transcribe_calls += 1
+        return ASRResult(text=self.transcript, confidence=0.72, is_final=True)
+
+    async def synthesize(self, text: str, emotion: str) -> TTSResult:
+        return TTSResult(audio_base64="AAAA")
+
+    def decode_audio_chunk(self, payload: AudioChunkPayload) -> bytes:
+        return base64.b64decode(payload.data_base64) if payload.data_base64 else b""
+
+
+def wake_probe_payload(*, chunk_id: str, is_final: bool, data: bytes = b"voice") -> AudioChunkPayload:
+    return AudioChunkPayload(
+        chunk_id=chunk_id,
+        mime="audio/pcm;rate=16000",
+        sample_rate=16000,
+        channels=1,
+        encoding="pcm_s16le",
+        data_base64="" if is_final else base64.b64encode(data).decode("ascii"),
+        is_final=is_final,
+        metadata={
+            "purpose": "wake_probe",
+            "source": "wake_probe",
+            "route": "asr_first",
+            "trace_id": "wake_probe_test",
+            "wake_word": "小七",
+        },
+    )
+
+
 async def test_asr_first_ignores_punctuation_only_transcript() -> None:
     websocket = StubWebSocket()
     session = SessionState(session_id="test_session")
@@ -1317,6 +1355,96 @@ async def test_asr_first_ignores_punctuation_only_transcript() -> None:
     assert "assistant.text.final" not in event_types
     assert any(
         event["type"] == "debug.log" and "no language content" in event["payload"]["message"]
+        for event in websocket.events
+    )
+
+
+async def test_wake_probe_without_wake_word_does_not_start_dialogue() -> None:
+    websocket = StubWebSocket()
+    session = SessionState(session_id="test_session", wake_word="小七")
+    settings = Settings(realtime_provider="none", tts_provider="mock")
+    runtime = AudioRuntimeState()
+    visual_runtime = VisualRuntimeState()
+    send_lock = asyncio.Lock()
+    audio = WakeProbeASRAudioService("今天先不用助手")
+    dialogue = DialogueService(ProviderRegistry(settings).llm(), settings)
+
+    for payload in (
+        wake_probe_payload(chunk_id="wake_probe_1", is_final=False),
+        wake_probe_payload(chunk_id="wake_probe_final", is_final=True),
+    ):
+        task = await _handle_event(
+            websocket,  # type: ignore[arg-type]
+            EventEnvelope(type="client.media.audio_chunk", session_id=session.session_id, payload=payload.model_dump()),
+            session,
+            VisionService(ProviderRegistry(settings).vision(), settings),
+            dialogue,
+            audio,  # type: ignore[arg-type]
+            AvatarService(),
+            WakeService(),
+            settings,
+            runtime,
+            visual_runtime,
+            time.perf_counter(),
+            send_lock,
+            None,
+        )
+
+    assert task is None
+    assert audio.transcribe_calls == 1
+    assert session.status == "sleeping"
+    event_types = [event["type"] for event in websocket.events]
+    assert "assistant.text.final" not in event_types
+    asr_events = [event for event in websocket.events if event["type"] == "asr.transcript.final"]
+    assert asr_events[-1]["payload"]["purpose"] == "wake_probe"
+    assert asr_events[-1]["payload"]["wake_matched"] is False
+    assert any(
+        event["type"] == "debug.log" and event["payload"].get("code") == "wake_probe_no_match"
+        for event in websocket.events
+    )
+
+
+async def test_wake_probe_with_wake_word_wakes_without_dialogue_when_no_request() -> None:
+    websocket = StubWebSocket()
+    session = SessionState(session_id="test_session", wake_word="小七")
+    settings = Settings(realtime_provider="none", tts_provider="mock")
+    runtime = AudioRuntimeState()
+    visual_runtime = VisualRuntimeState()
+    send_lock = asyncio.Lock()
+    audio = WakeProbeASRAudioService("小七")
+    dialogue = DialogueService(ProviderRegistry(settings).llm(), settings)
+
+    for payload in (
+        wake_probe_payload(chunk_id="wake_probe_1", is_final=False),
+        wake_probe_payload(chunk_id="wake_probe_final", is_final=True),
+    ):
+        task = await _handle_event(
+            websocket,  # type: ignore[arg-type]
+            EventEnvelope(type="client.media.audio_chunk", session_id=session.session_id, payload=payload.model_dump()),
+            session,
+            VisionService(ProviderRegistry(settings).vision(), settings),
+            dialogue,
+            audio,  # type: ignore[arg-type]
+            AvatarService(),
+            WakeService(),
+            settings,
+            runtime,
+            visual_runtime,
+            time.perf_counter(),
+            send_lock,
+            None,
+        )
+
+    assert task is None
+    assert audio.transcribe_calls == 1
+    assert session.status == "listening"
+    event_types = [event["type"] for event in websocket.events]
+    assert "assistant.text.final" not in event_types
+    asr_events = [event for event in websocket.events if event["type"] == "asr.transcript.final"]
+    assert asr_events[-1]["payload"]["purpose"] == "wake_probe"
+    assert asr_events[-1]["payload"]["wake_matched"] is True
+    assert any(
+        event["type"] == "debug.log" and event["payload"].get("code") == "wake_probe_matched_no_request"
         for event in websocket.events
     )
 

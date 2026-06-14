@@ -67,6 +67,7 @@ export function MicPanel({
   const [level, setLevel] = useState(0);
   const [text, setText] = useState("");
   const [liveStreaming, setLiveStreaming] = useState(false);
+  const [wakeProbeActive, setWakeProbeActive] = useState(false);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -76,7 +77,7 @@ export function MicPanel({
   const sileroVadRef = useRef<MicVAD | null>(null);
   const streamedAudioChunksRef = useRef(0);
   const streamedAudioBytesRef = useRef(0);
-  const startLiveAudioRef = useRef<() => Promise<void>>(async () => undefined);
+  const startLiveAudioRef = useRef<(options?: { wakeProbe?: boolean }) => Promise<void>>(async () => undefined);
   const startWakeRecognitionRef = useRef<() => void>(() => undefined);
   const audioSentRef = useRef(false);
   const speechInputActiveRef = useRef(false);
@@ -92,6 +93,7 @@ export function MicPanel({
   const wakeAtRef = useRef(0);
   const keywordStartTimerRef = useRef(0);
   const continuousListeningRef = useRef(continuousListening);
+  const wakeProbeActiveRef = useRef(false);
   const [recognitionActive, setRecognitionActive] = useState(false);
   const sessionId = useAppStore((state) => state.sessionId);
   const connection = useAppStore((state) => state.connection);
@@ -163,6 +165,8 @@ export function MicPanel({
     audioSentRef.current = false;
     setSpeechInputActive(false, "stop");
     setLiveStreaming(false);
+    wakeProbeActiveRef.current = false;
+    setWakeProbeActive(false);
     cancelAnimationFrame(rafRef.current);
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
@@ -275,11 +279,11 @@ export function MicPanel({
     return sent;
   }, [audioMetadata, onAudioChunk, sessionId, setSpeechInputActive]);
 
-  const sendAudioTurn = useCallback((buffer: ArrayBuffer) => {
+  const sendAudioTurn = useCallback((buffer: ArrayBuffer, metadata: Record<string, unknown> = {}) => {
     let sentAudio = false;
     let sentChunks = 0;
     for (const chunk of splitPcm16Buffer(buffer)) {
-      const sent = sendAudioChunk(chunk, false);
+      const sent = sendAudioChunk(chunk, false, metadata);
       if (!sent) {
         return { sentAudio, sentFinal: false, sentChunks, totalBytes: buffer.byteLength };
       }
@@ -288,7 +292,7 @@ export function MicPanel({
     }
     return {
       sentAudio,
-      sentFinal: sentAudio ? sendAudioChunk(new ArrayBuffer(0), true) : false,
+      sentFinal: sentAudio ? sendAudioChunk(new ArrayBuffer(0), true, metadata) : false,
       sentChunks,
       totalBytes: buffer.byteLength,
     };
@@ -313,6 +317,8 @@ export function MicPanel({
       startingRef.current = false;
       setSpeechInputActive(false, "stop");
       setLiveStreaming(false);
+      wakeProbeActiveRef.current = false;
+      setWakeProbeActive(false);
       streamedAudioChunksRef.current = 0;
       streamedAudioBytesRef.current = 0;
       const shouldSendFinal = sendFinal && (hadRecorder || hadTenVad || hadSileroVad) && audioSentRef.current;
@@ -329,14 +335,19 @@ export function MicPanel({
     [sendAudioChunk, setSpeechInputActive],
   );
 
-  async function startLiveAudio() {
-    if (liveStreaming || recorderRef.current || tenVadRecorderRef.current || sileroVadRef.current) {
-      stopLiveAudio(true);
+  async function startLiveAudio(options: { wakeProbe?: boolean } = {}) {
+    const wakeProbe = options.wakeProbe === true;
+    if (liveStreaming || wakeProbeActiveRef.current || recorderRef.current || tenVadRecorderRef.current || sileroVadRef.current) {
+      stopLiveAudio(!wakeProbeActiveRef.current);
       return;
     }
     if (startingRef.current) return;
-    if (!realtimeReady) {
+    if (!wakeProbe && !realtimeReady) {
       setMicState(realtimeUnavailableReason || "实时语音未启用");
+      return;
+    }
+    if (wakeProbe && (!sessionId || connection !== "connected")) {
+      setMicState(!sessionId ? "会话未就绪，无法探测唤醒词" : "WebSocket 未连接，无法探测唤醒词");
       return;
     }
     if (muted) {
@@ -353,6 +364,12 @@ export function MicPanel({
     audioSentRef.current = false;
     streamedAudioChunksRef.current = 0;
     streamedAudioBytesRef.current = 0;
+    const wakeProbeMetadata = {
+      purpose: "wake_probe",
+      source: "wake_probe",
+      route: "asr_first",
+      wake_word: wakeWord,
+    };
     if (voiceSettings.vadProvider === "ten") try {
       const tenRecorder = new TenVadRecorder({
         threshold: voiceSettings.tenThreshold,
@@ -370,17 +387,22 @@ export function MicPanel({
           streamedAudioChunksRef.current = 0;
           streamedAudioBytesRef.current = 0;
           setSpeechInputActive(true, "speech_start");
-          setMicState("TEN VAD：检测到语音");
+          setMicState(wakeProbe ? "唤醒探测：检测到语音" : "TEN VAD：检测到语音");
           console.warn(`MODVII mic TEN VAD speech start ${JSON.stringify({
             traceId: traceIdRef.current,
             sendMode: voiceSettings.sendMode,
-            route: voiceSettings.route,
+            route: wakeProbe ? "asr_first" : voiceSettings.route,
+            wakeProbe,
           })}`);
         },
         onSpeechChunk: (pcm) => {
           let sentChunks = 0;
           for (const chunk of splitPcm16Buffer(pcm)) {
-            const sent = sendAudioChunk(chunk, false, { source: "ten_vad_stream" });
+            const sent = sendAudioChunk(
+              chunk,
+              false,
+              wakeProbe ? wakeProbeMetadata : { source: "ten_vad_stream" },
+            );
             if (!sent) {
               setSpeechInputActive(false, "error");
               setMicState("WebSocket 未连接");
@@ -391,7 +413,7 @@ export function MicPanel({
             streamedAudioBytesRef.current += chunk.byteLength;
             audioSentRef.current = true;
           }
-          if (sentChunks > 0) setMicState("TEN VAD：正在发送");
+          if (sentChunks > 0) setMicState(wakeProbe ? "唤醒探测：正在转写" : "TEN VAD：正在发送");
         },
         onSpeechEnd: (pcm, stats) => {
           if (!tenVadRecorderRef.current) return;
@@ -400,7 +422,7 @@ export function MicPanel({
               ? {
                   sentAudio: true,
                   sentFinal: sendAudioChunk(new ArrayBuffer(0), true, {
-                    source: "ten_vad_stream",
+                    ...(wakeProbe ? wakeProbeMetadata : { source: "ten_vad_stream" }),
                     vad_stats: stats,
                     streamed_chunks: streamedAudioChunksRef.current,
                     streamed_bytes: streamedAudioBytesRef.current,
@@ -408,19 +430,20 @@ export function MicPanel({
                   sentChunks: streamedAudioChunksRef.current,
                   totalBytes: streamedAudioBytesRef.current,
                 }
-              : sendAudioTurn(pcm);
+              : sendAudioTurn(pcm, wakeProbe ? wakeProbeMetadata : {});
           audioSentRef.current = audioSentRef.current || result.sentAudio;
           console.warn(`MODVII mic TEN VAD speech end ${JSON.stringify({
             traceId: traceIdRef.current,
             sendMode: voiceSettings.sendMode,
             route: voiceSettings.route,
+            wakeProbe,
             ...stats,
             ...result,
           })}`);
           if (!result.sentAudio || !result.sentFinal) {
             setMicState("WebSocket 未连接");
           } else {
-            setMicState("正在回应");
+            setMicState(wakeProbe ? "正在判断是否叫了小七" : "正在回应");
           }
           window.setTimeout(() => stopLiveAudio(false), 0);
         },
@@ -447,8 +470,10 @@ export function MicPanel({
       });
       tenVadRecorderRef.current = tenRecorder;
       await tenRecorder.start(stream);
-      setLiveStreaming(true);
-      setMicState("TEN VAD：等待语音");
+      wakeProbeActiveRef.current = wakeProbe;
+      setWakeProbeActive(wakeProbe);
+      setLiveStreaming(!wakeProbe);
+      setMicState(wakeProbe ? `唤醒探测：等待“${wakeWord}”` : "TEN VAD：等待语音");
       console.warn("MODVII mic TEN VAD started");
       return;
     } catch (error) {
@@ -486,7 +511,7 @@ export function MicPanel({
           if (!sileroVadRef.current) return;
           const pcm = scalePcm16Buffer(encodePcm16(audio), voiceSettings.inputGain);
           const result = pcm.byteLength > 0
-            ? sendAudioTurn(pcm)
+            ? sendAudioTurn(pcm, wakeProbe ? wakeProbeMetadata : {})
             : { sentAudio: false, sentFinal: false, sentChunks: 0, totalBytes: 0 };
           audioSentRef.current = audioSentRef.current || result.sentAudio;
           console.warn(`MODVII mic Silero speech end ${JSON.stringify({
@@ -496,7 +521,7 @@ export function MicPanel({
           if (!result.sentAudio || !result.sentFinal) {
             setMicState("WebSocket 未连接");
           } else {
-            setMicState("正在回应");
+            setMicState(wakeProbe ? "正在判断是否叫了小七" : "正在回应");
           }
           window.setTimeout(() => stopLiveAudio(false), 0);
         },
@@ -509,8 +534,10 @@ export function MicPanel({
       });
       sileroVadRef.current = vad;
       await vad.start();
-      setLiveStreaming(true);
-      setMicState("等待语音");
+      wakeProbeActiveRef.current = wakeProbe;
+      setWakeProbeActive(wakeProbe);
+      setLiveStreaming(!wakeProbe);
+      setMicState(wakeProbe ? `唤醒探测：等待“${wakeWord}”` : "等待语音");
       console.warn("MODVII mic Silero started");
       return;
     } catch (error) {
@@ -543,7 +570,7 @@ export function MicPanel({
 
         let sent = true;
         for (const gatedChunk of decision.chunks) {
-          sent = sendAudioChunk(gatedChunk, false);
+          sent = sendAudioChunk(gatedChunk, false, wakeProbe ? wakeProbeMetadata : {});
           if (!sent) break;
           audioSentRef.current = true;
         }
@@ -555,9 +582,9 @@ export function MicPanel({
         }
 
         if (decision.state === "waiting") {
-          setMicState("等待语音");
+          setMicState(wakeProbe ? `唤醒探测：等待“${wakeWord}”` : "等待语音");
         } else if (decision.state === "speaking") {
-          setMicState("实时语音发送中");
+          setMicState(wakeProbe ? "唤醒探测：正在转写" : "实时语音发送中");
         } else if (decision.state === "silence") {
           setMicState("检测静音");
         }
@@ -591,8 +618,10 @@ export function MicPanel({
     recorderRef.current = recorder;
     try {
       await recorder.start(stream);
-      setLiveStreaming(true);
-      setMicState("实时语音发送中");
+      wakeProbeActiveRef.current = wakeProbe;
+      setWakeProbeActive(wakeProbe);
+      setLiveStreaming(!wakeProbe);
+      setMicState(wakeProbe ? "唤醒探测：正在转写" : "实时语音发送中");
     } catch (error) {
       recorderRef.current = null;
       setMicState(error instanceof Error ? error.message : "实时语音不可用");
@@ -602,23 +631,25 @@ export function MicPanel({
   }
   startLiveAudioRef.current = startLiveAudio;
 
+  function startWakeProbeAudio() {
+    void startLiveAudio({ wakeProbe: true });
+  }
+
   useEffect(() => {
     onLiveStateChange?.(liveStreaming);
   }, [liveStreaming, onLiveStateChange]);
 
   function startWakeRecognition() {
     recognitionWantedRef.current = true;
-    if (recognitionRef.current) return;
+    if (recognitionRef.current || wakeProbeActiveRef.current) return;
     if (muted) {
       setMicState("静音中，无法监听唤醒词");
       return;
     }
     const Recognition = getSpeechRecognition();
     if (!Recognition) {
-      setMicState(realtimeReady ? "无本地关键词识别，改用直接语音监听" : "浏览器不支持 SpeechRecognition");
-      if (realtimeReady) {
-        void startLiveAudio();
-      }
+      setMicState("浏览器关键词识别不可用，改用本地 ASR 唤醒探测");
+      startWakeProbeAudio();
       return;
     }
     const recognition = new Recognition();
@@ -681,10 +712,10 @@ export function MicPanel({
       );
       if (terminalError) {
         recognitionWantedRef.current = false;
-        setMicState(realtimeReady ? `关键词监听失败：${reason}，改用实时语音` : `关键词监听暂不可用：${reason}`);
-        if (realtimeReady && !muted) {
+        setMicState(`关键词监听失败：${reason}，改用本地 ASR 唤醒探测`);
+        if (!muted) {
           window.setTimeout(() => {
-            void startLiveAudio();
+            startWakeProbeAudio();
           }, 250);
         }
         return;
@@ -718,8 +749,9 @@ export function MicPanel({
   }
 
   function toggleWakeRecognition() {
-    if (recognitionActive || recognitionRef.current) {
+    if (recognitionActive || recognitionRef.current || wakeProbeActiveRef.current) {
       stopWakeRecognition();
+      stopLiveAudio(false);
       setMicState("已就绪");
       return;
     }
@@ -736,7 +768,7 @@ export function MicPanel({
       if (wakeRequest.requestText) {
         onUserText(wakeRequest.requestText, { keepConversation: true });
       } else {
-        void startLiveAudio();
+        void startLiveAudio({ wakeProbe: false });
       }
     } else {
       onUserText(trimmed);
@@ -763,7 +795,7 @@ export function MicPanel({
       stopWakeRecognition();
       stopLiveAudio(false);
       keywordStartTimerRef.current = window.setTimeout(() => {
-        void startLiveAudioRef.current();
+        void startLiveAudioRef.current({ wakeProbe: false });
       }, 120);
     }
   }, [stopLiveAudio, wakeListenSignal]);
@@ -828,13 +860,13 @@ export function MicPanel({
           <Radio size={18} />
         </button>
         <button
-          className={`icon-button${liveStreaming ? " active" : ""}`}
+          className={`icon-button${liveStreaming || wakeProbeActive ? " active" : ""}`}
           type="button"
-          title={liveButtonTitle}
-          disabled={!liveStreaming && !realtimeReady}
-          onClick={() => void startLiveAudio()}
+          title={wakeProbeActive ? "停止唤醒探测" : liveButtonTitle}
+          disabled={!liveStreaming && !wakeProbeActive && !realtimeReady}
+          onClick={() => void startLiveAudio({ wakeProbe: false })}
         >
-          {liveStreaming ? <Square size={17} /> : <AudioLines size={18} />}
+          {liveStreaming || wakeProbeActive ? <Square size={17} /> : <AudioLines size={18} />}
         </button>
       </div>
       <div className="input-row">
@@ -862,7 +894,9 @@ export function MicPanel({
         <div>
           <dt>实时</dt>
           <dd>
-            {liveStreaming
+            {wakeProbeActive
+              ? "唤醒探测"
+              : liveStreaming
               ? "发送中"
               : realtimeAvailable
                 ? realtimeFormatCompatible

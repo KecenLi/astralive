@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from contextlib import suppress
 import io
 import logging
+import re
 import time
 from typing import Any
 import wave
@@ -39,6 +40,17 @@ FIXED_NOTICE_PREWARM: tuple[tuple[str, str], ...] = (
     ("我这边听到实时语音通道断开了，但没有收到可识别的音频。请再说一次。", "concerned"),
     ("我听到你说话了，但备用识别超时了。请再说一次，或者先用文本输入。", "concerned"),
     ("我听到你说话了，但这次没有识别出清楚内容。请离麦克风近一点再说一次。", "concerned"),
+)
+WAKE_ALIASES = (
+    "小七",
+    "小7",
+    "小柒",
+    "小琪",
+    "小奇",
+    "小期",
+    "晓七",
+    "晓琪",
+    "晓柒",
 )
 
 
@@ -462,8 +474,10 @@ async def _handle_event(
         return response_task
 
     if event.type == "client.media.audio_chunk":
-        _clear_pending_visual_runtime(visual_runtime)
         payload = AudioChunkPayload.model_validate(event.payload)
+        wake_probe = _is_wake_probe_audio(payload)
+        if not wake_probe:
+            _clear_pending_visual_runtime(visual_runtime)
         try:
             audio_bytes = audio.decode_audio_chunk(payload)
         except Exception as exc:  # noqa: BLE001
@@ -507,6 +521,22 @@ async def _handle_event(
         if not turn_audio:
             await _send_error(websocket, session.session_id, "empty_audio", "Audio turn is empty.", send_lock)
             return response_task
+        if wake_probe:
+            return await _handle_wake_probe_audio_turn(
+                websocket,
+                session,
+                audio,
+                dialogue,
+                avatar,
+                wake,
+                settings,
+                payload,
+                turn_audio,
+                started,
+                send_lock,
+                response_task,
+                visual_runtime,
+            )
 
         _cancel_task(response_task)
         if audio.has_realtime and not _prefer_asr_first(payload, settings):
@@ -660,6 +690,169 @@ async def _handle_event(
 
     await _send_error(websocket, session.session_id, "unsupported_event", event.type, send_lock)
     return response_task
+
+
+async def _handle_wake_probe_audio_turn(
+    websocket: WebSocket,
+    session: SessionState,
+    audio: AudioService,
+    dialogue: DialogueService,
+    avatar: AvatarService,
+    wake: WakeService,
+    settings: Settings,
+    payload: AudioChunkPayload,
+    turn_audio: bytes,
+    started: float,
+    send_lock: asyncio.Lock,
+    response_task: asyncio.Task[None] | None,
+    visual_runtime: VisualRuntimeState | None = None,
+) -> asyncio.Task[None] | None:
+    trace_id = _audio_trace_id(payload)
+    await _send(
+        websocket,
+        make_event(
+            "debug.log",
+            session.session_id,
+            {
+                "code": "wake_probe_started",
+                "message": "Wake probe audio is using ASR only; dialogue is gated until wake word matches.",
+                "trace_id": trace_id,
+                "bytes": len(turn_audio),
+            },
+        ),
+        send_lock,
+    )
+    try:
+        asr_result = await audio.transcribe(turn_audio, _audio_metadata(payload))
+    except Exception as exc:  # noqa: BLE001
+        detail = str(exc) or type(exc).__name__
+        logger.warning("wake probe ASR failed: %s", detail)
+        await _send(
+            websocket,
+            make_event(
+                "debug.log",
+                session.session_id,
+                {
+                    "code": "wake_probe_asr_failed",
+                    "message": "Wake probe ASR failed; no dialogue turn was started.",
+                    "trace_id": trace_id,
+                    "detail": detail,
+                },
+            ),
+            send_lock,
+        )
+        await _send(
+            websocket,
+            make_event("server.session.state", session.session_id, _session_payload(session, settings)),
+            send_lock,
+        )
+        await _send_cost(websocket, session, send_lock)
+        return response_task
+
+    session.cost_meter.asr_calls += 1
+    _record_estimated_cost(session, settings, raw=asr_result.raw, output_text=asr_result.text)
+    matched, request_text = _extract_wake_request(asr_result.text, session.wake_word or settings.wake_word)
+    await _send(
+        websocket,
+        make_event(
+            "asr.transcript.final",
+            session.session_id,
+            {
+                "text": request_text if matched and request_text else asr_result.text,
+                "raw_text": asr_result.text,
+                "confidence": asr_result.confidence,
+                "trace_id": trace_id,
+                "purpose": "wake_probe",
+                "wake_matched": matched,
+                "request_text": request_text,
+            },
+        ),
+        send_lock,
+    )
+    await _send_cost(websocket, session, send_lock)
+
+    if not matched:
+        await _send(
+            websocket,
+            make_event(
+                "debug.log",
+                session.session_id,
+                {
+                    "code": "wake_probe_no_match",
+                    "message": "Wake probe transcript did not contain the wake word; dialogue was not started.",
+                    "trace_id": trace_id,
+                    "text": asr_result.text,
+                },
+            ),
+            send_lock,
+        )
+        await _send(
+            websocket,
+            make_event("server.session.state", session.session_id, _session_payload(session, settings)),
+            send_lock,
+        )
+        return response_task
+
+    _cancel_task(response_task)
+    if visual_runtime is not None:
+        _clear_pending_visual_runtime(visual_runtime)
+    wake.wake(session)
+    await _send(
+        websocket,
+        make_event(
+            "debug.log",
+            session.session_id,
+            {
+                "code": "wake_probe_matched",
+                "message": "Wake probe matched the wake word.",
+                "trace_id": trace_id,
+                "request_text": request_text,
+            },
+        ),
+        send_lock,
+    )
+    await _send(
+        websocket,
+        make_event("server.session.state", session.session_id, _session_payload(session, settings)),
+        send_lock,
+    )
+
+    if request_text:
+        return await _handle_user_text(
+            websocket,
+            session,
+            dialogue,
+            audio,
+            avatar,
+            settings,
+            request_text,
+            started,
+            send_lock,
+            None,
+            visual_runtime,
+        )
+
+    await _send(
+        websocket,
+        avatar.state_event(session.session_id, "listening", "curious", "我在听。"),
+        send_lock,
+    )
+    _start_fixed_notice_audio(websocket, session, audio, settings, "我在听。", "curious", send_lock)
+    await _send(
+        websocket,
+        make_event(
+            "debug.log",
+            session.session_id,
+            {
+                "code": "wake_probe_matched_no_request",
+                "message": "Wake word matched without a request; client should capture the next utterance.",
+                "trace_id": trace_id,
+            },
+        ),
+        send_lock,
+    )
+    await _send_cost(websocket, session, send_lock)
+    return None
 
 
 async def _handle_realtime_audio_chunk(
@@ -2352,6 +2545,31 @@ def _audio_metadata(payload: AudioChunkPayload) -> dict:
 def _audio_trace_id(payload: AudioChunkPayload) -> str:
     trace_id = payload.metadata.get("trace_id")
     return str(trace_id) if trace_id else ""
+
+
+def _is_wake_probe_audio(payload: AudioChunkPayload) -> bool:
+    purpose = str(payload.metadata.get("purpose") or "").lower()
+    source = str(payload.metadata.get("source") or "").lower()
+    return purpose == "wake_probe" or source == "wake_probe"
+
+
+def _wake_pattern(alias: str) -> re.Pattern[str]:
+    return re.compile(r"\s*".join(re.escape(part) for part in alias), re.IGNORECASE)
+
+
+def _strip_wake_request_noise(value: str) -> str:
+    return re.sub(r"^[，,。.!！?？、：:；;\s]+", "", value.strip())
+
+
+def _extract_wake_request(transcript: str, wake_word: str) -> tuple[bool, str]:
+    normalized = transcript.strip()
+    aliases = [wake_word, *WAKE_ALIASES]
+    for alias in dict.fromkeys(alias for alias in aliases if alias):
+        match = _wake_pattern(alias).search(normalized)
+        if not match:
+            continue
+        return True, _strip_wake_request_noise(normalized[match.end():])
+    return False, ""
 
 
 def _prefer_asr_first(payload: AudioChunkPayload, settings: Settings) -> bool:

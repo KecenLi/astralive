@@ -79,6 +79,8 @@ interface ServerEventEffects {
   onAssistantAudioExpected?: () => void;
   onAssistantAudioStreamDone?: () => void;
   onAssistantAudioDone?: () => void;
+  onWakeProbeNoMatch?: () => void;
+  onWakeProbeMatchedNoRequest?: () => void;
 }
 
 function cancelSpeech() {
@@ -156,8 +158,20 @@ function handleServerEvent(event: EventEnvelope<unknown>, effects: ServerEventEf
     if (text) store.setUserSpeechDraft(text);
   }
   if (event.type === "asr.transcript.final") {
-    const text = (event.payload as { text?: string }).text?.trim();
-    store.finalizeUserSpeech(text ?? "");
+    const payload = event.payload as {
+      text?: string;
+      purpose?: string;
+      wake_matched?: boolean;
+      request_text?: string;
+    };
+    const text = payload.text?.trim();
+    if (payload.purpose === "wake_probe" && !payload.wake_matched) {
+      store.setUserSpeechDraft("");
+    } else if (payload.purpose === "wake_probe" && payload.wake_matched) {
+      store.finalizeUserSpeech((payload.request_text || text || store.wakeWord).trim());
+    } else {
+      store.finalizeUserSpeech(text ?? "");
+    }
   }
   if (event.type === "vision.summary") {
     const payload = event.payload as VisionSummaryPayload;
@@ -205,6 +219,15 @@ function handleServerEvent(event: EventEnvelope<unknown>, effects: ServerEventEf
   }
   if (event.type === "cost.update") {
     store.setCost(event.payload as unknown as CostMeter);
+  }
+  if (event.type === "debug.log") {
+    const payload = event.payload as { code?: string };
+    if (payload.code === "wake_probe_no_match" || payload.code === "wake_probe_asr_failed") {
+      effects.onWakeProbeNoMatch?.();
+    }
+    if (payload.code === "wake_probe_matched_no_request") {
+      effects.onWakeProbeMatchedNoRequest?.();
+    }
   }
   if (event.type === "error") {
     store.addMessage("system", JSON.stringify(event.payload));
@@ -429,6 +452,11 @@ function MainApp() {
             onAssistantAudioExpected: markAssistantAudioExpected,
             onAssistantAudioStreamDone: markAssistantAudioStreamDone,
             onAssistantAudioDone: handleAssistantAudioDone,
+            onWakeProbeNoMatch: () => rearmContinuousListening("wake_probe_no_match"),
+            onWakeProbeMatchedNoRequest: () => {
+              listenModeRef.current = "live";
+              window.setTimeout(() => setWakeListenSignal((value) => value + 1), 550);
+            },
           }),
         );
         const socket = wsClient.connect(session.session_id);
@@ -471,6 +499,7 @@ function MainApp() {
     markAssistantAudioExpected,
     markAssistantAudioStreamDone,
     markResponseStarted,
+    rearmContinuousListening,
     scheduleReconnect,
     sessionRestartSignal,
     stopClientAudio,
@@ -611,6 +640,7 @@ function MainApp() {
 
   const sendAudioChunk = useCallback((payload: AudioChunkPayload) => {
     const actions = useAppStore.getState();
+    const isWakeProbe = payload.metadata?.purpose === "wake_probe" || payload.metadata?.source === "wake_probe";
     if (payload.is_final) {
       updateRealSpeechInput({ type: "audio_final" });
     } else if (payload.data_base64) {
@@ -628,7 +658,7 @@ function MainApp() {
       audioTurnActiveRef.current = false;
     }
     const sent = wsClient.send(createEvent("client.media.audio_chunk", actions.sessionId, payload));
-    if (sent && payload.is_final) {
+    if (sent && payload.is_final && !isWakeProbe) {
       assistantAudioDoneRef.current = false;
       responseAudioTurnInProgressRef.current = false;
       window.clearTimeout(responseAudioDoneTimeoutRef.current);

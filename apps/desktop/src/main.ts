@@ -1,5 +1,5 @@
 import { app, BrowserWindow, desktopCapturer, ipcMain, Menu, screen, session } from "electron";
-import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, spawnSync, ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
@@ -62,6 +62,7 @@ let petWindow: BrowserWindow | null = null;
 let backendProcess: ChildProcessWithoutNullStreams | null = null;
 let backendUrl = "";
 let backendError = "";
+let isQuitting = false;
 
 const remoteDebugArg = process.argv.find((arg) => arg.startsWith("--remote-debugging-port="));
 const remoteDebugPort =
@@ -370,14 +371,46 @@ async function startBackend() {
 }
 
 function stopBackend() {
-  if (!backendProcess || backendProcess.killed) return;
-  const pid = backendProcess.pid;
-  if (process.platform === "win32" && pid) {
-    spawn("taskkill.exe", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
-  } else {
-    backendProcess.kill("SIGTERM");
-  }
+  const processToStop = backendProcess;
   backendProcess = null;
+  if (!processToStop) return;
+  const pid = processToStop.pid;
+  processToStop.removeAllListeners();
+  if (process.platform === "win32" && pid) {
+    const result = spawnSync("taskkill.exe", ["/pid", String(pid), "/T", "/F"], {
+      windowsHide: true,
+      timeout: 5000,
+    });
+    if (result.error) {
+      log("Backend taskkill failed", result.error);
+    }
+  } else if (!processToStop.killed) {
+    processToStop.kill("SIGTERM");
+  }
+}
+
+function destroyWindow(window: BrowserWindow | null) {
+  if (!window || window.isDestroyed()) return;
+  window.removeAllListeners("close");
+  window.destroy();
+}
+
+function destroyAppWindows() {
+  const pet = petWindow;
+  const main = mainWindow;
+  petWindow = null;
+  mainWindow = null;
+  destroyWindow(pet);
+  destroyWindow(main);
+}
+
+function quitApplication(reason: string) {
+  if (isQuitting) return;
+  isQuitting = true;
+  log("Quitting application", { reason });
+  destroyAppWindows();
+  stopBackend();
+  app.quit();
 }
 
 function configurePermissions() {
@@ -425,6 +458,11 @@ async function createWindow() {
   });
   mainWindow.webContents.once("did-finish-load", () => {
     void writeRendererSmokeReport();
+  });
+  mainWindow.on("close", (event) => {
+    if (isQuitting || process.env.MODVII_RENDERER_SMOKE_PATH) return;
+    event.preventDefault();
+    quitApplication("main_window_close");
   });
   mainWindow.on("closed", () => {
     mainWindow = null;
@@ -653,13 +691,19 @@ if (!gotLock) {
 
 app.on("window-all-closed", () => {
   log("All windows closed; quitting.");
-  mainWindow = null;
-  petWindow = null;
-  stopBackend();
-  app.quit();
+  quitApplication("window_all_closed");
 });
 
-app.on("before-quit", stopBackend);
+app.on("before-quit", () => {
+  isQuitting = true;
+  destroyAppWindows();
+  stopBackend();
+});
+
+app.on("will-quit", () => {
+  isQuitting = true;
+  stopBackend();
+});
 
 process.on("uncaughtException", (error) => {
   log("Uncaught exception", error);
