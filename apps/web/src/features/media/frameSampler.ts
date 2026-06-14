@@ -45,7 +45,17 @@ export const VISUAL_CAPTURE_PROFILES: Record<VisualCaptureMode, VisualCapturePro
 };
 
 export function activityFromStatus(status: string): VisualCaptureActivity {
-  if (status === "sleeping" || status === "idle") return "idle";
+  if (
+    status === "sleeping" ||
+    status === "idle" ||
+    status === "listening" ||
+    status === "thinking" ||
+    status === "speaking" ||
+    status === "interrupted" ||
+    status === "error"
+  ) {
+    return "idle";
+  }
   return "active";
 }
 

@@ -2,7 +2,7 @@
 
 - Repository: https://github.com/KecenLi/astralive
 - Branch: main
-- Latest feature commit for this round: pending, visual capture / voice loop / ASR recovery / Chinese UI round
+- Latest feature commit for this round: pending, visual capture contention / continuous listening rearm round
 - To check the current latest commit: `git rev-parse --short HEAD`
 - Reminder: after each implementation and test round, commit and push intentional source changes, then report the commit hash, latest packaged exe path, timestamp, and SHA256.
 
@@ -21,6 +21,18 @@
 - Final packaged real-provider smoke: `low_noise` passed with local Whisper + Vertex vision/LLM + CosyVoice3, auto-returned to listening, visual summary updated, no server errors. `white_noise` did not crash but base Whisper produced punctuation-only text, now guarded.
 - Latest portable exe: `D:\assist ai\dist\desktop\MODVII 0.1.0.exe`, timestamp `2026-06-14 20:38:40 +0800`, SHA256 `94CE60E914D52065AE696F6466276EFD0822CCA5766F83DAEFA46D7C444B76A0`.
 - Latest installer: `D:\assist ai\dist\desktop\MODVII Setup 0.1.0.exe`, timestamp `2026-06-14 20:38:38 +0800`, SHA256 `D6FF62F6D8CA48D861D4B32CE56714C33E7B9A8B4CC0920083BC22A9175BEFA5`.
+
+## 2026-06-14 Visual Capture Contention / Continuous Listening Round
+
+- GitHub reminder: push only intentional source changes to `https://github.com/KecenLi/astralive` on `main`; do not commit `.env`, `data/`, `.cache`, packaged `dist/`, local model weights, logs, or tokens.
+- Live-log finding from the user-running portable: microphone TEN VAD did trigger and sent audio, but Vertex vision returned `HTTP 429 RESOURCE_EXHAUSTED` at 21:01:41 and 21:01:51 while camera/screen capture was active.
+- Root cause handled: camera and screen may remain enabled together, but renderer-side frame encoding is now serialized so two visual sources cannot simultaneously block the Electron renderer thread that also runs VAD callbacks.
+- Capture CPU contention fix: frame JPEG encoding now uses async `canvas.toBlob()` instead of synchronous `canvas.toDataURL()`, reducing main-thread stalls while microphone VAD is armed.
+- Voice-priority fix: app statuses `listening`, `thinking`, and `speaking` now use idle visual cadence instead of active cadence; manual focus captures still work.
+- Continuous listening fix: if Electron lacks native `SpeechRecognition`, the keyword-listen fallback no longer runs TEN VAD only once. On no-speech timeout it automatically restarts while conversation mode is enabled.
+- Rearm race fix: keyword recognition restart no longer trusts stale React `recognitionActive` state, clears old recognition/VAD instances before restart, and retries if the browser reports recognition is already starting.
+- Validation before push this round: `npm --prefix apps/web test -- --run` passed with 53 tests; `npm --prefix apps/web run build` passed.
+- Packaging note: the currently running `D:\assist ai\dist\desktop\MODVII 0.1.0.exe` is still the old packaged build and will not include this round until it is closed and rebuilt.
 
 ## 2026-06-14 Visual Timeout / Manual Capture Round
 

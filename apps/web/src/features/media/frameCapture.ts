@@ -1,6 +1,30 @@
 import { FramePayload } from "../../lib/events";
 import { computeAverageHash } from "./sceneHash";
 
+async function canvasToJpegBase64(canvas: HTMLCanvasElement, quality: number): Promise<string> {
+  const blob = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (result) => {
+        if (result) {
+          resolve(result);
+        } else {
+          reject(new Error("Canvas JPEG encoding failed."));
+        }
+      },
+      "image/jpeg",
+      quality,
+    );
+  });
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    const chunk = bytes.subarray(offset, offset + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
 export async function captureVideoFrame(
   video: HTMLVideoElement,
   reason: FramePayload["capture_reason"],
@@ -20,7 +44,8 @@ export async function captureVideoFrame(
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("Canvas is not available.");
   ctx.drawImage(video, 0, 0, width, height);
-  const dataUrl = canvas.toDataURL("image/jpeg", options.quality);
+  const sceneHash = computeAverageHash(canvas);
+  const dataBase64 = await canvasToJpegBase64(canvas, options.quality);
   return {
     frame_id: `frame_${Date.now()}`,
     mime: "image/jpeg",
@@ -28,9 +53,8 @@ export async function captureVideoFrame(
     height,
     quality: options.quality,
     capture_reason: reason,
-    scene_hash: computeAverageHash(canvas),
-    data_base64: dataUrl.split(",")[1] ?? "",
+    scene_hash: sceneHash,
+    data_base64: dataBase64,
     prompt,
   };
 }
-

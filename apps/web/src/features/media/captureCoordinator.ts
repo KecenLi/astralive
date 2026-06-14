@@ -1,9 +1,10 @@
 // Shared visual-capture coordinator.
 //
-// Camera and screen capture run as independent timer loops. They should be able
-// to progress in parallel, but each individual source still needs its own guard
-// so a slow capture cannot pile up stale frames. The legacy runExclusiveCapture
-// API is kept for tests and older callers; panels use runVisualSourceCapture.
+// Camera and screen capture run as independent timer loops. They are allowed to
+// stay enabled at the same time, but actual frame encoding is serialized because
+// canvas capture runs on the renderer thread and can starve microphone VAD.
+// The legacy runExclusiveCapture API is kept for tests and older callers; panels
+// use runVisualSourceCapture.
 
 const MIN_GAP_MS = 180;
 // If a single capture somehow never resolves, release the lock anyway after
@@ -16,7 +17,7 @@ let lockedAt = 0;
 
 const SOURCE_MIN_GAP_MS = 160;
 const SOURCE_MAX_HOLD_MS = 8000;
-const MAX_PARALLEL_SOURCES = 2;
+const MAX_PARALLEL_SOURCES = 1;
 
 const sourceBusy = new Map<string, number>();
 const sourceLastRunAt = new Map<string, number>();
@@ -73,10 +74,9 @@ function cleanupStaleSourceLocks(t: number): void {
 }
 
 /**
- * Run one capture for a named source. Camera and screen may run at the same
- * time, while repeated captures from the same source are skipped until the
- * previous one finishes. This gives us real camera/screen parallelism without
- * allowing a single stream to backlog.
+ * Run one capture for a named source. Both camera and screen loops may remain
+ * active, while actual encoding/upload work is admitted one source at a time.
+ * This keeps multimodal capture alive without letting visual work block audio.
  */
 export async function runVisualSourceCapture<T>(
   source: "camera" | "screen",

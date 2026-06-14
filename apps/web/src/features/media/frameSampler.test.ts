@@ -24,8 +24,10 @@ describe("frameSampler", () => {
   it("maps app status to capture activity", () => {
     expect(activityFromStatus("sleeping")).toBe("idle");
     expect(activityFromStatus("idle")).toBe("idle");
-    expect(activityFromStatus("listening")).toBe("active");
-    expect(activityFromStatus("speaking")).toBe("active");
+    expect(activityFromStatus("listening")).toBe("idle");
+    expect(activityFromStatus("thinking")).toBe("idle");
+    expect(activityFromStatus("speaking")).toBe("idle");
+    expect(activityFromStatus("awake")).toBe("active");
   });
 
   it("emits explicit capture reasons for source and mode", () => {

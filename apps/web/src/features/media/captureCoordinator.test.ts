@@ -61,7 +61,7 @@ describe("captureCoordinator", () => {
     expect(maxActive).toBeLessThanOrEqual(1);
   });
 
-  it("allows camera and screen captures to run in parallel", async () => {
+  it("keeps camera and screen enabled but serializes renderer capture work", async () => {
     let active = 0;
     let maxActive = 0;
     const work = async () => {
@@ -73,7 +73,7 @@ describe("captureCoordinator", () => {
 
     await Promise.all([runVisualSourceCapture("camera", work), runVisualSourceCapture("screen", work)]);
 
-    expect(maxActive).toBe(2);
+    expect(maxActive).toBeLessThanOrEqual(1);
   });
 
   it("does not queue two captures from the same visual source", async () => {

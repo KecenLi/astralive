@@ -728,6 +728,7 @@ function MainApp() {
             onAudioChunk={sendAudioChunk}
             onLiveStateChange={setLiveAudioActive}
             onSpeechInputStateChange={handleSpeechInputStateChange}
+            continuousListening={conversationMode}
             stopSignal={audioStopSignal}
           />
           <CostPanel />

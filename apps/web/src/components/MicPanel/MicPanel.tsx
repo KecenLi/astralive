@@ -27,6 +27,7 @@ interface MicPanelProps {
   onAudioChunk: (payload: AudioChunkPayload) => boolean;
   onLiveStateChange?: (active: boolean) => void;
   onSpeechInputStateChange?: (active: boolean, reason: string) => void;
+  continuousListening?: boolean;
   stopSignal: number;
 }
 
@@ -58,6 +59,7 @@ export function MicPanel({
   onAudioChunk,
   onLiveStateChange,
   onSpeechInputStateChange,
+  continuousListening = false,
   stopSignal,
 }: MicPanelProps) {
   const [micState, setMicState] = useState("未授权");
@@ -88,6 +90,8 @@ export function MicPanel({
   const handledWakeTranscriptRef = useRef("");
   const rafRef = useRef(0);
   const wakeAtRef = useRef(0);
+  const keywordStartTimerRef = useRef(0);
+  const continuousListeningRef = useRef(continuousListening);
   const [recognitionActive, setRecognitionActive] = useState(false);
   const sessionId = useAppStore((state) => state.sessionId);
   const connection = useAppStore((state) => state.connection);
@@ -124,6 +128,27 @@ export function MicPanel({
     [onSpeechInputStateChange],
   );
 
+  useEffect(() => {
+    continuousListeningRef.current = continuousListening;
+    if (!continuousListening) {
+      window.clearTimeout(keywordStartTimerRef.current);
+      keywordStartTimerRef.current = 0;
+    }
+  }, [continuousListening]);
+
+  const scheduleContinuousListenRestart = useCallback(
+    (reason: string) => {
+      window.clearTimeout(keywordStartTimerRef.current);
+      if (!continuousListeningRef.current || muted) return;
+      keywordStartTimerRef.current = window.setTimeout(() => {
+        if (!continuousListeningRef.current || muted) return;
+        console.warn(`MODVII mic continuous listen restart: ${reason}`);
+        startWakeRecognitionRef.current();
+      }, 650);
+    },
+    [muted],
+  );
+
   const stopMic = useCallback(() => {
     tenVadRecorderRef.current?.stop();
     tenVadRecorderRef.current = null;
@@ -152,8 +177,10 @@ export function MicPanel({
     pendingWakeRequestRef.current = "";
     window.clearTimeout(recognitionRestartTimerRef.current);
     window.clearTimeout(pendingWakeTimerRef.current);
+    window.clearTimeout(keywordStartTimerRef.current);
     recognitionRestartTimerRef.current = 0;
     pendingWakeTimerRef.current = 0;
+    keywordStartTimerRef.current = 0;
     const recognition = recognitionRef.current;
     recognitionRef.current = null;
     if (recognition) {
@@ -406,11 +433,13 @@ export function MicPanel({
           setSpeechInputActive(false, "cancel");
           stopLiveAudio(false);
           setMicState("未检测到语音");
+          scheduleContinuousListenRestart("ten_vad_no_speech");
         },
         onError: (error) => {
           setSpeechInputActive(false, "error");
           setMicState(error.message);
           console.warn("MODVII mic TEN VAD error", error);
+          scheduleContinuousListenRestart("ten_vad_error");
         },
         onDebug: (message, detail) => {
           console.warn(message, detail ?? "");
@@ -548,11 +577,15 @@ export function MicPanel({
           } else {
             stopLiveAudio(decision.sendFinal);
           }
+          if (decision.state === "initial_timeout") {
+            scheduleContinuousListenRestart("rms_no_speech");
+          }
         }
       },
       onError: (error) => {
         setSpeechInputActive(false, "error");
         setMicState(error.message);
+        scheduleContinuousListenRestart("rms_error");
       },
     });
     recorderRef.current = recorder;
@@ -575,7 +608,7 @@ export function MicPanel({
 
   function startWakeRecognition() {
     recognitionWantedRef.current = true;
-    if (recognitionRef.current || recognitionActive) return;
+    if (recognitionRef.current) return;
     if (muted) {
       setMicState("静音中，无法监听唤醒词");
       return;
@@ -670,7 +703,13 @@ export function MicPanel({
     try {
       recognition.start();
     } catch {
-      setMicState("语音识别已经在运行");
+      setMicState("关键词监听重启中");
+      window.clearTimeout(recognitionRestartTimerRef.current);
+      recognitionRestartTimerRef.current = window.setTimeout(() => {
+        if (recognitionWantedRef.current && !recognitionRef.current && !muted) {
+          startWakeRecognition();
+        }
+      }, 650);
       return;
     }
     recognitionRef.current = recognition;
@@ -707,6 +746,7 @@ export function MicPanel({
 
   useEffect(() => {
     return () => {
+      window.clearTimeout(keywordStartTimerRef.current);
       stopWakeRecognition();
       stopMic();
     };
@@ -720,16 +760,24 @@ export function MicPanel({
 
   useEffect(() => {
     if (wakeListenSignal > 0) {
-      recognitionWantedRef.current = false;
-      void startLiveAudioRef.current();
+      stopWakeRecognition();
+      stopLiveAudio(false);
+      keywordStartTimerRef.current = window.setTimeout(() => {
+        void startLiveAudioRef.current();
+      }, 120);
     }
-  }, [wakeListenSignal]);
+  }, [stopLiveAudio, wakeListenSignal]);
 
   useEffect(() => {
     if (keywordListenSignal > 0) {
-      void startMic().finally(() => startWakeRecognitionRef.current());
+      stopWakeRecognition();
+      stopLiveAudio(false);
+      window.clearTimeout(keywordStartTimerRef.current);
+      keywordStartTimerRef.current = window.setTimeout(() => {
+        void startMic().finally(() => startWakeRecognitionRef.current());
+      }, 160);
     }
-  }, [keywordListenSignal, startMic]);
+  }, [keywordListenSignal, startMic, stopLiveAudio]);
 
   useEffect(() => {
     streamRef.current?.getAudioTracks().forEach((track) => {
