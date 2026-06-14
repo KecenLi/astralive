@@ -531,7 +531,7 @@ The MVP package built during the final round was:
 
 ```text
 D:\assist ai\dist\desktop\MODVII 0.1.0.exe
-SHA256 EBE8456C6915D6C1168A506F3074EE35FDF87E1AFCEE013808FA584106ACC8E9
+SHA256 239D02BDD4BF6319ADE41AA29BE671F748B8264A44D93E7FA1C2B838BBA813A4
 ```
 
 This binary is not committed. Rebuild it locally with `scripts\package.ps1`.
@@ -578,6 +578,17 @@ Architecture and implementation references used during development:
 These references were used for architecture, testing ideas, provider patterns,
 prompting conventions, and cost-observability design. MODVII implementation code
 uses its own module names and integration logic.
+
+## License
+
+The original MODVII source code in this repository is released under the MIT
+License; see `LICENSE`.
+
+Third-party dependencies, browser runtime files, model assets, Live2D assets,
+sample data, VAD/ONNX files, and any files retaining upstream notices remain
+under their own licenses and terms. In particular, Lisette is included for the
+current personal/non-commercial MVP configuration and should not be treated as
+MIT-licensed MODVII code.
 
 ## Known MVP Limitations
 
