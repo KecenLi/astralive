@@ -21,8 +21,16 @@
 
 - Claude verified `LOCAL_ASR_MODEL=large-v3` on `LOCAL_ASR_DEVICE=cuda` with Chinese initial prompt and beam search; Agent 0 integrated the missing packaged-runtime path support.
 - `LOCAL_ASR_MODEL_PATH` is now honored by the backend and passed to `scripts/local_whisper_worker.py` as an explicit model file. This avoids bundling the 3GB `large-v3.pt` into Git or the portable exe.
-- Current local `.env` points to `C:\Users\YHT\.cache\whisper\large-v3.pt`; `.env` remains ignored and must not be committed.
+- Current local `.env` points to `D:\assist ai\models\whisper\large-v3.pt`; `.env` remains ignored and must not be committed. `C:\Users\YHT\.cache\whisper` is now only a junction to the D-drive model folder for compatibility with older scripts.
 - Packaged behavior: Electron ships the worker script, while Whisper weights stay in the user cache or a configured model path. If the file is absent, the verifier and worker fail with a clear missing-model message instead of silently falling back.
 - Latest portable for this round: `D:\assist ai\dist\desktop\MODVII-0.1.0-asr-largev3-20260614-1754.exe`, SHA256 `DAA0E3B66A136361048CC38694319C908DC5BB4CF72A29C7B74719CDF4744E42`.
 - Latest packaged server exe SHA256: `92423D1E2ADDD911780E91A7F7A996316B951BBB2E6860ED2FE05D692E28AFB5`.
 - Validation before push this round: backend pytest/ruff, web vitest/build, local ASR large-v3 verifier, local whisper worker py_compile, server exe health smoke.
+
+## 2026-06-14 C Drive Cache Migration Round
+
+- Stopped stale MODVII, dev server, local ASR/TTS worker, and Electron builder processes before moving files.
+- Moved local Whisper checkpoints to `D:\assist ai\models\whisper` and updated ignored `.env` to `LOCAL_ASR_MODEL_PATH=D:\assist ai\models\whisper\large-v3.pt`.
+- Created a junction from `C:\Users\YHT\.cache\whisper` to `D:\assist ai\models\whisper`, so older commands that still use the default Whisper cache path do not redownload to C.
+- Set user-level cache roots to D drive: `PIP_CACHE_DIR`, `UV_CACHE_DIR`, `HF_HOME`, `HUGGINGFACE_HUB_CACHE`, `TRANSFORMERS_CACHE`, `MODELSCOPE_CACHE`, `TORCH_HOME`, `npm_config_cache`, `ELECTRON_CACHE`, and `ELECTRON_BUILDER_CACHE`.
+- Removed old project-related C-drive caches and temp directories: pip/npm/electron/electron-builder caches plus MODVII portable `3F*` and `modvii-*` temp folders.

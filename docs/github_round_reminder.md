@@ -93,7 +93,7 @@
 ## 2026-06-14 Local ASR / Packaged CosyVoice3 Round Notes
 
 - Local config switched to `ASR_PROVIDER=local_whisper`, `REALTIME_PROVIDER=none`, `TTS_PROVIDER=cosyvoice3`. `.env` stays local and must not be committed.
-- Local Whisper can now run `large-v3` on CUDA via ignored `.env` (`LOCAL_ASR_MODEL=large-v3`, `LOCAL_ASR_DEVICE=cuda`, `LOCAL_ASR_MODEL_PATH=C:\Users\YHT\.cache\whisper\large-v3.pt`). Do not commit the 3GB Whisper checkpoint; packaged exe should use the configured local model path or allow first-run download.
+- Local Whisper can now run `large-v3` on CUDA via ignored `.env` (`LOCAL_ASR_MODEL=large-v3`, `LOCAL_ASR_DEVICE=cuda`, `LOCAL_ASR_MODEL_PATH=D:\assist ai\models\whisper\large-v3.pt`). Do not commit the 3GB Whisper checkpoint; packaged exe should use the configured local model path or allow first-run download.
 - Packaged TTS root cause fixed: Electron now ships `resources/scripts/cosyvoice3_worker.py`, `cosyvoice3_synth.py`, and `local_whisper_worker.py`; server providers resolve scripts from packaged resources before failing.
 - Local ASR worker added with `openai-whisper` plus `imageio-ffmpeg` fallback. Current smoke on `data\cache\modvii-test-speech.wav`: `local_whisper` base model returned text in about `2.7-2.9s` standalone; in two-round WebSocket soak, ASR final after audio-final was about `0.40-0.57s` after prewarm.
 - CosyVoice3 voice is fixed through `COSYVOICE3_SEED=7327`; provider sends the seed to both one-shot and worker scripts.
