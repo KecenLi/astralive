@@ -2,6 +2,7 @@ param(
     [string]$RepoDir = "",
     [string]$ModelDir = "",
     [string]$TorchIndexUrl = "",
+    [ValidateSet("cpu", "cuda")][string]$Device = "cpu",
     [switch]$SkipRepoClone,
     [switch]$SkipDependencyInstall,
     [switch]$SkipModelDownload,
@@ -143,9 +144,15 @@ if (-not $SkipDependencyInstall) {
         Invoke-External -FilePath $Python -Arguments @("-m", "pip", "install", "torch", "torchaudio", "--index-url", $TorchIndexUrl)
     }
     $RequirementsPath = Join-Path $env:TEMP "modvii-cosyvoice3-requirements.txt"
-    Get-Content -Path (Join-Path $RepoDir "requirements.txt") |
-        Where-Object { $_ -notmatch "^\s*openai-whisper==" } |
-        Set-Content -Path $RequirementsPath -Encoding UTF8
+    $RequirementLines = Get-Content -Path (Join-Path $RepoDir "requirements.txt") |
+        Where-Object { $_ -notmatch "^\s*openai-whisper==" }
+    if ($TorchIndexUrl) {
+        $RequirementLines = $RequirementLines |
+            Where-Object { $_ -notmatch "^\s*torch==" } |
+            Where-Object { $_ -notmatch "^\s*torchaudio==" } |
+            Where-Object { $_ -notmatch "download\.pytorch\.org/whl/cu121" }
+    }
+    $RequirementLines | Set-Content -Path $RequirementsPath -Encoding UTF8
     Invoke-External -FilePath $Python -Arguments @("-m", "pip", "install", "-r", $RequirementsPath)
     if (-not $SkipWhisper) {
         Invoke-External -FilePath $Python -Arguments @("-m", "pip", "install", "setuptools<81")
@@ -200,7 +207,7 @@ if (-not $NoEnvWrite) {
         "COSYVOICE3_WORKER_SCRIPT" = (Join-Path $ProjectRoot "scripts\cosyvoice3_worker.py")
         "COSYVOICE3_SEED" = "7327"
         "COSYVOICE3_PROMPT_AUDIO" = (Join-Path $RepoDir "asset\zero_shot_prompt.wav")
-        "COSYVOICE3_DEVICE" = "cpu"
+        "COSYVOICE3_DEVICE" = $Device
         "COSYVOICE3_TIMEOUT_SECONDS" = "120"
     }
 }

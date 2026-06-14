@@ -9,6 +9,11 @@ $Blocked = @(
     "codex_multi_agent_ai_visual_assistant_windows.md"
 )
 
+$AllowedDocs = @(
+    "docs/cosyvoice3_setup.md",
+    "docs/github_round_reminder.md"
+)
+
 Push-Location $Root
 try {
     if (Get-Command git -ErrorAction SilentlyContinue) {
@@ -24,7 +29,7 @@ try {
         if (
             $Blocked -contains $Path -or
             $Path.EndsWith(".key") -or
-            $Path.StartsWith("docs/") -or
+            ($Path.StartsWith("docs/") -and -not ($AllowedDocs -contains $Path)) -or
             $Path.StartsWith("apps/web/public/live2d/")
         ) {
             throw "Blocked tracked path: $Path"

@@ -30,6 +30,8 @@ import {
 } from "./lib/events";
 import { wsClient } from "./lib/wsClient";
 
+const RESPONSE_AUDIO_DONE_TIMEOUT_MS = 90_000;
+
 interface SendUserTextOptions {
   keepConversation?: boolean;
   proactive?: boolean;
@@ -195,6 +197,7 @@ function MainApp() {
   const restartListenTimerRef = useRef(0);
   const reconnectTimerRef = useRef(0);
   const proactiveTimerRef = useRef(0);
+  const responseAudioDoneTimeoutRef = useRef(0);
   const reconnectAttemptsRef = useRef(0);
 
   const providerLabel = useMemo(
@@ -208,6 +211,7 @@ function MainApp() {
     audioTurnActiveRef.current = false;
     assistantAudioDoneRef.current = false;
     responseAudioTurnInProgressRef.current = false;
+    window.clearTimeout(responseAudioDoneTimeoutRef.current);
     voiceResponsePendingRef.current = false;
     setVoiceResponsePending(false);
     useAppStore.getState().setUserSpeechDraft("");
@@ -259,6 +263,7 @@ function MainApp() {
       }
       responseAudioTurnInProgressRef.current = false;
       assistantAudioDoneRef.current = false;
+      window.clearTimeout(responseAudioDoneTimeoutRef.current);
       voiceResponsePendingRef.current = false;
       setVoiceResponsePending(false);
       rearmContinuousListening(reason);
@@ -267,15 +272,25 @@ function MainApp() {
   );
 
   const markAssistantAudioExpected = useCallback(() => {
+    window.clearTimeout(responseAudioDoneTimeoutRef.current);
     assistantAudioDoneRef.current = false;
     responseAudioTurnInProgressRef.current = true;
-  }, []);
+    responseAudioDoneTimeoutRef.current = window.setTimeout(() => {
+      if (!responseAudioTurnInProgressRef.current) return;
+      console.warn(`MODVII assistant audio.done watchdog fired after ${RESPONSE_AUDIO_DONE_TIMEOUT_MS}ms`);
+      responseAudioTurnInProgressRef.current = false;
+      assistantAudioDoneRef.current = true;
+      markResponseFinished("assistant_audio_done_timeout");
+    }, RESPONSE_AUDIO_DONE_TIMEOUT_MS);
+  }, [markResponseFinished]);
 
   const markAssistantAudioStreamDone = useCallback(() => {
+    window.clearTimeout(responseAudioDoneTimeoutRef.current);
     responseAudioTurnInProgressRef.current = false;
   }, []);
 
   const handleAssistantAudioDone = useCallback(() => {
+    window.clearTimeout(responseAudioDoneTimeoutRef.current);
     responseAudioTurnInProgressRef.current = false;
     assistantAudioDoneRef.current = true;
     markResponseFinished("assistant_audio_done");
@@ -335,6 +350,7 @@ function MainApp() {
         socket.onclose = () => {
           if (disposed) return;
           useAppStore.getState().setConnection("idle");
+          window.clearTimeout(responseAudioDoneTimeoutRef.current);
           responseAudioTurnInProgressRef.current = false;
           voiceResponsePendingRef.current = false;
           setVoiceResponsePending(false);
@@ -352,6 +368,7 @@ function MainApp() {
     return () => {
       disposed = true;
       window.clearTimeout(reconnectTimerRef.current);
+      window.clearTimeout(responseAudioDoneTimeoutRef.current);
       assistantAudioPlayer.setLipSyncSink(null);
       assistantAudioPlayer.setIdleCallback(null);
       cleanup();
@@ -376,6 +393,7 @@ function MainApp() {
     assistantAudioPlayer.reset();
     assistantAudioDoneRef.current = false;
     responseAudioTurnInProgressRef.current = false;
+    window.clearTimeout(responseAudioDoneTimeoutRef.current);
     voiceResponsePendingRef.current = false;
     setVoiceResponsePending(false);
     const sent = wsClient.send(
@@ -431,6 +449,7 @@ function MainApp() {
     audioTurnActiveRef.current = false;
     assistantAudioDoneRef.current = false;
     responseAudioTurnInProgressRef.current = false;
+    window.clearTimeout(responseAudioDoneTimeoutRef.current);
     voiceResponsePendingRef.current = false;
     setVoiceResponsePending(false);
     setConversationActive(Boolean(options.keepConversation));
@@ -522,6 +541,7 @@ function MainApp() {
     if (sent && payload.is_final) {
       assistantAudioDoneRef.current = false;
       responseAudioTurnInProgressRef.current = false;
+      window.clearTimeout(responseAudioDoneTimeoutRef.current);
       markResponseStarted();
     }
     return sent;
@@ -532,6 +552,7 @@ function MainApp() {
       window.clearTimeout(restartListenTimerRef.current);
       window.clearTimeout(reconnectTimerRef.current);
       window.clearTimeout(proactiveTimerRef.current);
+      window.clearTimeout(responseAudioDoneTimeoutRef.current);
     };
   }, []);
 

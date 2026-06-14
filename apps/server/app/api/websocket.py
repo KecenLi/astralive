@@ -682,6 +682,24 @@ async def _run_dialogue_response(
     tts_task: asyncio.Task[None] | None = None
     sent_audio_chunks = 0
     tts_error: str | None = None
+    audio_done_sent = False
+    final_text = ""
+    audio_requested = False
+
+    async def send_dialogue_audio_done(*, cancelled: bool = False, error: str | None = None) -> None:
+        nonlocal audio_done_sent
+        if audio_done_sent or not (audio_requested or sent_audio_chunks):
+            return
+        audio_done_sent = True
+        payload = {
+            "source": "tts",
+            "chunks": sent_audio_chunks,
+            **({"fallback_text": final_text} if sent_audio_chunks == 0 and final_text else {}),
+            **({"cancelled": True} if cancelled else {}),
+            **({"error": error} if error else {}),
+        }
+        with suppress(WebSocketDisconnect, RuntimeError):
+            await _send(websocket, make_event("assistant.audio.done", session.session_id, payload), send_lock)
 
     async def run_tts_worker(queue: asyncio.Queue[tuple[str, str] | None]) -> None:
         nonlocal sent_audio_chunks, tts_error
@@ -733,9 +751,7 @@ async def _run_dialogue_response(
             tts_task = asyncio.create_task(run_tts_worker(tts_queue))
             tts_task.add_done_callback(_log_task_exception)
 
-        final_text = ""
         final_emotion = "neutral"
-        audio_requested = False
         saw_segment = False
 
         async for segment in dialogue.stream_reply(session, user_text):
@@ -797,13 +813,7 @@ async def _run_dialogue_response(
             if tts_task is not None:
                 await tts_task
             if audio_requested:
-                payload = {
-                    "source": "tts",
-                    "chunks": sent_audio_chunks,
-                    **({"fallback_text": final_text} if sent_audio_chunks == 0 and final_text else {}),
-                    **({"error": tts_error} if tts_error else {}),
-                }
-                await _send(websocket, make_event("assistant.audio.done", session.session_id, payload), send_lock)
+                await send_dialogue_audio_done(error=tts_error)
         session.response_in_progress = False
         session.cost_meter.last_latency_ms = int((time.perf_counter() - started) * 1000)
         await _send(
@@ -817,6 +827,7 @@ async def _run_dialogue_response(
             tts_task.cancel()
             with suppress(asyncio.CancelledError):
                 await tts_task
+        await send_dialogue_audio_done(cancelled=True)
         session.response_in_progress = False
         session.status = "listening"
         raise
@@ -829,6 +840,7 @@ async def _run_dialogue_response(
         session.response_in_progress = False
         session.status = "listening"
         await _send_error(websocket, session.session_id, "dialogue_failed", str(exc), send_lock)
+        await send_dialogue_audio_done(error=str(exc))
         await _send(
             websocket,
             make_event("server.session.state", session.session_id, _session_payload(session, settings)),

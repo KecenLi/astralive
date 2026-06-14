@@ -1,6 +1,6 @@
 # MODVII Fun-CosyVoice3 Local TTS Setup
 
-更新时间：2026-06-13
+更新时间：2026-06-14
 
 ## 选择
 
@@ -43,11 +43,13 @@ cd "D:\assist ai"
 .\scripts\setup-cosyvoice3.ps1 -NoEnvWrite
 ```
 
-如果需要手工安装 PyTorch CUDA 轮子，可以传：
+如果需要在 RTX 50 系 / Blackwell 上使用 GPU，请使用 CUDA 12.8 对应的 PyTorch 轮子，并把设备写成 `cuda`：
 
 ```powershell
-.\scripts\setup-cosyvoice3.ps1 -TorchIndexUrl "https://download.pytorch.org/whl/cu121"
+.\scripts\setup-cosyvoice3.ps1 -TorchIndexUrl "https://download.pytorch.org/whl/cu128" -Device cuda
 ```
+
+脚本会先安装指定 PyTorch / torchaudio，再过滤 CosyVoice requirements 里旧的 `torch==...`、`torchaudio==...` 和 cu121 index，避免 requirements 把 GPU 轮子降回旧版。
 
 ## 配置
 
@@ -60,7 +62,7 @@ COSYVOICE3_REPO_DIR=D:\assist ai\third_party\CosyVoice
 COSYVOICE3_MODEL_DIR=D:\assist ai\models\Fun-CosyVoice3-0.5B
 COSYVOICE3_SCRIPT=D:\assist ai\scripts\cosyvoice3_synth.py
 COSYVOICE3_PROMPT_AUDIO=D:\assist ai\third_party\CosyVoice\asset\zero_shot_prompt.wav
-COSYVOICE3_DEVICE=cpu
+COSYVOICE3_DEVICE=cuda
 COSYVOICE3_TIMEOUT_SECONDS=120
 ```
 
@@ -79,6 +81,8 @@ COSYVOICE3_TIMEOUT_SECONDS=120
 
 - 模型、CosyVoice 仓库、venv 都在 `.gitignore` 内，不进入公开仓库。
 - 官方 `CosyVoice-ttsfrd` 是可选资源；不安装时官方说明会使用 wetext。
-- 当前机器的 RTX 5080 Laptop 是 `sm_120`，CosyVoice requirements 固定的 PyTorch 2.3.1 CUDA 轮子不支持该架构，所以默认 `COSYVOICE3_DEVICE=cpu`。要用 GPU，需要先换成支持该架构的 PyTorch/CUDA 组合，再改成 `COSYVOICE3_DEVICE=cuda`。
+- 当前机器的 RTX 5080 Laptop 是 `sm_120`，CosyVoice requirements 固定的 PyTorch 2.3.1 / cu121 轮子不支持该架构。已验证 `torch 2.11.0+cu128` 可识别 `NVIDIA GeForce RTX 5080 Laptop GPU` 和 `sm_120`，本机 `.env` 应使用 `COSYVOICE3_DEVICE=cuda`。
+- 官方 PyTorch 本地安装页会生成当前稳定 CUDA 轮子的安装命令；旧版本安装页列出可用的历史 wheel index。MODVII 当前脚本使用 `https://download.pytorch.org/whl/cu128`。
+- MODVII 的 CosyVoice3 worker/synth 脚本会 patch CosyVoice 的 prompt WAV 读取路径，优先用 `soundfile`，并用 PCM16 WAV 写输出，避免新版 torchaudio 走 torchcodec/FFmpeg DLL 链路导致 Windows 上合成失败。
 - 默认 `COSYVOICE3_WORKER_ENABLED=true` 会启动常驻 worker，避免每轮重新加载模型。第一次合成仍会包含模型加载时间；第二轮以后应明显快于旧的单次脚本模式。
 - 如果 worker 异常，可临时设 `COSYVOICE3_WORKER_ENABLED=false` 回到旧的单次桥接脚本，便于排查环境问题。

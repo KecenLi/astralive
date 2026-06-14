@@ -114,3 +114,14 @@
 - Important risk handled: realtime providers are not app-level shared. ASR/TTS/LLM/Vision providers are shared through `ProviderContainer`; realtime providers remain per WebSocket session and are closed on disconnect.
 - Cost note: built-in Gemini 2.5 Flash prices are fallback display estimates only. Override with `COST_PRICE_TABLE_JSON` when using a paid provider route that needs accurate dollar display.
 - Validation before push this round: backend `ruff check app`, backend `pytest`, web `tsc -b`, web `vitest run`, package smoke, desktop interaction smoke, and public-tree guard.
+
+## 2026-06-14 Cancelled Audio / GPU TTS Round Notes
+
+- User-reported freeze root cause: sentence-level TTS opened the frontend response-audio gate, but `_run_dialogue_response` did not send `assistant.audio.done` when a slow TTS task was cancelled by a new utterance. Agent 0 fixed the backend cancel/error path and added a frontend watchdog fallback.
+- New regression: cancelling a dialogue response while TTS is sleeping must emit one `assistant.audio.done` with `cancelled: true`, then return session state to `listening`.
+- Local CosyVoice3 route: upgraded ignored local venv to CUDA 12.8 PyTorch and set ignored local `.env` to `COSYVOICE3_DEVICE=cuda`. Do not commit `.env` or the venv.
+- CosyVoice3 worker/synth now patch prompt WAV loading through `soundfile` and write PCM16 WAV directly, avoiding torchcodec/FFmpeg DLL failures with newer torchaudio on Windows.
+- Observed local TTS timing after fix: single verification call succeeded; same-provider two-call smoke showed cold first call about `19.2s` and hot second call about `2.23s` on this machine. Treat cold prewarm as important before demos.
+- Public tree guard now explicitly allows only the two already tracked safe docs: `docs/cosyvoice3_setup.md` and `docs/github_round_reminder.md`; all other ignored docs remain blocked from accidental publication.
+- Subagents used this round: none. Agent 0 owned backend/frontend/CosyVoice script changes, validation, commit, and push.
+- Validation before push this round: backend `ruff check app`, backend `pytest`, web `tsc -b`, web `vitest run`, local CosyVoice3 TTS, package smoke, desktop interaction smoke, and public-tree guard.

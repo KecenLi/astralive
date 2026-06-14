@@ -3,7 +3,62 @@ import json
 import os
 import random
 import sys
+import wave
 from pathlib import Path
+
+
+def load_wav_for_cosyvoice(path: str | Path, target_sr: int, min_sr: int = 16000):
+    import numpy as np
+    import torch
+    import torchaudio.functional as torchaudio_functional
+
+    path = Path(path)
+    try:
+        import soundfile as sf
+
+        speech, sample_rate = sf.read(str(path), dtype="float32", always_2d=True)
+        speech = speech.mean(axis=1)
+    except Exception:
+        with wave.open(str(path), "rb") as wav:
+            channels = wav.getnchannels()
+            sample_width = wav.getsampwidth()
+            sample_rate = wav.getframerate()
+            frame_count = wav.getnframes()
+            frames = wav.readframes(frame_count)
+
+        if sample_width != 2:
+            raise ValueError(f"CosyVoice3 prompt audio must be readable WAV audio: {path}")
+        speech = np.frombuffer(frames, dtype="<i2").astype("float32") / 32768.0
+        if channels > 1:
+            speech = speech.reshape(-1, channels).mean(axis=1)
+    if sample_rate < min_sr:
+        raise ValueError(f"CosyVoice3 prompt audio sample rate {sample_rate} must be at least {min_sr}: {path}")
+
+    speech_tensor = torch.from_numpy(np.asarray(speech, dtype="float32")).unsqueeze(0)
+    if sample_rate != target_sr:
+        speech_tensor = torchaudio_functional.resample(speech_tensor, sample_rate, target_sr)
+    return speech_tensor
+
+
+def patch_cosyvoice_wav_loader() -> None:
+    import cosyvoice.cli.frontend as frontend
+    import cosyvoice.utils.file_utils as file_utils
+
+    file_utils.load_wav = load_wav_for_cosyvoice
+    frontend.load_wav = load_wav_for_cosyvoice
+
+
+def save_wav_pcm16(path: Path, audio, sample_rate: int) -> None:
+    import numpy as np
+
+    mono = audio.detach().cpu().squeeze(0).clamp(-1.0, 1.0).numpy()
+    pcm = (mono * 32767.0).astype(np.dtype("<i2"), copy=False)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(pcm.tobytes())
 
 
 def main() -> int:
@@ -39,8 +94,9 @@ def main() -> int:
     sys.path.insert(0, str(repo_dir / "third_party" / "Matcha-TTS"))
 
     import torch
-    import torchaudio
     from cosyvoice.cli.cosyvoice import AutoModel
+
+    patch_cosyvoice_wav_loader()
 
     random.seed(seed)
     try:
@@ -62,14 +118,7 @@ def main() -> int:
     if not chunks:
         raise RuntimeError("CosyVoice3 returned no tts_speech chunks.")
     audio = (torch.cat(chunks, dim=1) if len(chunks) > 1 else chunks[0]).clamp(-1.0, 1.0)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    torchaudio.save(
-        str(output_path),
-        audio,
-        model.sample_rate,
-        encoding="PCM_S",
-        bits_per_sample=16,
-    )
+    save_wav_pcm16(output_path, audio, model.sample_rate)
     print(json.dumps({"sample_rate": model.sample_rate, "chunks": len(chunks)}, ensure_ascii=False))
     return 0
 

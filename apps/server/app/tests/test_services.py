@@ -12,6 +12,7 @@ from app.api.websocket import (
     _handle_realtime_audio_chunk,
     _next_realtime_stream_event,
     _realtime_tts_fallback_text,
+    _run_dialogue_response,
 )
 from app.config import Settings
 from app.contracts.events import EventEnvelope
@@ -871,6 +872,18 @@ class StubStreamingAudioService:
         return ASRResult(text="备用识别文本", confidence=0.66, is_final=True)
 
 
+class SlowTTSAudioService(StubStreamingAudioService):
+    def __init__(self) -> None:
+        super().__init__(OrderSensitiveRealtimeStream())
+        self.started = asyncio.Event()
+
+    async def synthesize(self, text: str, emotion: str) -> TTSResult:
+        self.synthesize_calls.append((text, emotion))
+        self.started.set()
+        await asyncio.sleep(60)
+        return TTSResult(audio_base64="AAAA")
+
+
 class AsrOnlyRealtimeStream(OrderSensitiveRealtimeStream):
     async def receive(self):
         await self.finished.wait()
@@ -1082,6 +1095,42 @@ async def test_realtime_asr_only_result_falls_back_to_dialogue_tts() -> None:
     assert "assistant.text.final" in event_types
     assert "assistant.audio.chunk" in event_types
     assert audio_done_events[-1]["payload"]["source"] == "tts"
+
+
+async def test_cancelled_dialogue_response_sends_audio_done_to_unlock_client_gate() -> None:
+    websocket = StubWebSocket()
+    session = SessionState(session_id="test_session")
+    settings = Settings(llm_provider="mock", tts_provider="vertex_ai")
+    send_lock = asyncio.Lock()
+    audio = SlowTTSAudioService()
+    dialogue = DialogueService(ProviderRegistry(settings).llm(), settings)
+    avatar = AvatarService()
+
+    task = asyncio.create_task(
+        _run_dialogue_response(
+            websocket,  # type: ignore[arg-type]
+            session,
+            dialogue,
+            audio,  # type: ignore[arg-type]
+            avatar,
+            settings,
+            "小七，随便回复一句。",
+            time.perf_counter(),
+            send_lock,
+        )
+    )
+    await asyncio.wait_for(audio.started.wait(), timeout=1)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    audio_done_events = [event for event in websocket.events if event["type"] == "assistant.audio.done"]
+    assert audio_done_events
+    assert audio_done_events[-1]["payload"]["source"] == "tts"
+    assert audio_done_events[-1]["payload"]["cancelled"] is True
+    assert session.response_in_progress is False
+    assert session.status == "listening"
 
 
 async def test_realtime_text_without_audio_falls_back_to_tts() -> None:
