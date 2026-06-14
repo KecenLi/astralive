@@ -6,9 +6,11 @@ gemini_key.txt
 api_key.txt
 *.key
 token
-codex_multi_agent_ai_visual_assistant_windows.md
-README.md
+# Public docs policy: GitHub should expose one large root README only.
+*.md
+!/README.md
 docs/
+plans/
 .installers/
 
 # Python
