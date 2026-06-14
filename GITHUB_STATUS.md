@@ -32,7 +32,8 @@
 - Continuous listening fix: if Electron lacks native `SpeechRecognition`, the keyword-listen fallback no longer runs TEN VAD only once. On no-speech timeout it automatically restarts while conversation mode is enabled.
 - Rearm race fix: keyword recognition restart no longer trusts stale React `recognitionActive` state, clears old recognition/VAD instances before restart, and retries if the browser reports recognition is already starting.
 - Validation before push this round: `npm --prefix apps/web test -- --run` passed with 53 tests; `npm --prefix apps/web run build` passed.
-- Packaging note: the currently running `D:\assist ai\dist\desktop\MODVII 0.1.0.exe` is still the old packaged build and will not include this round until it is closed and rebuilt.
+- Latest portable for this round, built without overwriting the currently running old portable: `D:\assist ai\dist\desktop\MODVII-0.1.0-listeningfix-20260614-2112.exe`, timestamp `2026-06-14 21:10:30 +0800`, SHA256 `B9C1FD65CF69F6C97F8A303A373C1ACF8DA9F376517256F2FC28B035096038B1`.
+- Packaging note: the currently running `D:\assist ai\dist\desktop\MODVII 0.1.0.exe` is still the old packaged build. Use the `listeningfix` portable above for this round, or close MODVII and rebuild the canonical filename later.
 
 ## 2026-06-14 Visual Timeout / Manual Capture Round
 
