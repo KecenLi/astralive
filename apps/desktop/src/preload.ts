@@ -28,6 +28,7 @@ contextBridge.exposeInMainWorld("modvii", {
     show: () => ipcRenderer.invoke("pet:show"),
     hide: () => ipcRenderer.invoke("pet:hide"),
     toggle: () => ipcRenderer.invoke("pet:toggle"),
+    openMain: () => ipcRenderer.invoke("pet:openMain"),
     notify: (payload: { text?: string; prompt?: string }) => ipcRenderer.invoke("pet:notify", payload),
     acceptProactive: (payload: { text?: string; prompt?: string }) =>
       ipcRenderer.invoke("pet:acceptProactive", payload),

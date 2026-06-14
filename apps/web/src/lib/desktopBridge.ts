@@ -38,6 +38,7 @@ export interface ModviiDesktopBridge {
     show: () => Promise<{ visible: boolean }>;
     hide: () => Promise<{ visible: boolean }>;
     toggle: () => Promise<{ visible: boolean }>;
+    openMain?: () => Promise<{ opened: boolean }>;
     notify?: (payload: { text?: string; prompt?: string }) => Promise<{ visible: boolean }>;
     acceptProactive?: (payload: { text?: string; prompt?: string }) => Promise<boolean>;
     onNotify?: (handler: (payload: { text?: string; prompt?: string }) => void) => () => void;

@@ -598,6 +598,15 @@ function registerIpc() {
     }
     return true;
   });
+  ipcMain.handle("pet:openMain", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+      return { opened: true };
+    }
+    return { opened: false };
+  });
 }
 
 const gotLock = app.requestSingleInstanceLock();

@@ -1,5 +1,5 @@
 import { MessageCircle, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import { describeLive2DError, Live2DAvatarController } from "../../features/avatar/avatarController";
 import { useDesktopSettings } from "../../hooks/useDesktopSettings";
@@ -128,8 +128,19 @@ export function DesktopPet() {
     void window.modvii?.pet.hide();
   }
 
+  function openMain(event: MouseEvent) {
+    // Right-clicking the pet opens (shows/focuses) the main MODVII window.
+    event.preventDefault();
+    void window.modvii?.pet.openMain?.();
+  }
+
   return (
-    <main className="pet-root" aria-label="MODVII 桌宠" data-testid="desktop-pet">
+    <main
+      className="pet-root"
+      aria-label="MODVII 桌宠"
+      data-testid="desktop-pet"
+      onContextMenu={openMain}
+    >
       <div className="pet-drag-handle" aria-hidden="true" />
       <button className="pet-close" type="button" title="隐藏桌宠" onClick={hidePet}>
         <X size={16} />
